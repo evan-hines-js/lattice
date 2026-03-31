@@ -362,6 +362,10 @@ impl AgentRegistry {
         agent.connected = false;
         agent.disconnected_at = Some(Instant::now());
 
+        // Clear teardown guard so a delete-recreate-delete cycle can proceed
+        // without waiting for the 600s TTL to expire.
+        self.teardown_in_progress.remove(&agent.cluster_name);
+
         if let Some((_, request_ids)) = self.pending_by_cluster.remove(&agent.cluster_name) {
             for id in &request_ids {
                 self.pending_k8s_responses.remove(id);
@@ -1412,6 +1416,23 @@ mod tests {
             .insert("test-cluster".to_string(), stale_time);
 
         // start_teardown should clear the stale guard and succeed
+        assert!(registry.start_teardown("test-cluster"));
+    }
+
+    #[test]
+    fn test_disconnect_clears_teardown_guard() {
+        let registry = AgentRegistry::new();
+        let (conn, _rx) = create_test_connection("test-cluster");
+        registry.register(conn);
+
+        // Start a teardown — guard is set
+        assert!(registry.start_teardown("test-cluster"));
+        assert!(!registry.start_teardown("test-cluster")); // blocked
+
+        // Disconnect the agent — guard should be cleared
+        registry.unregister("test-cluster", 0);
+
+        // Now a new teardown should succeed (delete-recreate-delete cycle)
         assert!(registry.start_teardown("test-cluster"));
     }
 

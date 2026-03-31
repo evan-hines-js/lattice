@@ -21,6 +21,9 @@ async fn test_media_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    super::super::helpers::setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     super::super::media_server_e2e::run_media_server_test(&resolved.kubeconfig)
         .await
         .unwrap();

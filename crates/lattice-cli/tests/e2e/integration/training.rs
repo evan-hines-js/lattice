@@ -178,7 +178,6 @@ pub async fn run_pytorch_training_tests(kubeconfig: &str) -> Result<(), String> 
 
     let diag = DiagnosticContext::new(kubeconfig, PYTORCH_NAMESPACE);
     with_diagnostics(&diag, "PyTorch Training", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         test_pytorch_distributed_training(kubeconfig).await?;
 
         info!("\n========================================");
@@ -198,6 +197,9 @@ async fn test_pytorch_training_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_pytorch_training_tests(&resolved.kubeconfig)
         .await
         .unwrap();

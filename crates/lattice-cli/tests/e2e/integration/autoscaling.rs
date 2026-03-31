@@ -210,14 +210,29 @@ fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
 ///
 /// Runs the CPU-based test and the Prometheus-based test sequentially.
 pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
-    let diag = DiagnosticContext::new(kubeconfig, AUTOSCALING_NAMESPACE);
-    with_diagnostics(&diag, "Autoscaling", || async {
-        run_cpu_autoscaling_test(kubeconfig).await?;
-        run_prometheus_autoscaling_test(kubeconfig).await?;
-        info!("[Integration/Autoscaling] All autoscaling tests passed!");
-        Ok(())
-    })
-    .await
+    // CPU and Prometheus tests use different namespaces — run in parallel.
+    let kc1 = kubeconfig.to_string();
+    let kc2 = kubeconfig.to_string();
+    let (cpu_result, prom_result) = tokio::join!(
+        async {
+            let diag = DiagnosticContext::new(&kc1, AUTOSCALING_NAMESPACE);
+            with_diagnostics(&diag, "Autoscaling/CPU", || {
+                run_cpu_autoscaling_test(&kc1)
+            })
+            .await
+        },
+        async {
+            let diag = DiagnosticContext::new(&kc2, PROM_NAMESPACE);
+            with_diagnostics(&diag, "Autoscaling/Prom", || {
+                run_prometheus_autoscaling_test(&kc2)
+            })
+            .await
+        },
+    );
+    cpu_result?;
+    prom_result?;
+    info!("[Integration/Autoscaling] All autoscaling tests passed!");
+    Ok(())
 }
 
 /// CPU-based autoscaling test:
@@ -228,7 +243,6 @@ async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
     info!("[Integration/Autoscaling/CPU] Starting CPU autoscaling test...");
 
     ensure_fresh_namespace(kubeconfig, AUTOSCALING_NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     info!("[Integration/Autoscaling/CPU] Deploying cpu-burner service...");
     let service = build_cpu_burner_service();
@@ -277,7 +291,6 @@ async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String>
     info!("[Integration/Autoscaling/Prom] Starting Prometheus autoscaling test...");
 
     ensure_fresh_namespace(kubeconfig, PROM_NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     info!("[Integration/Autoscaling/Prom] Deploying metrics-server service...");
     let service = build_metrics_server_service();
@@ -519,5 +532,8 @@ async fn test_autoscaling_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_autoscaling_tests(&resolved.kubeconfig).await.unwrap();
 }

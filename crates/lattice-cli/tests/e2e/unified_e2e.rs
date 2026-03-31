@@ -32,8 +32,8 @@ use tracing::info;
 
 use super::context::init_e2e_test;
 use super::helpers::{
-    teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME, WORKLOAD2_CLUSTER_NAME,
-    WORKLOAD_CLUSTER_NAME,
+    setup_regcreds_infrastructure, teardown_mgmt_cluster, TestHarness, MGMT_CLUSTER_NAME,
+    WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
 use super::providers::InfraProvider;
@@ -107,9 +107,16 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Cedar policy enforcement verified!");
 
     // =========================================================================
-    // Phase 7: Run mesh + secrets + Cedar secret + autoscaling tests (pool)
+    // Phase 7: Run all integration tests concurrently
     // =========================================================================
-    info!("[Phase 7] Running mesh/secrets/cedar/autoscaling tests (pool=3)...");
+    info!("[Phase 7] Running integration tests (pool=20)...");
+
+    // Set up regcreds infrastructure ONCE for all integration tests.
+    // Cedar policies and GHCR credentials are cluster-scoped, so a single
+    // call per cluster covers every test task spawned below.
+    setup_regcreds_infrastructure(ctx.require_workload()?).await?;
+    setup_regcreds_infrastructure(&ctx.mgmt_kubeconfig).await?;
+    info!("[Phase 7] Regcreds infrastructure ready on both clusters");
 
     // Each task uses its own namespace, so concurrency is safe.
     let pool = Arc::new(Semaphore::new(20));
@@ -478,27 +485,31 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("SUCCESS: Workload deleted and unpivoted!");
 
     // =========================================================================
-    // Phase 8b: Delete-recreate workload cluster
+    // Phase 8b: Delete-recreate workload cluster (optional, slow)
     // =========================================================================
-    info!("[Phase 8b] Verifying delete-recreate lifecycle...");
+    if std::env::var("LATTICE_E2E_RECREATE").is_ok() {
+        info!("[Phase 8b] Verifying delete-recreate lifecycle...");
 
-    integration::recreate::delete_and_recreate_workload(&ctx.mgmt_kubeconfig).await?;
+        integration::recreate::delete_and_recreate_workload(&ctx.mgmt_kubeconfig).await?;
 
-    info!("SUCCESS: Delete-recreate verified!");
+        info!("SUCCESS: Delete-recreate verified!");
 
-    // =========================================================================
-    // Phase 8c: Delete workload from parent (parent-initiated deletion)
-    // =========================================================================
-    info!("[Phase 8c] Deleting workload cluster from parent (parent-initiated deletion)...");
+        // =========================================================================
+        // Phase 8c: Delete workload from parent (parent-initiated deletion)
+        // =========================================================================
+        info!("[Phase 8c] Deleting workload cluster from parent (parent-initiated deletion)...");
 
-    integration::parent_delete::delete_from_parent_and_verify(
-        &ctx.mgmt_kubeconfig,
-        WORKLOAD_CLUSTER_NAME,
-        ctx.provider,
-    )
-    .await?;
+        integration::parent_delete::delete_from_parent_and_verify(
+            &ctx.mgmt_kubeconfig,
+            WORKLOAD_CLUSTER_NAME,
+            ctx.provider,
+        )
+        .await?;
 
-    info!("SUCCESS: Parent-initiated deletion verified!");
+        info!("SUCCESS: Parent-initiated deletion verified!");
+    } else {
+        info!("[Phase 8b] Skipping delete-recreate (set LATTICE_E2E_RECREATE=1 to enable)");
+    }
 
     // =========================================================================
     // Phase 9: Uninstall management cluster

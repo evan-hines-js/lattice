@@ -83,5 +83,8 @@ async fn test_mesh_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    super::super::helpers::setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_mesh_tests(&resolved.kubeconfig).await.unwrap();
 }

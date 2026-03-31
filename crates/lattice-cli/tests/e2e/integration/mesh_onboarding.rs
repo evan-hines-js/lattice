@@ -291,7 +291,6 @@ async fn deploy_services(kubeconfig: &str) -> Result<(), String> {
     info!("[MeshOnboard] Deploying mesh onboarding test stack...");
 
     ensure_fresh_namespace(kubeconfig, NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Seed a synced imagePullSecret for the external deployment.
     // In real life this would come from ESO; here we create it directly from the
@@ -439,6 +438,9 @@ async fn test_mesh_onboarding_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_mesh_onboarding_tests(&resolved.kubeconfig)
         .await
         .unwrap();

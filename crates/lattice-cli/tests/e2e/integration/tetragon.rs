@@ -1056,7 +1056,6 @@ pub async fn run_tetragon_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT);
     with_diagnostics(&diag, "Tetragon", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
         wait_for_no_cedar_policies_with_label(
             kubeconfig,
@@ -1112,5 +1111,8 @@ async fn test_tetragon_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_tetragon_tests(&resolved.kubeconfig).await.unwrap();
 }

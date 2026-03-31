@@ -542,7 +542,6 @@ pub async fn run_topology_tests(kubeconfig: &str) -> Result<(), String> {
         test_node_topology_labels(kubeconfig).await?;
         test_topology_discovery_configmap(kubeconfig).await?;
 
-        setup_regcreds_infrastructure(kubeconfig).await?;
         run_topology_test_sequence(kubeconfig).await?;
         delete_namespace(kubeconfig, TOPOLOGY_NS).await;
         Ok(())
@@ -592,5 +591,8 @@ async fn test_topology_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_topology_tests(&resolved.kubeconfig).await.unwrap();
 }

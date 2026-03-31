@@ -383,7 +383,6 @@ pub async fn run_workload_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, WORKLOAD_NS);
     with_diagnostics(&diag, "Workload", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         run_workload_test_sequence(kubeconfig).await?;
         delete_namespace(kubeconfig, WORKLOAD_NS).await;
         Ok(())
@@ -413,5 +412,8 @@ async fn test_workload_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_workload_tests(&resolved.kubeconfig).await.unwrap();
 }

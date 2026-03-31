@@ -419,7 +419,6 @@ pub async fn run_job_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, JOB_NAMESPACE);
     with_diagnostics(&diag, "Job", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         run_job_test_sequence(kubeconfig).await?;
         delete_namespace(kubeconfig, JOB_NAMESPACE).await;
         Ok(())
@@ -454,5 +453,8 @@ async fn test_job_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_job_tests(&resolved.kubeconfig).await.unwrap();
 }

@@ -22,7 +22,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
 
 use super::helpers::{
     apply_cedar_policies_batch, apply_mesh_wildcard_inbound_policy, client_from_kubeconfig,
-    create_with_retry, delete_namespace, ensure_fresh_namespace, setup_regcreds_infrastructure,
+    create_with_retry, delete_namespace, ensure_fresh_namespace,
     with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
@@ -117,7 +117,6 @@ fn create_rm_delete_target() -> LatticeService {
 
 async fn deploy_removal_services(kubeconfig: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig, NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Cedar policies: wildcard inbound for rm-wildcard + external endpoint for rm-client
     let mut cedar_policies = Vec::new();

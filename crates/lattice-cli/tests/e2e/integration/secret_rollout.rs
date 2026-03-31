@@ -17,8 +17,6 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
-
 use kube::Api;
 use lattice_common::crd::LatticeService;
 use lattice_common::LOCAL_WEBHOOK_STORE_NAME;
@@ -43,8 +41,6 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, TEST_NAMESPACE);
     with_diagnostics(&diag, "SecretRollout", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
-
         // Seed initial secret
         let mut initial_data = std::collections::BTreeMap::new();
         initial_data.insert("vpn-user".to_string(), "alice".to_string());
@@ -171,9 +167,85 @@ pub async fn run_secret_rollout_tests(kubeconfig: &str) -> Result<(), String> {
             // Re-seed with identical content
             seed_local_secret(kubeconfig, "local-rollout-vpn-creds", &rotated_data).await?;
 
-            // Wait past one reconcile cycle (60s) to verify nothing changed
-            info!("[SecretRollout] Waiting 70s to verify no spurious rollout...");
-            tokio::time::sleep(Duration::from_secs(70)).await;
+            // Force ESO to re-sync so the controller sees the (identical) secret data
+            force_eso_resync(kubeconfig, TEST_NAMESPACE, "rollout-svc-vpn-creds").await?;
+
+            // Patch a no-op annotation to bump .metadata.generation, forcing a reconcile
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string();
+            run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "annotate",
+                "latticeservice",
+                "rollout-svc",
+                "-n",
+                TEST_NAMESPACE,
+                &format!("lattice.dev/test-touch={}", timestamp),
+                "--overwrite",
+            ])
+            .await?;
+
+            // Read the current generation after the annotation patch
+            let generation = run_kubectl(&[
+                "--kubeconfig",
+                kubeconfig,
+                "get",
+                "latticeservice",
+                "rollout-svc",
+                "-n",
+                TEST_NAMESPACE,
+                "-o",
+                "jsonpath={.metadata.generation}",
+            ])
+            .await?;
+            let generation: i64 = generation
+                .trim()
+                .parse()
+                .map_err(|e| format!("parse generation: {e}"))?;
+
+            info!(
+                "[SecretRollout] Patched annotation, generation={}. Waiting for controller to reconcile...",
+                generation
+            );
+
+            // Wait for observedGeneration >= generation, proving the controller processed this version
+            let kc_owned = kubeconfig.to_string();
+            let gen = generation;
+            wait_for_condition(
+                "observedGeneration to catch up after annotation patch",
+                DEFAULT_TIMEOUT,
+                POLL_INTERVAL,
+                move || {
+                    let kc = kc_owned.clone();
+                    async move {
+                        let observed = run_kubectl(&[
+                            "--kubeconfig",
+                            &kc,
+                            "get",
+                            "latticeservice",
+                            "rollout-svc",
+                            "-n",
+                            TEST_NAMESPACE,
+                            "-o",
+                            "jsonpath={.status.observedGeneration}",
+                        ])
+                        .await
+                        .map_err(|e| format!("get observedGeneration: {e}"))?;
+                        let observed: i64 = observed
+                            .trim()
+                            .parse()
+                            .unwrap_or(0);
+                        Ok(observed >= gen)
+                    }
+                },
+            )
+            .await?;
+
+            info!("[SecretRollout] Controller reconciled. Verifying no spurious rollout...");
 
             let hash_after =
                 get_config_hash_annotation(kubeconfig, TEST_NAMESPACE, "rollout-svc").await?;
@@ -504,6 +576,9 @@ async fn test_secret_rollout_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_secret_rollout_tests(&resolved.kubeconfig)
         .await
         .unwrap();

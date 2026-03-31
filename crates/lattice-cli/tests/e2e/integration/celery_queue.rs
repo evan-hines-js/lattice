@@ -227,7 +227,6 @@ async fn deploy_services(kubeconfig: &str) -> Result<(), String> {
     info!("[Celery] Deploying 5-service task queue stack...");
 
     ensure_fresh_namespace(kubeconfig, NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Label namespace for Istio ambient mesh
     run_kubectl(&[
@@ -460,5 +459,8 @@ async fn test_celery_queue_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_celery_queue_tests(&resolved.kubeconfig).await.unwrap();
 }

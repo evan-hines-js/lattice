@@ -368,8 +368,8 @@ async fn handle_cluster_deletion(
 
     // NOTE: We intentionally do NOT call finish_teardown() here.
     // The teardown guard stays in place to prevent duplicate ClusterDeleting
-    // messages from re-importing CAPI objects. The guard is cleared when
-    // the agent disconnects (unregister).
+    // messages from re-importing CAPI objects. The guard is cleared in
+    // disconnect_agent() when the agent stream ends.
     info!(cluster = %cluster, "Teardown initiated - controller will handle cleanup");
 }
 

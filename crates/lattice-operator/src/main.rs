@@ -278,16 +278,15 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
-                    match setup_cell_infra(
-                        &client,
-                        &self_cluster_name,
+                    let cell = CellInfraConfig {
+                        client: client.clone(),
+                        self_cluster_name: self_cluster_name.clone(),
                         cedar,
-                        &config,
-                        servers.clone(),
+                        servers: servers.clone(),
                         route_update_tx,
                         all_routes_rx,
-                    )
-                    .await
+                    };
+                    match setup_cell_infra(&config, cell).await
                     {
                         Ok(agent_token) => {
                             let _guard = CellInfraGuard {
@@ -621,6 +620,16 @@ impl Drop for CellInfraGuard {
     }
 }
 
+/// Shared parameters for cell infrastructure setup and activation watching.
+struct CellInfraConfig {
+    client: kube::Client,
+    self_cluster_name: Option<String>,
+    cedar: Arc<PolicyEngine>,
+    servers: Arc<ParentServers<DefaultManifestGenerator>>,
+    route_update_tx: Option<lattice_cell::route_reconciler::RouteUpdateSender>,
+    all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+}
+
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
 ///
 /// Uses the caller-provided `ParentServers` (shared across lease re-acquisitions).
@@ -634,15 +643,18 @@ impl Drop for CellInfraGuard {
 ///
 /// Returns the agent cancellation token (caller holds it in CellInfraGuard).
 async fn setup_cell_infra(
-    client: &kube::Client,
-    self_cluster_name: &Option<String>,
-    cedar: Arc<PolicyEngine>,
     config: &SharedConfig,
-    servers: Arc<ParentServers<DefaultManifestGenerator>>,
-    route_update_tx: Option<lattice_cell::route_reconciler::RouteUpdateSender>,
-    all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+    cell: CellInfraConfig,
 ) -> anyhow::Result<CancellationToken> {
     let is_bootstrap = config.is_bootstrap_cluster;
+    let CellInfraConfig {
+        client,
+        self_cluster_name,
+        cedar,
+        servers,
+        route_update_tx,
+        all_routes_rx,
+    } = cell;
 
     // Start agent connection to parent (if we have one)
     let agent_token = CancellationToken::new();
@@ -664,15 +676,15 @@ async fn setup_cell_infra(
         });
     }
 
-    let is_cell = is_bootstrap || has_parent_connection(client).await;
+    let is_cell = is_bootstrap || has_parent_connection(&client).await;
 
     if is_cell {
-        let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
+        let extra_sans = get_cell_server_sans(&client, &self_cluster_name, is_bootstrap).await;
         let tx = route_update_tx.expect("route_update_tx required for cell");
         activate_cell_services(
-            client,
+            &client,
             &servers,
-            self_cluster_name,
+            &self_cluster_name,
             CellActivationParams {
                 extra_sans,
                 cedar,
@@ -683,13 +695,17 @@ async fn setup_cell_infra(
         .await?;
     } else if let Some(ref name) = self_cluster_name {
         tracing::info!("Leaf cluster, cell servers deferred until parent_config is set");
-        let client = client.clone();
-        let name = name.clone();
-        let servers = servers.clone();
         let route_update_tx = route_update_tx.expect("route_update_tx required for leaf");
+        let watcher_config = CellInfraConfig {
+            client,
+            self_cluster_name: Some(name.clone()),
+            cedar,
+            servers,
+            route_update_tx: Some(route_update_tx),
+            all_routes_rx,
+        };
         tokio::spawn(async move {
-            cell_activation_watcher(client, name, servers, cedar, route_update_tx, all_routes_rx)
-                .await;
+            cell_activation_watcher(watcher_config).await;
         });
     };
 
@@ -739,14 +755,17 @@ async fn activate_cell_services(
 }
 
 /// Background task that watches for `parent_config` to appear on the self-cluster CRD.
-async fn cell_activation_watcher(
-    client: kube::Client,
-    self_cluster_name: String,
-    servers: Arc<ParentServers<DefaultManifestGenerator>>,
-    cedar: Arc<PolicyEngine>,
-    route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
-    all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
-) {
+async fn cell_activation_watcher(cell: CellInfraConfig) {
+    let CellInfraConfig {
+        client,
+        self_cluster_name,
+        cedar,
+        servers,
+        route_update_tx,
+        all_routes_rx,
+    } = cell;
+    let self_cluster_name = self_cluster_name.expect("self_cluster_name required for cell_activation_watcher");
+    let route_update_tx = route_update_tx.expect("route_update_tx required for cell_activation_watcher");
     use lattice_operator::startup::{
         discover_cell_host, ensure_cell_service_exists, LOAD_BALANCER_POLL_INTERVAL,
     };

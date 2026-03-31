@@ -152,7 +152,6 @@ pub async fn run_observability_tests(kubeconfig: &str) -> Result<(), String> {
     let diag = DiagnosticContext::new(kubeconfig, OBSERVABILITY_NAMESPACE);
     with_diagnostics(&diag, "Observability", || async {
         ensure_fresh_namespace(kubeconfig, OBSERVABILITY_NAMESPACE).await?;
-        setup_regcreds_infrastructure(kubeconfig).await?;
 
         let svc = build_observability_service();
 
@@ -312,5 +311,8 @@ async fn test_observability_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_observability_tests(&resolved.kubeconfig).await.unwrap();
 }

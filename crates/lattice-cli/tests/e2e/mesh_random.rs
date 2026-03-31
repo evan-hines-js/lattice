@@ -19,7 +19,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
-    ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, with_diagnostics,
+    ensure_fresh_namespace, run_kubectl, with_diagnostics,
     CedarPolicySpec, DiagnosticContext,
 };
 use super::mesh_fixtures::{
@@ -527,10 +527,6 @@ impl RandomMesh {
 
 async fn deploy_random_mesh(mesh: &RandomMesh, kubeconfig_path: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig_path, RANDOM_MESH_NAMESPACE).await?;
-
-    // Set up regcreds infrastructure — all services need ghcr-creds for image pulls
-    info!("[Random Mesh] Setting up regcreds infrastructure...");
-    setup_regcreds_infrastructure(kubeconfig_path).await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
 

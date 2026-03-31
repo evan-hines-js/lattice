@@ -392,8 +392,6 @@ pub async fn run_cedar_secret_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, NS_DEFAULT_DENY);
     with_diagnostics(&diag, "Cedar Secrets", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
-
         delete_cedar_policies_by_label(kubeconfig, &format!("lattice.dev/test={TEST_LABEL}")).await;
         wait_for_no_cedar_policies_with_label(
             kubeconfig,
@@ -444,5 +442,8 @@ async fn test_cedar_secret_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_cedar_secret_tests(&resolved.kubeconfig).await.unwrap();
 }

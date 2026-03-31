@@ -1391,7 +1391,6 @@ pub async fn run_model_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, MODEL_NAMESPACE);
     with_diagnostics(&diag, "Model", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         run_model_test_sequence(kubeconfig).await?;
         cleanup_inference_tester(kubeconfig).await;
         delete_namespace(kubeconfig, INFERENCE_TESTER_NAMESPACE).await;
@@ -1454,5 +1453,8 @@ async fn test_model_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_model_tests(&resolved.kubeconfig).await.unwrap();
 }

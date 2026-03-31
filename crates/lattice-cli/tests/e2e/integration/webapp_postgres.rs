@@ -164,7 +164,6 @@ async fn deploy_services(kubeconfig: &str) -> Result<(), String> {
     info!("[WebApp+PG] Deploying 3-service web app stack...");
 
     ensure_fresh_namespace(kubeconfig, NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Cedar: permit postgres to run as root with capabilities needed by its entrypoint
     // (chown data dir, gosu/su-exec to drop privileges)
@@ -352,6 +351,9 @@ async fn test_webapp_postgres_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_webapp_postgres_tests(&resolved.kubeconfig)
         .await
         .unwrap();

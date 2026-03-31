@@ -194,8 +194,6 @@ pub async fn run_secrets_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, BASIC_TEST_NAMESPACE);
     with_diagnostics(&diag, "Secrets", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
-
         let mut test_data = std::collections::BTreeMap::new();
         test_data.insert("username".to_string(), "admin".to_string());
         test_data.insert("password".to_string(), "local-secret-123".to_string());
@@ -423,9 +421,6 @@ async fn verify_combined(kubeconfig: &str, namespace: &str) -> Result<(), String
 pub async fn run_secrets_route_tests(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     info!("[Routes] Running secrets route tests (5 routes + combined) in namespace {namespace}...");
 
-    // Set up local provider + regcreds (idempotent if already called)
-    setup_regcreds_infrastructure(kubeconfig).await?;
-
     // Seed all test secrets (db-creds, api-key, database-config, regcreds)
     seed_all_local_test_secrets(kubeconfig).await?;
 
@@ -563,6 +558,9 @@ async fn test_secrets_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_secrets_tests(&resolved.kubeconfig).await.unwrap();
 }
 
@@ -575,6 +573,9 @@ async fn test_secrets_routes_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_secrets_route_tests(&resolved.kubeconfig, "local-secrets-routes-sa")
         .await
         .unwrap();

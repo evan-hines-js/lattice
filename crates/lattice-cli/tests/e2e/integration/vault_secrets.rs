@@ -371,7 +371,6 @@ pub async fn run_vault_secrets_tests(kubeconfig: &str) -> Result<(), String> {
 
     let diag = DiagnosticContext::new(kubeconfig, VAULT_TEST_NAMESPACE);
     with_diagnostics(&diag, "Vault Secrets", || async {
-        setup_regcreds_infrastructure(kubeconfig).await?;
         setup_vault_infrastructure(kubeconfig).await?;
         seed_all_vault_test_secrets().await?;
 
@@ -534,5 +533,8 @@ async fn test_vault_secrets_standalone() {
     }
 
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_vault_secrets_tests(&resolved.kubeconfig).await.unwrap();
 }

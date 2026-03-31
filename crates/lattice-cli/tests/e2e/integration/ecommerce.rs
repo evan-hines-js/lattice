@@ -248,7 +248,6 @@ async fn deploy_services(kubeconfig: &str) -> Result<(), String> {
     info!("[Ecommerce] Deploying 7-service e-commerce stack...");
 
     ensure_fresh_namespace(kubeconfig, NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Cedar: permit all 3 postgres instances to run as root with capabilities
     // needed by the postgres entrypoint (chown data dir, gosu/su-exec to drop privileges)
@@ -437,5 +436,8 @@ async fn test_ecommerce_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_ecommerce_tests(&resolved.kubeconfig).await.unwrap();
 }

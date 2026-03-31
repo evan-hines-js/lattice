@@ -19,7 +19,7 @@ use lattice_common::crd::LatticeService;
 
 use super::helpers::{
     apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
-    delete_namespace, ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure,
+    delete_namespace, ensure_fresh_namespace, run_kubectl,
     with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
@@ -78,10 +78,6 @@ const FRONTEND_ADMIN_EXPECTED: &[(&str, bool)] = &[
 
 async fn deploy_test_services(kubeconfig_path: &str) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig_path, TEST_SERVICES_NAMESPACE).await?;
-
-    // Set up regcreds infrastructure — all mesh services need ghcr-creds for image pulls
-    info!("[Fixed Mesh] Setting up regcreds infrastructure...");
-    setup_regcreds_infrastructure(kubeconfig_path).await?;
 
     let client = client_from_kubeconfig(kubeconfig_path).await?;
     let api: Api<LatticeService> = Api::namespaced(client, TEST_SERVICES_NAMESPACE);

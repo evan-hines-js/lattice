@@ -837,7 +837,6 @@ pub async fn run_route_discovery_tests(
 
     // Setup namespace on workload cluster
     ensure_fresh_namespace(workload_kubeconfig, ROUTE_TEST_NS).await?;
-    setup_regcreds_infrastructure(workload_kubeconfig).await?;
 
     // Cedar: permit wildcard advertise for route-target
     apply_advertise_wildcard_policy(workload_kubeconfig, ROUTE_TEST_NS, "route-target").await?;
@@ -895,7 +894,6 @@ pub async fn run_route_discovery_tests(
     info!("[RouteDiscovery] Deploying cross-cluster consumer on mgmt cluster...");
     let consumer_ns = "route-consumer-test";
     ensure_fresh_namespace(mgmt_kubeconfig, consumer_ns).await?;
-    setup_regcreds_infrastructure(mgmt_kubeconfig).await?;
 
     let consumer =
         build_cross_cluster_consumer("consumer", consumer_ns, "route-target", ROUTE_TEST_NS);
@@ -985,6 +983,10 @@ async fn test_route_discovery_standalone() {
         .as_deref()
         .expect("requires workload kubeconfig");
 
+    setup_regcreds_infrastructure(workload_kc).await.unwrap();
+    setup_regcreds_infrastructure(&session.ctx.mgmt_kubeconfig)
+        .await
+        .unwrap();
     run_route_discovery_tests(&session.ctx.mgmt_kubeconfig, workload_kc)
         .await
         .unwrap();
@@ -1007,5 +1009,6 @@ async fn test_restricted_advertise_standalone() {
         .as_deref()
         .expect("requires workload kubeconfig");
 
+    setup_regcreds_infrastructure(workload_kc).await.unwrap();
     run_restricted_advertise_tests(workload_kc).await.unwrap();
 }

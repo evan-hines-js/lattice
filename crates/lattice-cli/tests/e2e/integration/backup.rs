@@ -535,7 +535,6 @@ async fn test_service_backup_schedule(kubeconfig: &str) -> Result<(), String> {
     info!("[Backup] Testing LatticeService backup.schedule → Schedule...");
 
     ensure_fresh_namespace(kubeconfig, SVC_NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
 
     // Apply a minimal LatticeService with backup.schedule (no storeRef → uses default store)
     let yaml = format!(
@@ -809,5 +808,8 @@ async fn test_backup_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_backup_tests(&resolved.kubeconfig).await.unwrap();
 }

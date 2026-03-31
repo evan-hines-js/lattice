@@ -88,7 +88,6 @@ async fn setup_gateway_infrastructure(kubeconfig: &str) -> Result<(), String> {
     info!("[Gateway] Setting up test infrastructure...");
 
     ensure_fresh_namespace(kubeconfig, GATEWAY_TEST_NAMESPACE).await?;
-    setup_regcreds_infrastructure(kubeconfig).await?;
     ensure_test_cluster_issuer(kubeconfig, "e2e-selfsigned").await?;
 
     // Cedar policies:
@@ -353,5 +352,8 @@ async fn test_gateway_standalone() {
 
     init_e2e_test();
     let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    setup_regcreds_infrastructure(&resolved.kubeconfig)
+        .await
+        .unwrap();
     run_gateway_tests(&resolved.kubeconfig).await.unwrap();
 }
