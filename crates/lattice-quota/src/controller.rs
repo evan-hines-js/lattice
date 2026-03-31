@@ -410,7 +410,7 @@ mod tests {
         let map = crate::format_demand_map(&demand);
         assert_eq!(map.get("cpu").unwrap(), "1500m");
         assert_eq!(map.get("memory").unwrap(), "512Mi");
-        assert!(map.get("nvidia.com/gpu").is_none());
+        assert!(!map.contains_key("nvidia.com/gpu"));
     }
 
     #[test]

@@ -143,6 +143,7 @@ fn ingress_spec() -> LatticeServiceSpec {
                         kind: None,
                     }),
                 }),
+                advertise: None,
             },
         )]),
     });
@@ -187,6 +188,7 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
                         kind: None,
                     }),
                 }),
+                advertise: None,
             },
         )]),
     });

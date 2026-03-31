@@ -568,12 +568,10 @@ mod tests {
                     requests: Some(ResourceQuantity {
                         cpu: Some("500m".to_string()),
                         memory: Some("1Gi".to_string()),
-                        ..Default::default()
-                    }),
+                        }),
                     limits: Some(ResourceQuantity {
                         cpu: Some("1".to_string()),
                         memory: Some("2Gi".to_string()),
-                        ..Default::default()
                     }),
                 }),
                 ..Default::default()

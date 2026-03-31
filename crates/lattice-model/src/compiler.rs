@@ -2155,7 +2155,6 @@ mod tests {
                 containers,
                 service: Some(ServicePortsSpec { ports }),
                 resources,
-                ..Default::default()
             },
             entry_runtime: RuntimeSpec::default(),
             worker_replicas: None,
