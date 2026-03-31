@@ -602,7 +602,7 @@ async fn test_cluster_issuer_cleanup(kubeconfig: &str) -> Result<(), String> {
         &cluster_name,
         "--type=merge",
         "-p",
-        r#"{"spec":{"issuers":{}}}"#,
+        r#"{"spec":{"issuers":null}}"#,
     ])
     .await
     .map_err(|e| format!("Failed to remove issuers: {e}"))?;
@@ -655,7 +655,7 @@ async fn cleanup_test_resources(kubeconfig: &str) {
         &cluster_name,
         "--type=merge",
         "-p",
-        r#"{"spec":{"dns":null,"issuers":{}}}"#,
+        r#"{"spec":{"dns":null,"issuers":null}}"#,
     ])
     .await;
 

@@ -222,94 +222,94 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // Watch channel for parent_servers — cell infra sends, cluster controller receives.
-    let (parent_servers_tx, parent_servers_rx) = tokio::sync::watch::channel(None);
+    // Create ParentServers ONCE — shared across cell lease re-acquisitions.
+    // The Arc is stable: cluster controller always sees the same instance.
+    // CellInfraGuard::drop calls shutdown() (running=false), re-acquisition
+    // calls ensure_running() on the same instance (running=true again).
+    let parent_config = ParentConfig::from_config(&config);
+    let shared_servers = Arc::new(
+        ParentServers::new(parent_config, &client)
+            .await
+            .expect("failed to create ParentServers"),
+    );
 
-    // Cell infrastructure (gRPC server, bootstrap webhook, auth proxy)
+    // Route reconciler — created once, persists across lease changes.
+    let (shared_route_tx, shared_all_routes_rx) = match config.cluster_name.as_ref() {
+        Some(name) => {
+            let (tx, rx) = lattice_cell::route_reconciler::spawn_route_reconciler(
+                name.clone(),
+                client.clone(),
+            );
+            (Some(tx), Some(rx))
+        }
+        None => (None, None),
+    };
+
+    // Cluster controller — owns cell infrastructure and LatticeCluster reconciliation.
+    //
+    // Cell servers (gRPC, bootstrap webhook, auth proxy) are started as part of
+    // the cluster controller lifecycle because the reconciler holds an
+    // Arc<ParentServers> and calls in-process methods (bootstrap registration,
+    // pivot, agent registry). claim_traffic routes gRPC/auth-proxy to this pod.
+    // On leadership loss, CellInfraGuard shuts down servers and the controller
+    // future is cancelled — both restart together on the new leader.
     tokio::spawn(controller_runner::leader_controller(
         client.clone(),
         pod_name.clone(),
-        "cell",
+        "cluster",
         cancel.clone(),
         true, // claim_traffic for gRPC/auth-proxy routing
         {
             let client = client.clone();
             let config = config.clone();
             let cedar = cedar.clone();
-            let parent_servers_tx = parent_servers_tx.clone();
+            let capi_installer = capi_installer.clone();
+            let servers = shared_servers;
+            let route_update_tx = shared_route_tx;
+            let all_routes_rx = shared_all_routes_rx;
             move || {
                 let client = client.clone();
                 let config = config.clone();
                 let cedar = cedar.clone();
-                let parent_servers_tx = parent_servers_tx.clone();
+                let capi_installer = capi_installer.clone();
+                let servers = servers.clone();
+                let route_update_tx = route_update_tx.clone();
+                let all_routes_rx = all_routes_rx.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
-                    match setup_cell_infra(&client, &self_cluster_name, cedar, &config).await {
-                        Ok((servers, agent_token, _auth_proxy, _route_tx)) => {
-                            let _ = parent_servers_tx.send(Some(servers.clone()));
-                            // Guard ensures cell infra is torn down on leadership loss.
-                            // Dropping a CancellationToken does NOT cancel it — the
-                            // guard explicitly cancels and shuts down servers so agents
-                            // reconnect to the new leader's gRPC server.
-                            let _guard = CellInfraGuard { agent_token, servers };
-                            std::future::pending::<()>().await;
+                    match setup_cell_infra(
+                        &client,
+                        &self_cluster_name,
+                        cedar,
+                        &config,
+                        servers.clone(),
+                        route_update_tx,
+                        all_routes_rx,
+                    )
+                    .await
+                    {
+                        Ok(agent_token) => {
+                            let _guard = CellInfraGuard {
+                                agent_token,
+                                servers: servers.clone(),
+                            };
+                            // Run the cluster controller under the same lease.
+                            // When leadership is lost, _guard drops → shuts down
+                            // cell servers, and the controller future is cancelled.
+                            controller_runner::build_cluster_controller(
+                                client,
+                                self_cluster_name,
+                                Some(servers),
+                                capi_installer,
+                                config,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Cell infrastructure setup failed");
                         }
                     }
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            }
-        },
-    ));
-
-    // LatticeCluster controller
-    tokio::spawn(controller_runner::leader_controller(
-        client.clone(),
-        pod_name.clone(),
-        "cluster",
-        cancel.clone(),
-        false,
-        {
-            let client = client.clone();
-            let config = config.clone();
-            let capi_installer = capi_installer.clone();
-            let parent_servers_rx = parent_servers_rx.clone();
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                let capi_installer = capi_installer.clone();
-                let mut parent_servers_rx = parent_servers_rx.clone();
-                Box::pin(async move {
-                    wait_for_api_ready_for::<LatticeCluster>(&client).await;
-                    let self_cluster_name = config.cluster_name.clone();
-                    // Use parent_servers if cell infra is running on this pod,
-                    // otherwise proceed with None (cell is on another pod).
-                    // Wait briefly since cell and cluster start concurrently.
-                    let parent_servers = tokio::time::timeout(
-                        Duration::from_secs(10),
-                        async {
-                            loop {
-                                if let Some(ref ps) = *parent_servers_rx.borrow_and_update() {
-                                    return Some(ps.clone());
-                                }
-                                if parent_servers_rx.changed().await.is_err() {
-                                    return None; // sender dropped
-                                }
-                            }
-                        },
-                    )
-                    .await
-                    .unwrap_or(None);
-                    controller_runner::build_cluster_controller(
-                        client,
-                        self_cluster_name,
-                        parent_servers,
-                        capi_installer,
-                        config,
-                    )
-                    .await;
                 }) as Pin<Box<dyn Future<Output = ()> + Send>>
             }
         },
@@ -587,21 +587,24 @@ fn spawn_cedar_policy_reloader(
     });
 }
 
-/// Check whether the self-cluster CRD has `parent_config` set.
+/// Check whether this cluster has an upstream parent (lattice-parent-config Secret exists).
 ///
 /// Returns `false` on 404 or any error (safe default for leaf clusters).
-async fn has_parent_config(client: &kube::Client) -> bool {
+/// Note: this is different from `spec.parent_config` on the CRD which means
+/// "this cluster IS a parent/cell", not "this cluster HAS a parent".
+async fn has_parent_connection(client: &kube::Client) -> bool {
     matches!(
         lattice_common::ParentConnectionConfig::read(client).await,
         Ok(Some(_))
     )
 }
 
-/// Drop guard that tears down cell infrastructure on leadership loss.
+/// Drop guard that tears down cell infrastructure on cluster leadership loss.
 ///
-/// When the leader controller drops this future (leadership lost), the guard
-/// cancels the agent token and shuts down the gRPC server. This forces
-/// connected agents to reconnect to the new leader's fresh subtree registry.
+/// When the cluster controller drops this future (leadership lost), the guard
+/// cancels the agent token and shuts down the gRPC server (running=false).
+/// On re-acquisition, setup_cell_infra calls ensure_running() on the same
+/// ParentServers instance to restart.
 struct CellInfraGuard {
     agent_token: CancellationToken,
     servers: Arc<ParentServers<DefaultManifestGenerator>>,
@@ -609,7 +612,7 @@ struct CellInfraGuard {
 
 impl Drop for CellInfraGuard {
     fn drop(&mut self) {
-        tracing::info!("Cell leadership lost, shutting down cell infrastructure");
+        tracing::info!("Cluster leadership lost, shutting down cell infrastructure");
         self.agent_token.cancel();
         let servers = self.servers.clone();
         tokio::spawn(async move {
@@ -620,7 +623,7 @@ impl Drop for CellInfraGuard {
 
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
 ///
-/// Always creates `ParentServers` (CA + registries are needed by agent SubtreeForwarder).
+/// Uses the caller-provided `ParentServers` (shared across lease re-acquisitions).
 /// Always starts agent connection if `self_cluster_name` is set.
 ///
 /// For cells (bootstrap or has parent_config): starts servers, auth proxy, CA rotation,
@@ -629,35 +632,17 @@ impl Drop for CellInfraGuard {
 /// For leaf clusters: spawns a background `cell_activation_watcher` that polls the
 /// self-cluster CRD every 30s and promotes to cell when `parent_config` appears.
 ///
-/// Returns (parent_servers, agent_cancellation_token, auth_proxy_supervisor, route_update_tx)
+/// Returns the agent cancellation token (caller holds it in CellInfraGuard).
 async fn setup_cell_infra(
     client: &kube::Client,
     self_cluster_name: &Option<String>,
     cedar: Arc<PolicyEngine>,
     config: &SharedConfig,
-) -> anyhow::Result<(
-    Arc<ParentServers<DefaultManifestGenerator>>,
-    CancellationToken,
-    Option<tokio::task::JoinHandle<()>>,
-    Option<lattice_cell::route_reconciler::RouteUpdateSender>,
-)> {
+    servers: Arc<ParentServers<DefaultManifestGenerator>>,
+    route_update_tx: Option<lattice_cell::route_reconciler::RouteUpdateSender>,
+    all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+) -> anyhow::Result<CancellationToken> {
     let is_bootstrap = config.is_bootstrap_cluster;
-
-    // Create cell servers (always — CA + registries needed by agent SubtreeForwarder)
-    let parent_config = ParentConfig::from_config(config);
-    let servers = Arc::new(ParentServers::new(parent_config, client).await?);
-
-    // Start route reconciler on ALL clusters (not just parents).
-    let (route_update_tx, all_routes_rx) = match self_cluster_name.as_ref() {
-        Some(name) => {
-            let (tx, rx) = lattice_cell::route_reconciler::spawn_route_reconciler(
-                name.clone(),
-                client.clone(),
-            );
-            (Some(tx), Some(rx))
-        }
-        None => (None, None),
-    };
 
     // Start agent connection to parent (if we have one)
     let agent_token = CancellationToken::new();
@@ -679,13 +664,11 @@ async fn setup_cell_infra(
         });
     }
 
-    let is_cell = is_bootstrap || has_parent_config(client).await;
+    let is_cell = is_bootstrap || has_parent_connection(client).await;
 
-    let auth_proxy_supervisor = if is_cell {
+    if is_cell {
         let extra_sans = get_cell_server_sans(client, self_cluster_name, is_bootstrap).await;
-        let tx = route_update_tx
-            .clone()
-            .expect("route_update_tx required for cell");
+        let tx = route_update_tx.expect("route_update_tx required for cell");
         activate_cell_services(
             client,
             &servers,
@@ -694,38 +677,23 @@ async fn setup_cell_infra(
                 extra_sans,
                 cedar,
                 route_update_tx: tx,
-                all_routes_rx: all_routes_rx.clone(),
+                all_routes_rx,
             },
         )
-        .await?
-    } else {
-        // Leaf cluster — spawn background watcher for promotion
+        .await?;
+    } else if let Some(ref name) = self_cluster_name {
         tracing::info!("Leaf cluster, cell servers deferred until parent_config is set");
-        if let Some(ref name) = self_cluster_name {
-            let watcher_client = client.clone();
-            let watcher_name = name.clone();
-            let watcher_servers = servers.clone();
-            let watcher_cedar = cedar;
-            let watcher_route_tx = route_update_tx
-                .clone()
-                .expect("route_update_tx required for leaf");
-            let watcher_all_rx = all_routes_rx.clone();
-            tokio::spawn(async move {
-                cell_activation_watcher(
-                    watcher_client,
-                    watcher_name,
-                    watcher_servers,
-                    watcher_cedar,
-                    watcher_route_tx,
-                    watcher_all_rx,
-                )
+        let client = client.clone();
+        let name = name.clone();
+        let servers = servers.clone();
+        let route_update_tx = route_update_tx.expect("route_update_tx required for leaf");
+        tokio::spawn(async move {
+            cell_activation_watcher(client, name, servers, cedar, route_update_tx, all_routes_rx)
                 .await;
-            });
-        }
-        None
+        });
     };
 
-    Ok((servers, agent_token, auth_proxy_supervisor, route_update_tx))
+    Ok(agent_token)
 }
 
 /// Parameters for activating cell services.
@@ -742,7 +710,7 @@ async fn activate_cell_services(
     servers: &Arc<ParentServers<DefaultManifestGenerator>>,
     cluster_name: &Option<String>,
     params: CellActivationParams,
-) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+) -> anyhow::Result<()> {
     let CellActivationParams {
         extra_sans,
         cedar,
@@ -759,22 +727,15 @@ async fn activate_cell_services(
         .await?;
     tracing::info!("Cell servers started");
 
-    let handle = start_auth_proxy(
-        client,
-        servers.clone(),
-        cluster_name,
-        &extra_sans,
-        cedar,
-        all_routes_rx,
-    )
-    .await;
+    start_auth_proxy(client, servers.clone(), cluster_name, &extra_sans, cedar, all_routes_rx)
+        .await;
     start_ca_rotation(servers.clone());
 
     if let Some(state) = servers.bootstrap_state().await {
         re_register_existing_clusters(client, &state, cluster_name, servers).await;
     }
 
-    Ok(handle)
+    Ok(())
 }
 
 /// Background task that watches for `parent_config` to appear on the self-cluster CRD.
@@ -845,7 +806,7 @@ async fn cell_activation_watcher(
         let extra_sans = vec![lb_address];
         let cluster_name = Some(self_cluster_name.clone());
 
-        let _proxy_handle = match activate_cell_services(
+        if let Err(e) = activate_cell_services(
             &client,
             &servers,
             &cluster_name,
@@ -858,13 +819,10 @@ async fn cell_activation_watcher(
         )
         .await
         {
-            Ok(handle) => handle,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to activate cell services during promotion");
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                continue;
-            }
-        };
+            tracing::error!(error = %e, "Failed to activate cell services during promotion");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            continue;
+        }
 
         tracing::info!("Cell infrastructure activated (cluster promoted to parent)");
         std::future::pending::<()>().await;

@@ -88,15 +88,6 @@ pub trait ServiceKubeClient: Send + Sync {
         compiled: &CompiledService,
     ) -> Result<(), Error>;
 
-    /// Patch an annotation on a LatticeService
-    async fn patch_service_annotation(
-        &self,
-        name: &str,
-        namespace: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), Error>;
-
     /// Check if a LatticeMeshMember is Ready (policies fully applied, including ServiceEntries)
     async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error>;
 
@@ -350,26 +341,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             resources = layer1_count + layer2_count + layer3_count,
             "applied compiled resources"
         );
-        Ok(())
-    }
-
-    async fn patch_service_annotation(
-        &self,
-        name: &str,
-        namespace: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<(), Error> {
-        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
-        let patch = serde_json::json!({
-            "metadata": { "annotations": { key: value } }
-        });
-        api.patch(
-            name,
-            &PatchParams::apply(FIELD_MANAGER),
-            &Patch::Merge(&patch),
-        )
-        .await?;
         Ok(())
     }
 
@@ -757,40 +728,6 @@ impl ServiceContext {
 // LatticeService reconciliation
 // =============================================================================
 
-/// Annotation key for the inputs hash used by the reconcile guard.
-const INPUTS_HASH_ANNOTATION: &str = "lattice.dev/inputs-hash";
-
-/// Check if reconciliation can be skipped because nothing has changed.
-///
-/// Returns true when the service is Ready or Failed AND:
-/// - observed_generation matches metadata.generation (spec unchanged)
-/// - stored inputs hash matches the current graph + policy state
-///
-/// For Failed services, this prevents a tight reconcile loop: if the
-/// spec and inputs haven't changed, the same compilation error will
-/// recur. The 30-second requeue timer handles retries for transient
-/// errors without needing to re-enter the compile path on every
-/// watch event.
-fn is_reconcile_current(service: &LatticeService, current_inputs_hash: &str) -> bool {
-    let status = match service.status.as_ref() {
-        Some(s) if s.phase == ServicePhase::Ready => s,
-        _ => return false,
-    };
-
-    let generation_matches = matches!(
-        (status.observed_generation, service.metadata.generation),
-        (Some(observed), Some(current)) if observed == current
-    );
-
-    let stored_hash = service
-        .metadata
-        .annotations
-        .as_ref()
-        .and_then(|a| a.get(INPUTS_HASH_ANNOTATION));
-
-    generation_matches && stored_hash.map(|h| h.as_str()) == Some(current_inputs_hash)
-}
-
 /// Reconcile a LatticeService resource
 ///
 /// This function is called whenever a LatticeService is created, updated, or deleted.
@@ -860,12 +797,6 @@ pub async fn reconcile(
         return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
-    // All other phases share the same compile path with an inputs-hash guard.
-    let active_in = ctx.graph.get_active_inbound_edges(namespace, &name);
-    let active_out = ctx.graph.get_active_outbound_edges(namespace, &name);
-    let base_inputs_hash =
-        lattice_common::graph::compute_edge_hash(&active_in, &active_out, ctx.cedar.reload_epoch());
-
     // Hash ESO-managed secret content so rotated secrets trigger rollouts.
     // Same content = same hash = no spurious rollout (content-addressable).
     let eso_hash = ctx
@@ -873,17 +804,6 @@ pub async fn reconcile(
         .hash_owned_secrets(&name, namespace)
         .await
         .unwrap_or_default();
-    let inputs_hash = format!("{}:eso:{}", base_inputs_hash, eso_hash);
-
-    // Skip reconcile when spec and external inputs are unchanged (Ready only).
-    // Compiling and Failed services always re-enter the compile path.
-    // Metrics are still scraped on every cycle so values populate even when
-    // VictoriaMetrics hasn't ingested data at the initial Ready transition.
-    if is_reconcile_current(&service, &inputs_hash) {
-        debug!("generation and inputs unchanged, skipping reconcile");
-        scrape_and_patch_metrics(&service, &ctx).await;
-        return Ok(Action::requeue(REQUEUE_READY));
-    }
 
     let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
     if !missing_deps.is_empty() {
@@ -897,7 +817,7 @@ pub async fn reconcile(
         );
     }
 
-    compile_and_apply(&service, &name, namespace, &ctx, &inputs_hash, &eso_hash).await
+    compile_and_apply(&service, &name, namespace, &ctx, &eso_hash).await
 }
 
 /// Check which dependencies are missing from the graph
@@ -929,18 +849,12 @@ fn check_missing_dependencies(
         .collect()
 }
 
-/// Compile a service, apply resources, update status, and record the inputs hash.
-///
-/// The inputs hash is stored as an annotation so the reconcile guard can
-/// suppress retries when nothing has changed (same spec + same graph state =
-/// same compilation outcome). The hash is stored on both success and failure
-/// so the guard works in all phases.
+/// Compile a service, apply resources, and update status.
 async fn compile_and_apply(
     service: &LatticeService,
     name: &str,
     namespace: &str,
     ctx: &ServiceContext,
-    inputs_hash: &str,
     eso_content_hash: &str,
 ) -> Result<Action, Error> {
     let annotations = service
@@ -1003,7 +917,6 @@ async fn compile_and_apply(
             }
 
             transition_to_failed(service, ctx, &e.to_string(), event_reason).await?;
-            record_inputs_hash(ctx, name, namespace, inputs_hash).await;
             return Ok(Action::requeue(Duration::from_secs(30)));
         }
     };
@@ -1077,7 +990,6 @@ async fn compile_and_apply(
         .with_metrics(metrics)
         .apply(ctx.kube.as_ref(), service)
         .await?;
-    record_inputs_hash(ctx, name, namespace, inputs_hash).await;
     Ok(Action::requeue(REQUEUE_READY))
 }
 
@@ -1114,55 +1026,6 @@ async fn transition_to_failed(
         .apply(ctx.kube.as_ref(), service)
         .await?;
     Ok(())
-}
-
-/// Best-effort metrics scrape on steady-state requeues.
-///
-/// Called when the reconcile guard skips the full compile path so that
-/// metrics still populate even when VictoriaMetrics hadn't ingested data
-/// at the initial Ready transition.
-async fn scrape_and_patch_metrics(service: &LatticeService, ctx: &ServiceContext) {
-    let name = service.name_any();
-    let namespace = match service.namespace() {
-        Some(ns) => ns,
-        None => return,
-    };
-
-    let existing = service.status.as_ref().and_then(|s| s.metrics.as_ref());
-    let metrics = lattice_common::crd::scrape_metrics(
-        ctx.metrics_scraper.as_ref(),
-        service.spec.observability.as_ref(),
-        &namespace,
-        &name,
-        existing,
-    )
-    .await;
-
-    // scrape_metrics returns existing unchanged or None when nothing to do.
-    if metrics.as_ref() == existing {
-        return;
-    }
-
-    let mut status = service.status.clone().unwrap_or_default();
-    status.metrics = metrics;
-    if let Err(e) = ctx
-        .kube
-        .patch_service_status(&name, &namespace, &status)
-        .await
-    {
-        warn!(error = %e, "failed to patch metrics on steady-state requeue");
-    }
-}
-
-/// Best-effort store of the inputs hash annotation.
-async fn record_inputs_hash(ctx: &ServiceContext, name: &str, namespace: &str, hash: &str) {
-    if let Err(e) = ctx
-        .kube
-        .patch_service_annotation(name, namespace, INPUTS_HASH_ANNOTATION, hash)
-        .await
-    {
-        warn!(error = %e, "failed to patch inputs hash annotation");
-    }
 }
 
 // =============================================================================
@@ -1410,8 +1273,6 @@ mod tests {
         mock.expect_list_services().returning(|| Ok(vec![]));
         mock.expect_apply_compiled_service()
             .returning(|_, _, _| Ok(()));
-        mock.expect_patch_service_annotation()
-            .returning(|_, _, _, _| Ok(()));
         mock.expect_is_mesh_member_ready()
             .returning(|_, _| Ok(true));
         mock.expect_delete_revoked_external_secrets()
@@ -1675,94 +1536,6 @@ mod tests {
 
         // Should be visible via ctx2
         assert!(ctx2.graph.get_service("shared", "svc").is_some());
-    }
-
-    // =========================================================================
-    // Reconcile Guard Tests (is_reconcile_current)
-    // =========================================================================
-
-    fn service_with_status(
-        name: &str,
-        phase: ServicePhase,
-        generation: i64,
-        observed_generation: Option<i64>,
-        inputs_hash: Option<&str>,
-    ) -> LatticeService {
-        let mut svc = sample_service(name);
-        svc.metadata.generation = Some(generation);
-        svc.metadata.annotations = inputs_hash.map(|h| {
-            let mut m = BTreeMap::new();
-            m.insert(INPUTS_HASH_ANNOTATION.to_string(), h.to_string());
-            m
-        });
-        svc.status =
-            Some(LatticeServiceStatus::with_phase(phase).observed_generation(observed_generation));
-        svc
-    }
-
-    #[test]
-    fn reconcile_guard_skips_ready_with_matching_inputs() {
-        let svc = service_with_status("svc", ServicePhase::Ready, 1, Some(1), Some("hash-abc"));
-        assert!(is_reconcile_current(&svc, "hash-abc"));
-    }
-
-    #[test]
-    fn reconcile_guard_retries_ready_on_generation_change() {
-        let svc = service_with_status("svc", ServicePhase::Ready, 2, Some(1), Some("hash-abc"));
-        assert!(!is_reconcile_current(&svc, "hash-abc"));
-    }
-
-    #[test]
-    fn reconcile_guard_retries_ready_on_hash_change() {
-        let svc = service_with_status("svc", ServicePhase::Ready, 1, Some(1), Some("hash-abc"));
-        assert!(!is_reconcile_current(&svc, "hash-NEW"));
-    }
-
-    /// Failed services always retry — the failure may be transient (webhook
-    /// down, API server blip) and the next attempt might succeed even with
-    /// identical inputs.
-    #[test]
-    fn reconcile_guard_retries_failed_even_with_matching_inputs() {
-        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
-        assert!(
-            !is_reconcile_current(&svc, "hash-abc"),
-            "Failed service should always retry, even with unchanged inputs"
-        );
-    }
-
-    /// Failed services should retry when the spec changes (generation bump).
-    #[test]
-    fn reconcile_guard_retries_failed_on_generation_change() {
-        let svc = service_with_status("svc", ServicePhase::Failed, 2, Some(1), Some("hash-abc"));
-        assert!(!is_reconcile_current(&svc, "hash-abc"));
-    }
-
-    /// Failed services should retry when external inputs change (Cedar policy, graph edges).
-    #[test]
-    fn reconcile_guard_retries_failed_on_hash_change() {
-        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), Some("hash-abc"));
-        assert!(!is_reconcile_current(&svc, "hash-NEW"));
-    }
-
-    /// Failed services without a stored hash always retry (apply failures don't record hash).
-    #[test]
-    fn reconcile_guard_retries_failed_without_hash() {
-        let svc = service_with_status("svc", ServicePhase::Failed, 1, Some(1), None);
-        assert!(
-            !is_reconcile_current(&svc, "hash-abc"),
-            "Failed service with no stored hash should always retry (transient apply failure)"
-        );
-    }
-
-    /// ServiceStatusUpdate::failed() must set observed_generation so the guard works.
-    #[test]
-    fn failed_status_update_sets_observed_generation() {
-        let update = ServiceStatusUpdate::failed("error", Some(3));
-        assert_eq!(
-            update.observed_generation,
-            Some(3),
-            "Failed status must include observed_generation for the reconcile guard to work"
-        );
     }
 
     // =========================================================================
