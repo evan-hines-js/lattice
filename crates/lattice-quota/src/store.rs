@@ -28,6 +28,12 @@ pub struct QuotaStore {
 }
 
 impl QuotaStore {
+    /// Create an empty store for testing (no sender, always empty).
+    pub fn empty() -> Self {
+        let (_tx, rx) = watch::channel(QuotaSnapshot::default());
+        Self { rx }
+    }
+
     /// Resolve a `QuotaBudget` for a specific workload from the latest snapshot.
     pub fn resolve_budget(
         &self,
@@ -55,14 +61,6 @@ impl QuotaStore {
 pub fn channel() -> (QuotaSender, QuotaStore) {
     let (tx, rx) = watch::channel(QuotaSnapshot::default());
     (tx, QuotaStore { rx })
-}
-
-impl QuotaStore {
-    /// Create an empty store for testing (no sender, always empty).
-    pub fn empty() -> Self {
-        let (_tx, rx) = watch::channel(QuotaSnapshot::default());
-        Self { rx }
-    }
 }
 
 #[cfg(test)]

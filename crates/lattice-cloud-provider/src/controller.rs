@@ -1,19 +1,12 @@
 //! InfraProvider reconciliation controller
 //!
-//! Watches InfraProvider CRDs and reconciles credentials.
+//! Watches InfraProvider CRDs and validates credentials configuration.
+//! Consumers (cluster provisioners) create ESO ExternalSecrets in their
+//! target namespaces — this controller only validates the spec.
 //!
-//! ## Credential Modes
-//!
-//! InfraProvider supports three mutually exclusive credential modes:
-//!
-//! - **ESO mode** (`credentials` field): The controller creates an ESO ExternalSecret
-//!   that syncs credentials from a ClusterSecretStore. Optionally shaped with
-//!   `credentialData` templates.
-//!
-//! - **Manual mode** (`credentialsSecretRef` field): Operator manages the K8s Secret
-//!   directly. The controller only validates the reference is present.
-//!
-//! - **No credentials** (Docker provider): No credentials required.
+//! Docker providers require no credentials. All others require the
+//! `credentials` field (ESO ResourceSpec), optionally with `credentialData`
+//! templates for complex credential shapes.
 
 use std::sync::Arc;
 use std::time::Duration;

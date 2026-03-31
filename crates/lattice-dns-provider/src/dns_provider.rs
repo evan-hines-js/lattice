@@ -1,10 +1,11 @@
 //! DNSProvider reconciliation controller
 //!
 //! Watches DNSProvider CRDs and validates configuration and credentials.
+//! Consumers (external-dns reconciler) create ESO ExternalSecrets in the
+//! external-dns namespace — this controller only validates the spec.
 //!
-//! For cloud DNS providers (Route53, Cloudflare, Google, Azure), the controller
-//! verifies that the referenced credentials Secret exists. For Pi-hole, only
-//! spec validation is performed (URL must be present).
+//! Cloud DNS providers (Route53, Cloudflare, Google, Azure) require ESO
+//! credentials. Pi-hole only requires spec validation (URL must be present).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -156,6 +157,7 @@ mod tests {
     use lattice_common::crd::{
         AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig, ResourceSpec, Route53Config,
     };
+    use lattice_common::EXTERNAL_DNS_NAMESPACE;
 
 
     fn sample_pihole_provider() -> DNSProvider {

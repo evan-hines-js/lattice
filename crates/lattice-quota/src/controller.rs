@@ -148,6 +148,52 @@ async fn list_all_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
         .unwrap_or_default()
 }
 
+/// Accumulated usage from scanning workloads.
+struct UsageAccumulator {
+    total: WorkloadResourceDemand,
+    count: u32,
+    ns_cache: HashMap<String, BTreeMap<String, String>>,
+}
+
+impl UsageAccumulator {
+    fn new() -> Self {
+        Self {
+            total: WorkloadResourceDemand::default(),
+            count: 0,
+            ns_cache: HashMap::new(),
+        }
+    }
+
+    /// Check if a resource matches the principal, using the namespace label cache.
+    async fn matches(
+        &mut self,
+        client: &kube::Client,
+        principal: &QuotaPrincipal,
+        resource: &impl kube::ResourceExt,
+    ) -> bool {
+        let ns = resource.namespace().unwrap_or_default();
+        let ns_labels = cached_ns_labels(client, &ns, &mut self.ns_cache).await;
+        let empty = BTreeMap::new();
+        let annotations = resource.meta().annotations.as_ref().unwrap_or(&empty);
+        principal.matches_workload(&ns, &resource.name_any(), ns_labels, annotations)
+    }
+
+    /// Add a single workload's demand.
+    fn add_demand(&mut self, demand: &WorkloadResourceDemand) {
+        self.total += demand;
+    }
+
+    /// Increment the workload count.
+    fn add_workload(&mut self) {
+        self.count += 1;
+    }
+
+    fn into_result(self) -> (WorkloadResourceDemand, u32, BTreeMap<String, BTreeMap<String, String>>) {
+        let ns_labels_map = self.ns_cache.into_iter().collect();
+        (self.total, self.count, ns_labels_map)
+    }
+}
+
 /// Compute total resource usage for a principal. Returns usage, workload count,
 /// and the namespace label cache (for the snapshot).
 async fn compute_usage(
@@ -158,80 +204,76 @@ async fn compute_usage(
     u32,
     BTreeMap<String, BTreeMap<String, String>>,
 ) {
-    let mut total = WorkloadResourceDemand::default();
-    let mut count: u32 = 0;
-    let mut ns_cache: HashMap<String, BTreeMap<String, String>> = HashMap::new();
-    let empty = BTreeMap::new();
+    let mut acc = UsageAccumulator::new();
 
-    if let Ok(services) = Api::<LatticeService>::all(client.clone())
+    match Api::<LatticeService>::all(client.clone())
         .list(&Default::default())
         .await
     {
-        for svc in &services.items {
-            let ns = svc.namespace().unwrap_or_default();
-            let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
-            let annotations = svc.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &svc.name_any(), ns_labels, annotations) {
-                continue;
-            }
-            if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
-                total += &demand;
-                count += 1;
-            }
-        }
-    }
-
-    if let Ok(jobs) = Api::<LatticeJob>::all(client.clone())
-        .list(&Default::default())
-        .await
-    {
-        for job in &jobs.items {
-            let ns = job.namespace().unwrap_or_default();
-            let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
-            let annotations = job.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &job.name_any(), ns_labels, annotations) {
-                continue;
-            }
-            for task in job.spec.tasks.values() {
-                if let Ok(demand) =
-                    compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
-                {
-                    total += &demand;
+        Ok(services) => {
+            for svc in &services.items {
+                if !acc.matches(client, principal, svc).await {
+                    continue;
+                }
+                if let Ok(demand) = compute_workload_demand(&svc.spec.workload, svc.spec.replicas) {
+                    acc.add_demand(&demand);
+                    acc.add_workload();
                 }
             }
-            count += 1;
         }
+        Err(e) => warn!(error = %e, "Failed to list LatticeServices for quota usage"),
     }
 
-    if let Ok(models) = Api::<LatticeModel>::all(client.clone())
+    match Api::<LatticeJob>::all(client.clone())
         .list(&Default::default())
         .await
     {
-        for model in &models.items {
-            let ns = model.namespace().unwrap_or_default();
-            let ns_labels = cached_ns_labels(client, &ns, &mut ns_cache).await;
-            let annotations = model.metadata.annotations.as_ref().unwrap_or(&empty);
-            if !principal.matches_workload(&ns, &model.name_any(), ns_labels, annotations) {
-                continue;
-            }
-            for role in model.spec.roles.values() {
-                if let Ok(demand) =
-                    compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1))
-                {
-                    total += &demand;
+        Ok(jobs) => {
+            for job in &jobs.items {
+                if !acc.matches(client, principal, job).await {
+                    continue;
                 }
-                if let (Some(ref ww), Some(wr)) = (&role.worker_workload, role.worker_replicas) {
-                    if let Ok(demand) = compute_workload_demand(ww, wr) {
-                        total += &demand;
+                for task in job.spec.tasks.values() {
+                    if let Ok(demand) =
+                        compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
+                    {
+                        acc.add_demand(&demand);
                     }
                 }
+                acc.add_workload();
             }
-            count += 1;
         }
+        Err(e) => warn!(error = %e, "Failed to list LatticeJobs for quota usage"),
     }
 
-    let ns_labels_map: BTreeMap<String, BTreeMap<String, String>> = ns_cache.into_iter().collect();
-    (total, count, ns_labels_map)
+    match Api::<LatticeModel>::all(client.clone())
+        .list(&Default::default())
+        .await
+    {
+        Ok(models) => {
+            for model in &models.items {
+                if !acc.matches(client, principal, model).await {
+                    continue;
+                }
+                for role in model.spec.roles.values() {
+                    if let Ok(demand) =
+                        compute_workload_demand(&role.entry_workload, role.replicas.unwrap_or(1))
+                    {
+                        acc.add_demand(&demand);
+                    }
+                    if let (Some(ref ww), Some(wr)) = (&role.worker_workload, role.worker_replicas) {
+                        if let Ok(demand) = compute_workload_demand(ww, wr) {
+                            acc.add_demand(&demand);
+                        }
+                    }
+                }
+                acc.add_workload();
+            }
+        }
+        Err(e) => warn!(error = %e, "Failed to list LatticeModels for quota usage"),
+    }
+
+    acc.into_result()
 }
 
 fn is_exceeded(usage: &WorkloadResourceDemand, soft: &BTreeMap<String, String>) -> bool {

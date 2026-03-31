@@ -481,10 +481,6 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
 /// and applies it via server-side apply. After applying all issuers, removes stale
 /// ClusterIssuers that are labeled as managed but no longer referenced in the spec.
 async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster) -> Result<(), Error> {
-    if cluster.spec.issuers.is_empty() {
-        return Ok(());
-    }
-
     let ns = cluster
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
