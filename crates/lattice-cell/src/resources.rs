@@ -6,7 +6,7 @@
 
 use k8s_openapi::api::core::v1::Secret;
 use kube::api::{Api, ListParams, ObjectList};
-use kube::{Client, Resource};
+use kube::{Client, Resource, ResourceExt};
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
@@ -111,33 +111,28 @@ pub async fn fetch_distributable_resources(
 
     // Collect all secrets labeled for distribution across all namespaces.
     // The `lattice.dev/distribute: "true"` label marks any secret for
-    // propagation to child clusters. The agent applies each secret to the
-    // namespace specified in its metadata.
+    // propagation to child clusters (CA cert, provider credentials, etc.).
     let all_secrets: Api<Secret> = Api::all(client.clone());
-    let distribute_lp = ListParams::default()
-        .labels("lattice.dev/distribute=true");
+    let distribute_lp = ListParams::default().labels("lattice.dev/distribute=true");
     let mut secrets = Vec::new();
+    let mut distributed_names: HashSet<String> = HashSet::new();
     if let Ok(secret_list) = all_secrets.list(&distribute_lp).await {
         for secret in &secret_list.items {
+            distributed_names.insert(secret.name_any());
             secrets.push(serialize_for_distribution(secret)?);
         }
     }
 
     // Also include explicitly referenced secrets (OIDC client secrets, etc.)
-    // that may not have the distribute label yet
+    // that may not have the distribute label
     let secret_api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     for name in &secret_names {
+        if distributed_names.contains(name.as_str()) {
+            continue;
+        }
         match secret_api.get(name).await {
             Ok(secret) => {
-                let already_included = secrets.iter().any(|s| {
-                    serde_json::from_slice::<serde_json::Value>(s)
-                        .ok()
-                        .and_then(|v| v["metadata"]["name"].as_str().map(|n| n == name))
-                        .unwrap_or(false)
-                });
-                if !already_included {
-                    secrets.push(serialize_for_distribution(&secret)?);
-                }
+                secrets.push(serialize_for_distribution(&secret)?);
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 debug!(secret = %name, "Referenced secret not found, skipping");
