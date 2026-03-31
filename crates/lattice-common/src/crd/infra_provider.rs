@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::types::credential_secret_name;
 use super::workload::resources::ResourceSpec;
 
 /// InfraProvider defines a cloud account/region that clusters can be deployed to.
@@ -217,11 +218,10 @@ impl InfraProvider {
     /// `None` if no credentials are configured (e.g., Docker provider).
     /// Callers create ExternalSecrets in whichever namespace they need.
     pub fn credential_secret_name(&self) -> Option<String> {
-        if self.spec.credentials.is_some() {
-            Some(format!("{}-credentials", self.name_any()))
-        } else {
-            None
-        }
+        self.spec
+            .credentials
+            .as_ref()
+            .map(|_| credential_secret_name(&self.name_any()))
     }
 }
 

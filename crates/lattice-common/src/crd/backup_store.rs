@@ -183,14 +183,11 @@ impl BackupStore {
     /// `{name}-credentials` in `lattice-system`. Returns `None` if
     /// no credentials are configured.
     pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
-        if self.spec.storage.credentials.is_some() {
-            Some(SecretRef {
-                name: format!("{}-credentials", self.name_any()),
-                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-            })
-        } else {
-            None
-        }
+        self.spec
+            .storage
+            .credentials
+            .as_ref()
+            .map(|_| SecretRef::for_credentials(&self.name_any(), LATTICE_SYSTEM_NAMESPACE))
     }
 }
 

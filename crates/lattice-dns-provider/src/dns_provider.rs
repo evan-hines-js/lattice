@@ -279,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn pihole_does_not_require_credentials() {
         let provider = sample_pihole_provider();
-        // Pi-hole should not require credentialsSecretRef
+        // Pi-hole should not require credentials
         assert_eq!(provider.spec.provider_type, DNSProviderType::Pihole);
         // Pihole validation should pass without checking secret existence
     }

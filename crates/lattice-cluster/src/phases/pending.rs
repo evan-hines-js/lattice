@@ -151,15 +151,19 @@ async fn handle_child_cluster(
         )));
     }
 
-    // Sync provider credentials via ESO to namespaces that need them
+    // Sync provider credentials via ESO to all namespaces that need them
     if let (Some(ref client), Some(ref credentials)) =
         (&ctx.client, &cloud_provider.spec.credentials)
     {
         let provider_name = cloud_provider.name_any();
         let credential_data = cloud_provider.spec.credential_data.as_ref();
 
-        // CAPI provider namespace (e.g., capmox-system)
+        let mut target_namespaces = vec![capi_namespace(name)];
         if let Some(ns) = lattice_capi::installer::infra_provider_namespace(provider_type) {
+            target_namespaces.push(ns.to_string());
+        }
+
+        for ns in &target_namespaces {
             lattice_secret_provider::credentials::ensure_credentials(
                 client, &provider_name, credentials, credential_data, ns,
                 "lattice-cluster-controller",
@@ -167,14 +171,6 @@ async fn handle_child_cluster(
             .await
             .map_err(|e| Error::internal(e.to_string()))?;
         }
-
-        // Per-cluster CAPI namespace (e.g., capi-{cluster})
-        lattice_secret_provider::credentials::ensure_credentials(
-            client, &provider_name, credentials, credential_data, &capi_namespace(name),
-            "lattice-cluster-controller",
-        )
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?;
     }
 
     // Ensure CAPI is installed before provisioning

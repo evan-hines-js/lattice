@@ -105,6 +105,7 @@ pub use types::{
     ControlPlaneSpec, EndpointsSpec, GpuCapacity, InstanceType, KubernetesSpec, NodeCapacityHint,
     NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig, ProviderSpec, ProviderType,
     RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
+    credential_secret_name,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

@@ -710,6 +710,23 @@ pub struct SecretRef {
     pub namespace: String,
 }
 
+/// Standard ESO credential secret name for a provider: `{name}-credentials`.
+///
+/// Single source of truth for the naming convention used by all provider CRDs.
+pub fn credential_secret_name(provider_name: &str) -> String {
+    format!("{provider_name}-credentials")
+}
+
+impl SecretRef {
+    /// Build a credential SecretRef for a provider in the given namespace.
+    pub fn for_credentials(provider_name: &str, namespace: &str) -> Self {
+        Self {
+            name: credential_secret_name(provider_name),
+            namespace: namespace.to_string(),
+        }
+    }
+}
+
 fn default_lattice_namespace() -> String {
     LATTICE_SYSTEM_NAMESPACE.to_string()
 }

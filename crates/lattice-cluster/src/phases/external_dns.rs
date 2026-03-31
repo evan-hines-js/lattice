@@ -166,9 +166,8 @@ fn build_namespace() -> Value {
 
 /// Build all Kubernetes resource manifests for a single external-dns provider instance.
 ///
-/// `secret_ref` is the resolved credential reference — either from ESO (`k8s_secret_ref()`)
-/// or manual (`credentialsSecretRef`). This ensures the secret name and namespace are
-/// always correct regardless of credential mode.
+/// `secret_ref` is the resolved ESO credential reference from `k8s_secret_ref()`,
+/// pointing to the synced secret in the external-dns namespace.
 pub fn build_external_dns_manifests(
     spec: &DNSProviderSpec,
     provider_name: &str,

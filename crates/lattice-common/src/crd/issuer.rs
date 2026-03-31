@@ -193,14 +193,10 @@ impl CertIssuer {
     /// types that don't need credentials (SelfSigned, ACME HTTP-01).
     pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
         match self.spec.type_ {
-            IssuerType::Ca => Some(SecretRef {
-                name: format!("{}-credentials", self.name_any()),
-                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-            }),
-            IssuerType::Vault => Some(SecretRef {
-                name: format!("{}-credentials", self.name_any()),
-                namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
-            }),
+            IssuerType::Ca | IssuerType::Vault => Some(SecretRef::for_credentials(
+                &self.name_any(),
+                LATTICE_SYSTEM_NAMESPACE,
+            )),
             _ => None,
         }
     }

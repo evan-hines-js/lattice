@@ -27,24 +27,15 @@ use super::workload::resources::ResourceSpec;
 /// spec:
 ///   type: route53
 ///   zone: example.com
-///   credentialsSecretRef:
-///     name: aws-dns-creds
+///   credentials:
+///     type: secret
+///     params:
+///       provider: vault-prod
+///       remoteKey: dns/aws/prod
+///       keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
 ///   route53:
 ///     region: us-east-1
 ///     hostedZoneId: Z1234567890
-/// ```
-///
-/// Example (Cloudflare):
-/// ```yaml
-/// apiVersion: lattice.dev/v1alpha1
-/// kind: DNSProvider
-/// metadata:
-///   name: cloudflare-prod
-/// spec:
-///   type: cloudflare
-///   zone: example.com
-///   credentialsSecretRef:
-///     name: cf-api-token
 /// ```
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
@@ -327,14 +318,10 @@ impl DNSProvider {
     /// `{name}-credentials` in `external-dns` namespace (where external-dns
     /// pods run). Returns `None` if no credentials are configured.
     pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
-        if self.spec.credentials.is_some() {
-            Some(SecretRef {
-                name: format!("{}-credentials", self.name_any()),
-                namespace: EXTERNAL_DNS_NAMESPACE.to_string(),
-            })
-        } else {
-            None
-        }
+        self.spec
+            .credentials
+            .as_ref()
+            .map(|_| SecretRef::for_credentials(&self.name_any(), EXTERNAL_DNS_NAMESPACE))
     }
 }
 
