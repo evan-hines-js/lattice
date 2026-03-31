@@ -109,17 +109,24 @@ pub async fn fetch_distributable_resources(
     // This enables cross-cluster mTLS via Istio's cacerts intermediate CA chain.
     secret_names.insert(lattice_common::CA_SECRET.to_string());
 
-    // Collect all secrets labeled for distribution across all namespaces.
-    // The `lattice.dev/distribute: "true"` label marks any secret for
-    // propagation to child clusters (CA cert, provider credentials, etc.).
-    let all_secrets: Api<Secret> = Api::all(client.clone());
+    // Collect secrets labeled for distribution from trusted namespaces only.
+    // Only lattice-system and lattice-secrets are scanned — this prevents
+    // a compromised workload from injecting secrets into child clusters
+    // by labeling secrets in arbitrary namespaces.
     let distribute_lp = ListParams::default().labels("lattice.dev/distribute=true");
     let mut secrets = Vec::new();
     let mut distributed_names: HashSet<String> = HashSet::new();
-    if let Ok(secret_list) = all_secrets.list(&distribute_lp).await {
-        for secret in &secret_list.items {
-            distributed_names.insert(secret.name_any());
-            secrets.push(serialize_for_distribution(secret)?);
+    let trusted_namespaces = [
+        LATTICE_SYSTEM_NAMESPACE,
+        lattice_common::LOCAL_SECRETS_NAMESPACE,
+    ];
+    for ns in trusted_namespaces {
+        let ns_api: Api<Secret> = Api::namespaced(client.clone(), ns);
+        if let Ok(secret_list) = ns_api.list(&distribute_lp).await {
+            for secret in &secret_list.items {
+                distributed_names.insert(secret.name_any());
+                secrets.push(serialize_for_distribution(secret)?);
+            }
         }
     }
 

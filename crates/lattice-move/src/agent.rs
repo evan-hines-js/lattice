@@ -384,11 +384,11 @@ impl AgentMover {
             let target_uid = match self.uid_map.get(&owner.source_uid) {
                 Some(uid) => uid,
                 None => {
-                    tracing::debug!(
+                    tracing::warn!(
                         source_uid = %owner.source_uid,
                         kind = %owner.kind,
                         name = %owner.name,
-                        "Skipping ownerReference not in move graph"
+                        "Dropping ownerReference not in move graph (resource may become orphaned)"
                     );
                     continue;
                 }

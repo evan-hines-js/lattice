@@ -278,6 +278,14 @@ async fn apply_secrets_to_namespaces(
             .as_deref()
             .unwrap_or(LATTICE_SYSTEM_NAMESPACE);
 
+        // Reject secrets targeting sensitive namespaces to prevent a
+        // compromised parent from injecting secrets into kube-system etc.
+        const FORBIDDEN_NAMESPACES: &[&str] = &["kube-system", "kube-public", "kube-node-lease", "default"];
+        if FORBIDDEN_NAMESPACES.contains(&namespace) {
+            tracing::warn!(secret = %name, namespace, "Rejecting secret targeting forbidden namespace");
+            continue;
+        }
+
         lattice_common::kube_utils::ensure_namespace(client, namespace, None, "lattice-pivot")
             .await
             .map_err(|e| {
