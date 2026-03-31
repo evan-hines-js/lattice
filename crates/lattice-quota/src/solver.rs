@@ -412,7 +412,11 @@ fn clamp_plan(
         None => quota_min,
     };
     let max_nodes = match spec.max {
-        Some(pool_max) => pool_max.min(quota_max).max(min_nodes),
+        // Admin configured a ceiling — respect it. The solver sets min
+        // from hard quotas; max is the admin's decision. The autoscaler
+        // only scales to meet pending pods, so pool_max is safe.
+        Some(pool_max) => pool_max.max(min_nodes),
+        // No admin ceiling — solver's demand-based max is the constraint.
         None => quota_max.max(min_nodes),
     };
     PoolCapacityPlan {
