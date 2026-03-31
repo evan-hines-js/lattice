@@ -414,20 +414,13 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         false,
         {
             let client = client.clone();
-            let config = config.clone();
             move || {
                 let client = client.clone();
-                let config = config.clone();
                 let quota_sender = quota_sender.clone();
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeQuota>(&client).await;
-                    let cost_provider: Option<Arc<dyn lattice_cost::CostProvider>> = Some(
-                        Arc::new(lattice_cost::ConfigMapCostProvider::new(client.clone())),
-                    );
                     let ctx = Arc::new(lattice_quota::QuotaContext {
                         client: client.clone(),
-                        cluster_name: config.cluster_name.clone(),
-                        cost_provider,
                         sender: quota_sender,
                     });
                     controller_runner::simple_controller(

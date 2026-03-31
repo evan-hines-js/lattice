@@ -1,22 +1,19 @@
 //! Quota controller for Lattice
 //!
-//! Owns the `LatticeQuota` CRD lifecycle and drives CAPI autoscaling:
+//! Owns the `LatticeQuota` CRD lifecycle:
 //!
 //! - Validates quota specs and tracks per-principal resource usage in status
-//! - Computes aggregate hard limits across all quotas on the cluster
-//! - Translates hard quota sums into MachineDeployment min annotations
-//! - Pool `spec.max` is the admin-configured autoscaler ceiling
+//! - Pushes quota snapshots through a watch channel for workload controllers
+//! - Workload compilers check budgets at compile time (soft limit enforcement)
 //!
-//! Hard quotas guarantee reserved capacity (autoscaler min). Soft quotas
-//! are enforced at compile time (workload rejection) and don't affect
-//! infrastructure scaling. The autoscaler handles scaling within spec.max.
+//! Quotas are a budget system, not an infrastructure scaling system.
+//! Pool `spec.min`/`spec.max` control autoscaler bounds directly.
+//! The autoscaler handles scaling to meet pending pods.
 
 #![deny(missing_docs)]
 
 mod budget;
-mod capacity;
 mod controller;
-pub mod solver;
 mod store;
 
 pub use budget::QuotaBudget;

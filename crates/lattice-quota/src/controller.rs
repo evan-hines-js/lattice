@@ -21,7 +21,6 @@ use lattice_common::resources::{
     compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
 };
 use lattice_common::{ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS};
-use lattice_cost::CostProvider;
 
 const FIELD_MANAGER: &str = "lattice-quota-controller";
 const REQUEUE_SECS: u64 = 30;
@@ -30,10 +29,6 @@ const REQUEUE_SECS: u64 = 30;
 pub struct QuotaContext {
     /// Kubernetes client
     pub client: kube::Client,
-    /// Self-cluster name (for capacity reconciliation)
-    pub cluster_name: Option<String>,
-    /// Cost rate provider (for the ILP solver)
-    pub cost_provider: Option<Arc<dyn CostProvider>>,
     /// Watch channel sender — pushes quota snapshots to workload controllers
     pub sender: crate::QuotaSender,
 }
@@ -112,32 +107,7 @@ pub async fn reconcile(
 
     info!(quota = %name, principal = %quota.spec.principal, phase = %phase, workloads = workload_count, "Reconciled LatticeQuota");
 
-    // Reconcile cluster capacity
-    if let Some(ref cluster_name) = ctx.cluster_name {
-        let rates = load_rates(&ctx.cost_provider).await;
-        if let Err(e) =
-            crate::capacity::reconcile_capacity(client, cluster_name, rates.as_ref()).await
-        {
-            warn!(error = %e, "Capacity reconciliation failed, will retry");
-        }
-    }
-
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SECS)))
-}
-
-async fn load_rates(
-    provider: &Option<Arc<dyn CostProvider>>,
-) -> Option<lattice_cost::CostRates> {
-    match provider {
-        Some(p) => match p.load_rates().await {
-            Ok(r) => Some(r),
-            Err(e) => {
-                debug!(error = %e, "Cost rates unavailable, skipping cost optimization");
-                None
-            }
-        },
-        None => None,
-    }
 }
 
 async fn list_all_quotas(client: &kube::Client) -> Vec<LatticeQuota> {
