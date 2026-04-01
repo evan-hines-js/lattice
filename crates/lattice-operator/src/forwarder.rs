@@ -9,7 +9,7 @@ use lattice_agent::{
 };
 use lattice_cell::{
     start_exec_session, tunnel_request_streaming, ExecRequestParams, K8sRequestParams,
-    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
+    SharedAgentRegistry, TunnelError,
 };
 use lattice_common::routing::split_first_hop;
 use lattice_proto::{ExecRequest, KubernetesRequest, KubernetesResponse};
@@ -22,36 +22,23 @@ use tracing::{debug, error, warn};
 /// Uses the subtree registry to determine which agent connection to route through,
 /// then uses the tunnel functions to forward requests.
 pub struct SubtreeForwarder {
-    subtree_registry: SharedSubtreeRegistry,
-    agent_registry: SharedAgentRegistry,
+    registry: SharedAgentRegistry,
 }
 
-/// Resolved route information for forwarding
 struct ResolvedRoute {
     agent_id: String,
     command_tx: mpsc::Sender<lattice_proto::CellCommand>,
 }
 
 impl SubtreeForwarder {
-    /// Create a new SubtreeForwarder with the given registries.
-    pub fn new(
-        subtree_registry: SharedSubtreeRegistry,
-        agent_registry: SharedAgentRegistry,
-    ) -> Self {
-        Self {
-            subtree_registry,
-            agent_registry,
-        }
+    /// Create a new forwarder backed by the agent registry.
+    pub fn new(registry: SharedAgentRegistry) -> Self {
+        Self { registry }
     }
 
-    /// Resolve the route to a target cluster, failing fast if agent isn't connected.
-    ///
-    /// `first_hop` is the direct child cluster name (first segment of the target path).
-    /// Checks the subtree registry for routing info, then requires the agent to be
-    /// currently connected — returns 503 immediately if not.
     async fn resolve_route(&self, first_hop: &str) -> Result<ResolvedRoute, (u32, String)> {
         let route_info = self
-            .subtree_registry
+            .registry
             .get_route(first_hop)
             .await
             .ok_or_else(|| (404, format!("cluster '{}' not found in subtree", first_hop)))?;
@@ -61,7 +48,7 @@ impl SubtreeForwarder {
             .ok_or((502, "internal routing error: missing agent_id".to_string()))?;
 
         let command_tx = self
-            .agent_registry
+            .registry
             .get_connected_command_tx(&agent_id)
             .ok_or_else(|| (503, format!("agent '{}' not connected", agent_id)))?;
 
@@ -112,7 +99,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
         let params = Self::build_params(target_path, request);
 
         let mut rx = match tunnel_request_streaming(
-            &self.agent_registry,
+            &self.registry,
             first_hop,
             route.command_tx,
             params,
@@ -158,7 +145,7 @@ impl K8sRequestForwarder for SubtreeForwarder {
 
         let params = Self::build_params(target_path, request);
 
-        tunnel_request_streaming(&self.agent_registry, first_hop, route.command_tx, params)
+        tunnel_request_streaming(&self.registry, first_hop, route.command_tx, params)
             .await
             .map(|(_request_id, rx)| rx)
             .map_err(|e| format!("tunnel error: {:?}", e))
@@ -197,7 +184,7 @@ impl ExecRequestForwarder for SubtreeForwarder {
         };
 
         let (session, data_rx) = start_exec_session(
-            &self.agent_registry,
+            &self.registry,
             first_hop,
             route.command_tx,
             exec_params,

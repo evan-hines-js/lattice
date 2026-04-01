@@ -30,8 +30,7 @@ use crate::bootstrap::{
 use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::fetch_distributable_resources;
-use crate::server::{AgentServer, SharedSubtreeRegistry};
-use crate::subtree_registry::SubtreeRegistry;
+use crate::server::AgentServer;
 use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
 use lattice_common::DistributableResources;
 use lattice_common::{
@@ -123,10 +122,8 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     kube_client: Client,
     /// Bootstrap state for cluster registration (set once during ensure_running, cleared on shutdown)
     bootstrap_state: Mutex<Option<Arc<BootstrapState<G>>>>,
-    /// Agent registry for connected agents
+    /// Agent registry — tracks connected agents AND subtree routing
     agent_registry: SharedAgentRegistry,
-    /// Subtree registry for tracking cluster hierarchy
-    subtree_registry: SharedSubtreeRegistry,
     /// Server handles (set once during ensure_running, taken on shutdown)
     handles: Mutex<Option<ServerHandles>>,
     /// Shared peer route config, populated after auth proxy starts
@@ -576,16 +573,16 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// This ensures the CA survives operator restarts.
     pub async fn new(config: ParentConfig, client: &Client) -> Result<Self, CellServerError> {
         let ca_bundle = Arc::new(RwLock::new(load_ca(client).await?));
-        let subtree_registry = Arc::new(SubtreeRegistry::new(config.cluster_name.clone()));
 
         Ok(Self {
             running: AtomicBool::new(false),
+            agent_registry: Arc::new(AgentRegistry::new_with_cluster(
+                config.cluster_name.clone(),
+            )),
             config,
             ca_bundle,
             kube_client: client.clone(),
             bootstrap_state: Mutex::new(None),
-            agent_registry: Arc::new(AgentRegistry::new()),
-            subtree_registry,
             handles: Mutex::new(None),
             peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         })
@@ -594,16 +591,15 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Create with an existing CA (for testing)
     #[cfg(test)]
     pub fn with_ca(config: ParentConfig, ca: CertificateAuthority, client: Client) -> Self {
-        let subtree_registry = Arc::new(SubtreeRegistry::new(config.cluster_name.clone()));
-
         Self {
             running: AtomicBool::new(false),
+            agent_registry: Arc::new(AgentRegistry::new_with_cluster(
+                config.cluster_name.clone(),
+            )),
             config,
             ca_bundle: Arc::new(RwLock::new(CertificateAuthorityBundle::new(ca))),
             kube_client: client,
             bootstrap_state: Mutex::new(None),
-            agent_registry: Arc::new(AgentRegistry::new()),
-            subtree_registry,
             handles: Mutex::new(None),
             peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -617,11 +613,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Get the agent registry
     pub fn agent_registry(&self) -> SharedAgentRegistry {
         self.agent_registry.clone()
-    }
-
-    /// Get the subtree registry
-    pub fn subtree_registry(&self) -> SharedSubtreeRegistry {
-        self.subtree_registry.clone()
     }
 
     /// Get the CA bundle
@@ -820,7 +811,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         let grpc_addr = self.config.grpc_addr;
         let registry = self.agent_registry.clone();
-        let subtree_registry = self.subtree_registry.clone();
 
         // Load certificate blocklist for immediate revocation.
         // Fail-closed: if we can't load the blocklist, refuse to start the gRPC
@@ -839,7 +829,6 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = AgentServer::serve_with_mtls(crate::server::GrpcServerConfig {
                 registry,
-                subtree_registry,
                 addr: grpc_addr,
                 mtls_config,
                 kube_client: grpc_kube_client,

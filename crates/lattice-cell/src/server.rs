@@ -34,13 +34,10 @@ use lattice_proto::{
 use crate::connection::K8sResponseRegistry;
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::state_sync;
-use crate::subtree_registry::{ClusterInfo, SubtreeRegistry};
+use crate::connection::ClusterInfo;
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::{extract_cluster_id_from_cert, MtlsError, ServerMtlsConfig};
 use tonic::transport::server::TlsConnectInfo;
-
-/// Shared reference to SubtreeRegistry
-pub type SharedSubtreeRegistry = std::sync::Arc<SubtreeRegistry>;
 
 /// Timeout for CAPI object import during unpivot. If the distributed move hangs,
 /// the agent will retry on the next attempt rather than blocking indefinitely.
@@ -485,10 +482,8 @@ pub enum GrpcServerError {
 
 /// Configuration for starting the gRPC agent server
 pub struct GrpcServerConfig {
-    /// Agent registry for tracking connections
+    /// Agent registry — tracks connections AND subtree routing
     pub registry: SharedAgentRegistry,
-    /// Subtree registry for tracking cluster hierarchy
-    pub subtree_registry: SharedSubtreeRegistry,
     /// Address to bind the server to
     pub addr: SocketAddr,
     /// mTLS configuration (server cert, key, CA)
@@ -506,8 +501,6 @@ pub struct GrpcServerConfig {
 /// gRPC server for agent communication
 pub struct AgentServer {
     registry: SharedAgentRegistry,
-    /// Subtree registry for tracking cluster hierarchy
-    subtree_registry: SharedSubtreeRegistry,
     /// Kubernetes client for persisting deletion requests
     kube_client: Client,
     /// Certificate blocklist for immediate revocation
@@ -533,7 +526,6 @@ pub type SharedPeerRouteConfig = std::sync::Arc<tokio::sync::RwLock<Option<PeerR
 /// Shared context for processing agent messages within a connection.
 struct MessageContext {
     registry: SharedAgentRegistry,
-    subtree_registry: SharedSubtreeRegistry,
     command_tx: mpsc::Sender<CellCommand>,
     kube_client: Client,
     route_update_tx: crate::route_reconciler::RouteUpdateSender,
@@ -549,7 +541,6 @@ async fn process_agent_message(
     peer_config: Option<&PeerRouteConfig>,
 ) -> bool {
     let registry = &ctx.registry;
-    let subtree_registry = &ctx.subtree_registry;
     let command_tx = &ctx.command_tx;
     let kube_client = &ctx.kube_client;
     let route_update_tx = &ctx.route_update_tx;
@@ -578,7 +569,7 @@ async fn process_agent_message(
             registry.update_state(cluster_name, ready.state());
 
             // Mark cluster as connected in subtree registry (restores connectivity after disconnect)
-            subtree_registry.handle_agent_reconnect(cluster_name).await;
+            registry.handle_agent_reconnect_routes(cluster_name).await;
 
             // If agent reports Ready state, pivot must have completed
             if ready.state() == AgentState::Ready {
@@ -849,7 +840,7 @@ async fn process_agent_message(
                             subtree_clusters = clusters.len(),
                             "Full sync: updating subtree registry"
                         );
-                        subtree_registry
+                        registry
                             .handle_full_sync(cluster_name, clusters)
                             .await;
                     }
@@ -869,7 +860,7 @@ async fn process_agent_message(
                                 "Delta: updating subtree registry"
                             );
                         }
-                        subtree_registry
+                        registry
                             .handle_delta(cluster_name, added, removed)
                             .await;
                     }
@@ -894,7 +885,7 @@ async fn process_agent_message(
                 // Validate each origin cluster belongs to the sender's subtree.
                 // Without this, a compromised agent could inject routes for
                 // arbitrary clusters by setting the `cluster` field in SubtreeService.
-                let allowed_clusters = subtree_registry.clusters_via_agent(cluster_name).await;
+                let allowed_clusters = registry.clusters_via_agent(cluster_name).await;
                 for (origin, origin_routes) in grouped {
                     if origin != *cluster_name && !allowed_clusters.contains(&origin) {
                         warn!(
@@ -1013,7 +1004,6 @@ impl AgentServer {
     /// Create a new agent server with the given registries and kube client
     pub fn new(
         registry: SharedAgentRegistry,
-        subtree_registry: SharedSubtreeRegistry,
         kube_client: Client,
         blocklist: crate::blocklist::CertificateBlocklist,
         route_update_tx: crate::route_reconciler::RouteUpdateSender,
@@ -1021,7 +1011,6 @@ impl AgentServer {
     ) -> Self {
         Self {
             registry,
-            subtree_registry,
             kube_client,
             blocklist,
             route_update_tx,
@@ -1047,7 +1036,6 @@ impl AgentServer {
     pub async fn serve_with_mtls(config: GrpcServerConfig) -> Result<(), GrpcServerError> {
         let server = Self::new(
             config.registry,
-            config.subtree_registry,
             config.kube_client,
             config.blocklist,
             config.route_update_tx,
@@ -1161,7 +1149,6 @@ impl LatticeAgent for AgentServer {
 
         // Clone for the spawned task
         let registry = self.registry.clone();
-        let subtree_registry = self.subtree_registry.clone();
         let kube_client = self.kube_client.clone();
         let route_update_tx = self.route_update_tx.clone();
         let command_tx_clone = command_tx.clone();
@@ -1173,7 +1160,6 @@ impl LatticeAgent for AgentServer {
 
         let msg_ctx = MessageContext {
             registry,
-            subtree_registry,
             command_tx: command_tx_clone,
             kube_client,
             route_update_tx,
@@ -1213,8 +1199,8 @@ impl LatticeAgent for AgentServer {
             let gen = cleanup_generation.load(std::sync::atomic::Ordering::Relaxed);
             if msg_ctx.registry.unregister(&cert_cluster_id, gen) {
                 msg_ctx
-                    .subtree_registry
-                    .handle_agent_disconnect(&cert_cluster_id)
+                    .registry
+                    .handle_agent_disconnect_routes(&cert_cluster_id)
                     .await;
             }
 
@@ -1246,7 +1232,6 @@ mod tests {
     /// This bypasses the kube client requirement for unit tests
     async fn test_handle_message(
         registry: &AgentRegistry,
-        subtree_registry: &SubtreeRegistry,
         msg: &AgentMessage,
         command_tx: &mpsc::Sender<CellCommand>,
     ) {
@@ -1267,7 +1252,7 @@ mod tests {
                     registry.set_pivot_complete(cluster_name, true);
                 }
                 // Mark cluster as connected in subtree registry
-                subtree_registry.handle_agent_reconnect(cluster_name).await;
+                registry.handle_agent_reconnect_routes(cluster_name).await;
             }
             Some(Payload::BootstrapComplete(bc)) => {
                 registry.set_capi_ready(cluster_name, bc.capi_ready);
@@ -1284,12 +1269,12 @@ mod tests {
             Some(Payload::SubtreeState(state)) => {
                 if state.is_full_sync {
                     if let Ok(clusters) = convert_subtree_to_cluster_infos(state) {
-                        subtree_registry
+                        registry
                             .handle_full_sync(cluster_name, clusters)
                             .await;
                     }
                 } else if let Ok((added, removed)) = extract_delta_changes(state) {
-                    subtree_registry
+                    registry
                         .handle_delta(cluster_name, added, removed)
                         .await;
                 }
@@ -1305,33 +1290,16 @@ mod tests {
         }
     }
 
-    /// Create a new registry for tests
-    fn create_test_registry() -> SharedAgentRegistry {
-        Arc::new(AgentRegistry::new())
-    }
-
-    /// Create a new subtree registry for tests
-    fn create_test_subtree_registry() -> SubtreeRegistry {
-        SubtreeRegistry::new("test-cell".to_string())
-    }
-
     /// Test context containing all components needed for message handling tests
     struct TestContext {
         registry: SharedAgentRegistry,
-        subtree_registry: SubtreeRegistry,
         tx: mpsc::Sender<CellCommand>,
     }
 
-    /// Setup common test context for message handling tests
     fn setup_test_context() -> TestContext {
-        let registry = create_test_registry();
-        let subtree_registry = create_test_subtree_registry();
+        let registry = Arc::new(AgentRegistry::new_with_cluster("test-cell".to_string()));
         let (tx, _rx) = mpsc::channel::<CellCommand>(32);
-        TestContext {
-            registry,
-            subtree_registry,
-            tx,
-        }
+        TestContext { registry, tx }
     }
 
     /// Factory function to create a Ready message for tests
@@ -1442,7 +1410,7 @@ mod tests {
 
         let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
 
         assert!(!ctx.registry.is_empty());
         let conn = ctx
@@ -1460,10 +1428,10 @@ mod tests {
         let ctx = setup_test_context();
 
         let msg1 = make_ready_msg("test-cluster", AgentState::Provisioning);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg1, &ctx.tx).await;
 
         let msg2 = make_ready_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg2, &ctx.tx).await;
 
         let conn = ctx
             .registry
@@ -1478,7 +1446,7 @@ mod tests {
 
         let msg = make_bootstrap_complete_msg("test-cluster", true);
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
@@ -1486,10 +1454,10 @@ mod tests {
         let ctx = setup_test_context();
 
         let ready_msg = make_ready_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &ready_msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &ready_msg, &ctx.tx).await;
 
         let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
 
         let conn = ctx
             .registry
@@ -1504,7 +1472,7 @@ mod tests {
 
         let msg = make_cluster_health_msg("test-cluster", 3, 3);
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
@@ -1513,7 +1481,7 @@ mod tests {
 
         let msg = make_status_response_msg("test-cluster", "req-123", AgentState::Ready);
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
@@ -1522,7 +1490,7 @@ mod tests {
 
         let msg = make_empty_msg("test-cluster");
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
     }
 
     #[tokio::test]
@@ -1530,11 +1498,11 @@ mod tests {
         let ctx = setup_test_context();
 
         let msg1 = make_ready_msg("cluster-1", AgentState::Ready);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg1, &ctx.tx).await;
 
         let msg2 =
             make_ready_msg_with_versions("cluster-2", AgentState::Provisioning, "0.2.0", "1.29.0");
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg2, &ctx.tx).await;
 
         assert_eq!(ctx.registry.len(), 2);
 
@@ -1556,7 +1524,7 @@ mod tests {
         let ctx = setup_test_context();
 
         let msg = make_ready_msg("test-cluster", AgentState::Provisioning);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
         assert_eq!(
             ctx.registry
                 .get("test-cluster")
@@ -1566,7 +1534,7 @@ mod tests {
         );
 
         let msg = make_heartbeat_msg("test-cluster", AgentState::Ready);
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
         assert_eq!(
             ctx.registry
                 .get("test-cluster")
@@ -1604,13 +1572,13 @@ mod tests {
             })),
         };
 
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg, &ctx.tx).await;
 
         // Verify subtree registry was updated
-        assert!(ctx.subtree_registry.contains("child-cluster").await);
-        assert!(ctx.subtree_registry.contains("grandchild").await);
+        assert!(ctx.registry.has_route("child-cluster").await);
+        assert!(ctx.registry.has_route("grandchild").await);
         // Self is always present
-        assert!(ctx.subtree_registry.contains("test-cell").await);
+        assert!(ctx.registry.has_route("test-cell").await);
     }
 
     // =========================================================================
@@ -1643,7 +1611,7 @@ mod tests {
                 services: vec![],
             })),
         };
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg1, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg1, &ctx.tx).await;
 
         // Then, delta with removal
         let msg2 = AgentMessage {
@@ -1660,9 +1628,9 @@ mod tests {
                 services: vec![],
             })),
         };
-        test_handle_message(&ctx.registry, &ctx.subtree_registry, &msg2, &ctx.tx).await;
+        test_handle_message(&ctx.registry, &msg2, &ctx.tx).await;
 
-        assert!(!ctx.subtree_registry.contains("child-cluster").await);
+        assert!(!ctx.registry.has_route("child-cluster").await);
     }
 
     // =========================================================================

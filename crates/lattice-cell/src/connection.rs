@@ -10,12 +10,44 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use std::collections::{HashMap, HashSet};
+
 use dashmap::DashMap;
 use lattice_proto::{AgentState, CellCommand, ExecData, KubernetesResponse};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use lattice_move::{BatchAck, CompleteAck};
+
+// ============================================================================
+// Subtree Route Types
+// ============================================================================
+
+/// Information about a cluster in the subtree
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClusterInfo {
+    /// Cluster name (unique identifier)
+    pub name: String,
+    /// Immediate parent cluster name
+    pub parent: String,
+    /// Current phase (Pending, Provisioning, Ready, etc.)
+    pub phase: String,
+    /// Labels for policy matching
+    pub labels: HashMap<String, String>,
+}
+
+/// Route information for reaching a cluster
+#[derive(Clone, Debug)]
+pub struct RouteInfo {
+    /// Agent ID to route through (None if this is self)
+    pub agent_id: Option<String>,
+    /// Whether this cluster is the current cell itself
+    pub is_self: bool,
+    /// Whether the agent is currently connected (false = temporarily unavailable)
+    pub connected: bool,
+    /// Cluster info
+    pub cluster: ClusterInfo,
+}
 
 // ============================================================================
 // Traits for Testability
@@ -233,6 +265,14 @@ pub struct AgentRegistry {
     pending_by_cluster: DashMap<String, std::collections::HashSet<String>>,
     /// Proxy configuration for kubeconfig patching
     proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
+
+    // -- Subtree routing (merged from SubtreeRegistry) --
+
+    /// This cell's cluster name
+    cluster_name: String,
+    /// All clusters reachable through this cell (direct + transitive via child agents).
+    /// Used by the auth proxy for routing and the kubeconfig endpoint for listing.
+    routes: DashMap<String, RouteInfo>,
 }
 
 /// Maximum age of a teardown guard before it's considered stale.
@@ -262,6 +302,31 @@ fn register_pending<T>(map: &DashMap<String, T>, request_id: &str, sender: T, la
 
 impl Default for AgentRegistry {
     fn default() -> Self {
+        Self::new_with_cluster("unknown".to_string())
+    }
+}
+
+impl AgentRegistry {
+    /// Create a registry with the cell's cluster name.
+    ///
+    /// Registers self as a route so the auth proxy can resolve it.
+    pub fn new_with_cluster(cluster_name: String) -> Self {
+        let routes = DashMap::new();
+        routes.insert(
+            cluster_name.clone(),
+            RouteInfo {
+                agent_id: None,
+                is_self: true,
+                connected: true,
+                cluster: ClusterInfo {
+                    name: cluster_name.clone(),
+                    parent: String::new(),
+                    phase: "Ready".to_string(),
+                    labels: HashMap::new(),
+                },
+            },
+        );
+
         Self {
             agents: DashMap::new(),
             unpivot_manifests: DashMap::new(),
@@ -273,6 +338,8 @@ impl Default for AgentRegistry {
             pending_exec_data: DashMap::new(),
             pending_by_cluster: DashMap::new(),
             proxy_config: std::sync::OnceLock::new(),
+            cluster_name,
+            routes,
         }
     }
 }
@@ -896,6 +963,179 @@ impl AgentRegistry {
             info!(cluster = %name, "Removed stale disconnected agent from registry");
         }
         count
+    }
+}
+
+// ============================================================================
+// Subtree Routing
+// ============================================================================
+
+impl AgentRegistry {
+    /// Get this cell's cluster name
+    pub fn cluster_name(&self) -> &str {
+        &self.cluster_name
+    }
+
+    /// Get route info for a cluster (direct or transitive)
+    pub async fn get_route(&self, cluster_name: &str) -> Option<RouteInfo> {
+        self.routes.get(cluster_name).map(|r| r.clone())
+    }
+
+    /// Get all clusters with their labels
+    pub async fn all_clusters(&self) -> Vec<(String, HashMap<String, String>)> {
+        self.routes
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().cluster.labels.clone()))
+            .collect()
+    }
+
+    /// Get all clusters accessible via a specific agent
+    pub async fn clusters_via_agent(&self, agent_id: &str) -> Vec<String> {
+        self.routes
+            .iter()
+            .filter(|entry| entry.value().agent_id.as_deref() == Some(agent_id))
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Handle full subtree state from an agent (replaces previous state).
+    ///
+    /// Inserts new routes first, then removes stale routes owned by this agent.
+    /// Rejects self-route hijacking and cross-agent route hijacking.
+    pub async fn handle_full_sync(&self, agent_id: &str, clusters: Vec<ClusterInfo>) {
+        let mut new_names: HashSet<String> = HashSet::new();
+
+        for cluster in clusters {
+            new_names.insert(cluster.name.clone());
+            self.try_insert_route(agent_id, cluster);
+        }
+
+        let stale_keys: Vec<String> = self
+            .routes
+            .iter()
+            .filter(|entry| {
+                entry.value().agent_id.as_deref() == Some(agent_id)
+                    && !new_names.contains(entry.key())
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_keys {
+            self.routes
+                .remove_if(&key, |_, info| info.agent_id.as_deref() == Some(agent_id));
+        }
+    }
+
+    /// Handle incremental subtree update from an agent.
+    ///
+    /// Only modifies routes owned by `agent_id`.
+    pub async fn handle_delta(
+        &self,
+        agent_id: &str,
+        added: Vec<ClusterInfo>,
+        removed: Vec<String>,
+    ) {
+        for name in removed {
+            self.routes
+                .remove_if(&name, |_, info| info.agent_id.as_deref() == Some(agent_id));
+        }
+        for cluster in added {
+            self.try_insert_route(agent_id, cluster);
+        }
+    }
+
+    /// Mark all routes via this agent as disconnected (not removed)
+    pub async fn handle_agent_disconnect_routes(&self, agent_id: &str) {
+        for mut entry in self.routes.iter_mut() {
+            if entry.value().agent_id.as_deref() == Some(agent_id) {
+                entry.value_mut().connected = false;
+            }
+        }
+    }
+
+    /// Mark all routes via this agent as connected
+    pub async fn handle_agent_reconnect_routes(&self, agent_id: &str) {
+        for mut entry in self.routes.iter_mut() {
+            if entry.value().agent_id.as_deref() == Some(agent_id) {
+                entry.value_mut().connected = true;
+            }
+        }
+    }
+
+    /// Check if a cluster is currently connected
+    pub async fn is_route_connected(&self, cluster_name: &str) -> bool {
+        self.routes
+            .get(cluster_name)
+            .map(|r| r.connected)
+            .unwrap_or(false)
+    }
+
+    /// Get count of clusters in subtree
+    pub async fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+
+    /// Check if a cluster is in the subtree
+    pub async fn has_route(&self, cluster_name: &str) -> bool {
+        self.routes.contains_key(cluster_name)
+    }
+
+    /// Get clusters by parent
+    pub async fn children_of(&self, parent_name: &str) -> Vec<String> {
+        self.routes
+            .iter()
+            .filter(|entry| entry.value().cluster.parent == parent_name)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Try to insert a route with security guards.
+    fn try_insert_route(&self, agent_id: &str, cluster: ClusterInfo) {
+        let cluster_name = &cluster.name;
+
+        if *cluster_name == self.cluster_name {
+            warn!(
+                agent_id = %agent_id,
+                cluster = %cluster_name,
+                "Agent attempted to register a route for the cell itself — rejected"
+            );
+            return;
+        }
+
+        if let Some(existing) = self.routes.get(cluster_name) {
+            if let Some(ref existing_agent) = existing.agent_id {
+                if existing_agent != agent_id {
+                    if existing.connected {
+                        warn!(
+                            agent_id = %agent_id,
+                            existing_agent = %existing_agent,
+                            cluster = %cluster_name,
+                            "Agent attempted to hijack route owned by another agent — rejected"
+                        );
+                        return;
+                    }
+                    if cluster.parent != existing.cluster.parent {
+                        warn!(
+                            agent_id = %agent_id,
+                            existing_agent = %existing_agent,
+                            cluster = %cluster_name,
+                            "Agent attempted to take over disconnected route with mismatched parent — rejected"
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.routes.insert(
+            cluster_name.clone(),
+            RouteInfo {
+                agent_id: Some(agent_id.to_string()),
+                is_self: false,
+                connected: true,
+                cluster,
+            },
+        );
     }
 }
 

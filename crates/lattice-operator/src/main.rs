@@ -677,12 +677,10 @@ async fn setup_cell_infra(
         let client = client.clone();
         let name = name.clone();
         let token = agent_token.clone();
-        let subtree_forwarder =
-            SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry());
-        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> = Arc::new(subtree_forwarder);
-        let exec_forwarder: Arc<dyn lattice_agent::ExecRequestForwarder> = Arc::new(
-            SubtreeForwarder::new(servers.subtree_registry(), servers.agent_registry()),
-        );
+        let forwarder: Arc<dyn lattice_agent::K8sRequestForwarder> =
+            Arc::new(SubtreeForwarder::new(servers.agent_registry()));
+        let exec_forwarder: Arc<dyn lattice_agent::ExecRequestForwarder> =
+            Arc::new(SubtreeForwarder::new(servers.agent_registry()));
         tokio::spawn(async move {
             tokio::select! {
                 _ = token.cancelled() => {}
@@ -1072,9 +1070,7 @@ async fn start_auth_proxy(
         base_url,
     };
 
-    let subtree = parent_servers.subtree_registry();
-    let agent_registry = parent_servers.agent_registry();
-    let backend = Arc::new(CellProxyBackend::new(subtree, agent_registry));
+    let backend = Arc::new(CellProxyBackend::new(parent_servers.agent_registry()));
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 

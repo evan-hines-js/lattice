@@ -27,16 +27,14 @@ pub mod resources;
 pub mod route_reconciler;
 pub mod server;
 pub mod state_sync;
-pub mod subtree_registry;
-
 pub use bootstrap::{
     bootstrap_router, generate_bootstrap_bundle, generate_for_provider, BootstrapBundleConfig,
     BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{
-    AgentConnection, AgentRegistry, K8sResponseRegistry, KubeconfigProxyConfig,
-    PivotSourceManifests, SendError, SharedAgentRegistry, UnpivotManifests,
+    AgentConnection, AgentRegistry, ClusterInfo, K8sResponseRegistry, KubeconfigProxyConfig,
+    PivotSourceManifests, RouteInfo, SendError, SharedAgentRegistry, UnpivotManifests,
     HEARTBEAT_STALE_THRESHOLD,
 };
 pub use exec_tunnel::{
@@ -50,7 +48,4 @@ pub use move_sender::GrpcMoveCommandSender;
 pub use parent::{create_ca, load_ca, CellServerError, ParentConfig, ParentServers};
 pub use resilient_tunnel::tunnel_request;
 pub use resources::{fetch_distributable_resources, ResourceError};
-pub use server::{
-    AgentServer, GrpcServerConfig, PeerRouteConfig, SharedPeerRouteConfig, SharedSubtreeRegistry,
-};
-pub use subtree_registry::{ClusterInfo, RouteInfo, SubtreeRegistry};
+pub use server::{AgentServer, GrpcServerConfig, PeerRouteConfig, SharedPeerRouteConfig};

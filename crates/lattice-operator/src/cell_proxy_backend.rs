@@ -16,30 +16,26 @@ use lattice_api::backend::{
 };
 use lattice_cell::{
     start_exec_session, tunnel_request, ExecRequestParams, ExecSession, K8sRequestParams,
-    SharedAgentRegistry, SharedSubtreeRegistry, TunnelError,
+    SharedAgentRegistry, TunnelError,
 };
 use lattice_proto::ExecData;
 
-/// ProxyBackend implementation backed by lattice-cell registries
+/// ProxyBackend implementation backed by the unified AgentRegistry
 pub struct CellProxyBackend {
-    subtree: SharedSubtreeRegistry,
-    agent_registry: SharedAgentRegistry,
+    registry: SharedAgentRegistry,
 }
 
 impl CellProxyBackend {
     /// Create a new CellProxyBackend
-    pub fn new(subtree: SharedSubtreeRegistry, agent_registry: SharedAgentRegistry) -> Self {
-        Self {
-            subtree,
-            agent_registry,
-        }
+    pub fn new(registry: SharedAgentRegistry) -> Self {
+        Self { registry }
     }
 }
 
 #[async_trait]
 impl ProxyBackend for CellProxyBackend {
     async fn get_route(&self, cluster_name: &str) -> Option<ProxyRouteInfo> {
-        self.subtree
+        self.registry
             .get_route(cluster_name)
             .await
             .map(|route| ProxyRouteInfo {
@@ -51,7 +47,7 @@ impl ProxyBackend for CellProxyBackend {
     }
 
     async fn all_clusters(&self) -> Vec<(String, HashMap<String, String>)> {
-        self.subtree.all_clusters().await
+        self.registry.all_clusters().await
     }
 
     async fn tunnel_request(
@@ -71,7 +67,7 @@ impl ProxyBackend for CellProxyBackend {
             source_groups: request.source_groups,
         };
 
-        tunnel_request(&self.agent_registry, agent_id, params)
+        tunnel_request(&self.registry, agent_id, params)
             .await
             .map_err(tunnel_error_to_proxy_error)
     }
@@ -82,7 +78,7 @@ impl ProxyBackend for CellProxyBackend {
         request: ExecTunnelRequest,
     ) -> Result<(Box<dyn ExecSessionHandle>, mpsc::Receiver<ExecData>), ProxyError> {
         let command_tx = self
-            .agent_registry
+            .registry
             .get_connected_command_tx(agent_id)
             .ok_or(ProxyError::AgentDisconnected)?;
 
@@ -95,7 +91,7 @@ impl ProxyBackend for CellProxyBackend {
         };
 
         let (session, data_rx) =
-            start_exec_session(&self.agent_registry, agent_id, command_tx, params)
+            start_exec_session(&self.registry, agent_id, command_tx, params)
                 .await
                 .map_err(|e| ProxyError::SendFailed(e.to_string()))?;
 
