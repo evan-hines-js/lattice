@@ -70,16 +70,6 @@ pub trait ServiceKubeClient: Send + Sync {
         status: &LatticeServiceStatus,
     ) -> Result<(), Error>;
 
-    /// Get a LatticeService by name and namespace
-    async fn get_service(
-        &self,
-        name: &str,
-        namespace: &str,
-    ) -> Result<Option<LatticeService>, Error>;
-
-    /// List all LatticeServices across all namespaces
-    async fn list_services(&self) -> Result<Vec<LatticeService>, Error>;
-
     /// Apply compiled workloads and policies to the cluster
     async fn apply_compiled_service(
         &self,
@@ -87,9 +77,6 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error>;
-
-    /// Check if a LatticeMeshMember is Ready (policies fully applied, including ServiceEntries)
-    async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error>;
 
     /// Delete ExternalSecrets owned by a service when Cedar policy revokes access.
     ///
@@ -113,18 +100,6 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
         replicas: i32,
     ) -> Result<(), Error>;
-
-    /// Hash the `.data` field of all K8s Secrets owned by a service.
-    ///
-    /// Lists Secrets labeled `lattice.dev/service={service_name}` in the given namespace,
-    /// sorts keys deterministically, and returns a content hash. Same secret values produce
-    /// the same hash (content-addressable), so identical re-syncs by ESO don't trigger
-    /// spurious rollouts.
-    async fn hash_owned_secrets(
-        &self,
-        service_name: &str,
-        namespace: &str,
-    ) -> Result<String, Error>;
 
     /// Delete resources that were previously applied but are no longer in the compiled output.
     ///
@@ -170,25 +145,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         )
         .await?;
         Ok(())
-    }
-
-    async fn get_service(
-        &self,
-        name: &str,
-        namespace: &str,
-    ) -> Result<Option<LatticeService>, Error> {
-        let api: Api<LatticeService> = Api::namespaced(self.client.clone(), namespace);
-        match api.get(name).await {
-            Ok(svc) => Ok(Some(svc)),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn list_services(&self) -> Result<Vec<LatticeService>, Error> {
-        let api: Api<LatticeService> = Api::all(self.client.clone());
-        let list = api.list(&Default::default()).await?;
-        Ok(list.items)
     }
 
     async fn apply_compiled_service(
@@ -409,68 +365,6 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         Ok(())
     }
 
-    async fn is_mesh_member_ready(&self, name: &str, namespace: &str) -> Result<bool, Error> {
-        use lattice_common::crd::{LatticeMeshMember, MeshMemberPhase};
-        let api: Api<LatticeMeshMember> = Api::namespaced(self.client.clone(), namespace);
-        match api.get_opt(name).await? {
-            Some(mm) => Ok(mm
-                .status
-                .as_ref()
-                .map(|s| s.phase == MeshMemberPhase::Ready)
-                .unwrap_or(false)),
-            None => Ok(false),
-        }
-    }
-
-    async fn hash_owned_secrets(
-        &self,
-        service_name: &str,
-        namespace: &str,
-    ) -> Result<String, Error> {
-        use k8s_openapi::api::core::v1::Secret as K8sSecret;
-
-        let api: Api<K8sSecret> = Api::namespaced(self.client.clone(), namespace);
-        let label_selector = format!("{}={}", lattice_common::LABEL_SERVICE_OWNER, service_name);
-        let lp = kube::api::ListParams::default().labels(&label_selector);
-
-        let list = api.list(&lp).await.map_err(|e| {
-            Error::internal_with_context(
-                "hash_owned_secrets",
-                format!("list Secrets for {}: {}", service_name, e),
-            )
-        })?;
-
-        if list.items.is_empty() {
-            return Ok(String::new());
-        }
-
-        // Sort secrets by name for deterministic ordering
-        let mut secrets: Vec<_> = list.items.iter().collect();
-        secrets.sort_by_key(|s| s.metadata.name.as_deref().unwrap_or(""));
-
-        let mut data = String::new();
-        for secret in secrets {
-            let secret_name = secret.metadata.name.as_deref().unwrap_or("");
-            if let Some(ref secret_data) = secret.data {
-                let mut keys: Vec<_> = secret_data.keys().collect();
-                keys.sort();
-                for key in keys {
-                    if let Some(value) = secret_data.get(key) {
-                        use std::fmt::Write;
-                        let _ = write!(data, "{}/{}=", secret_name, key);
-                        // Append raw bytes as hex — stable, no encoding dependency
-                        for byte in &value.0 {
-                            let _ = write!(data, "{:02x}", byte);
-                        }
-                        data.push('\n');
-                    }
-                }
-            }
-        }
-
-        Ok(lattice_common::kube_utils::deterministic_hash(&data))
-    }
-
     async fn cleanup_orphaned_resources(
         &self,
         service_name: &str,
@@ -644,6 +538,85 @@ impl ServiceKubeClientImpl {
 }
 
 // =============================================================================
+// Cache-based read helpers (no API calls — reads from reflector cache)
+// =============================================================================
+
+/// Check if a `LatticeMeshMember` is in the Ready phase via the resource cache.
+fn is_mesh_member_ready(
+    cache: &lattice_cache::ResourceCache,
+    name: &str,
+    namespace: &str,
+) -> bool {
+    use lattice_common::crd::{LatticeMeshMember, MeshMemberPhase};
+    cache
+        .get_namespaced::<LatticeMeshMember>(name, namespace)
+        .map(|mm| {
+            mm.status
+                .as_ref()
+                .map(|s| s.phase == MeshMemberPhase::Ready)
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Hash the `.data` field of all cached K8s Secrets owned by a service.
+///
+/// Filters cached `Secret` objects by namespace and `lattice.dev/service` label,
+/// sorts deterministically, and returns a content hash. Same secret values produce
+/// the same hash (content-addressable), so identical re-syncs by ESO don't trigger
+/// spurious rollouts.
+fn hash_secrets_from_cache(
+    cache: &lattice_cache::ResourceCache,
+    service_name: &str,
+    namespace: &str,
+) -> String {
+    use k8s_openapi::api::core::v1::Secret as K8sSecret;
+
+    let all_secrets = cache.list::<K8sSecret>();
+    let mut secrets: Vec<_> = all_secrets
+        .iter()
+        .filter(|s| {
+            s.metadata.namespace.as_deref() == Some(namespace)
+                && s.metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get(lattice_common::LABEL_SERVICE_OWNER))
+                    .map(|v| v == service_name)
+                    .unwrap_or(false)
+        })
+        .collect();
+
+    if secrets.is_empty() {
+        return String::new();
+    }
+
+    // Sort secrets by name for deterministic ordering
+    secrets.sort_by_key(|s| s.metadata.name.as_deref().unwrap_or(""));
+
+    let mut data = String::new();
+    for secret in secrets {
+        let secret_name = secret.metadata.name.as_deref().unwrap_or("");
+        if let Some(ref secret_data) = secret.data {
+            let mut keys: Vec<_> = secret_data.keys().collect();
+            keys.sort();
+            for key in keys {
+                if let Some(value) = secret_data.get(key) {
+                    use std::fmt::Write;
+                    let _ = write!(data, "{}/{}=", secret_name, key);
+                    // Append raw bytes as hex — stable, no encoding dependency
+                    for byte in &value.0 {
+                        let _ = write!(data, "{:02x}", byte);
+                    }
+                    data.push('\n');
+                }
+            }
+        }
+    }
+
+    lattice_common::kube_utils::deterministic_hash(&data)
+}
+
+// =============================================================================
 // Controller context
 // =============================================================================
 
@@ -799,11 +772,7 @@ pub async fn reconcile(
 
     // Hash ESO-managed secret content so rotated secrets trigger rollouts.
     // Same content = same hash = no spurious rollout (content-addressable).
-    let eso_hash = ctx
-        .kube
-        .hash_owned_secrets(&name, namespace)
-        .await
-        .unwrap_or_default();
+    let eso_hash = hash_secrets_from_cache(&ctx.cache, &name, namespace);
 
     let missing_deps = check_missing_dependencies(&service.spec, &ctx.graph, namespace);
     if !missing_deps.is_empty() {
@@ -963,7 +932,7 @@ async fn compile_and_apply(
     }
 
     // Don't mark Ready until the MeshMember controller has fully reconciled
-    if has_mesh_member && !ctx.kube.is_mesh_member_ready(name, namespace).await? {
+    if has_mesh_member && !is_mesh_member_ready(&ctx.cache, name, namespace) {
         debug!("mesh member not yet ready, staying in Compiling");
         // Only write status if not already Compiling — avoids watch-event loop
         let already_compiling = service
@@ -1271,6 +1240,27 @@ mod tests {
         }
     }
 
+    /// Build a cache with a Ready LatticeMeshMember for the given service.
+    /// Tests that compile services with graph edges produce mesh members,
+    /// so the cache needs a Ready entry to pass the readiness gate.
+    fn cache_with_ready_mesh_member(name: &str, namespace: &str) -> lattice_cache::ResourceCache {
+        use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase};
+        let mut mm: LatticeMeshMember = serde_json::from_value(serde_json::json!({
+            "apiVersion": "lattice.dev/v1alpha1",
+            "kind": "LatticeMeshMember",
+            "metadata": { "name": name, "namespace": namespace },
+            "spec": { "target": { "selector": {} }, "ports": [] }
+        }))
+        .expect("valid mesh member");
+        mm.status = Some(LatticeMeshMemberStatus {
+            phase: MeshMemberPhase::Ready,
+            ..Default::default()
+        });
+        lattice_cache::ResourceCache::builder()
+            .seed(vec![mm])
+            .build()
+    }
+
     // =========================================================================
     // Mock Setup
     // =========================================================================
@@ -1279,16 +1269,10 @@ mod tests {
         let mut mock = MockServiceKubeClient::new();
         mock.expect_patch_service_status()
             .returning(|_, _, _| Ok(()));
-        mock.expect_get_service().returning(|_, _| Ok(None));
-        mock.expect_list_services().returning(|| Ok(vec![]));
         mock.expect_apply_compiled_service()
             .returning(|_, _, _| Ok(()));
-        mock.expect_is_mesh_member_ready()
-            .returning(|_, _| Ok(true));
         mock.expect_delete_revoked_external_secrets()
             .returning(|_, _| Ok(()));
-        mock.expect_hash_owned_secrets()
-            .returning(|_, _| Ok(String::new()));
         mock
     }
 
@@ -1326,7 +1310,9 @@ mod tests {
         mock_kube
             .expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Ok(()));
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        let mut ctx = ServiceContext::for_testing(Arc::new(mock_kube));
+        ctx.cache = cache_with_ready_mesh_member("frontend", "test");
+        let ctx = Arc::new(ctx);
 
         // Put the service in the graph first (but NOT its dependency "backend")
         ctx.graph.put_service("test", "frontend", &service.spec);
@@ -1350,7 +1336,9 @@ mod tests {
         mock_kube
             .expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Ok(()));
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        let mut ctx = ServiceContext::for_testing(Arc::new(mock_kube));
+        ctx.cache = cache_with_ready_mesh_member("frontend", "test");
+        let ctx = Arc::new(ctx);
 
         // Add both services to graph
         ctx.graph.put_service("test", "frontend", &service.spec);
@@ -1376,7 +1364,9 @@ mod tests {
         mock_kube
             .expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Ok(()));
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock_kube)));
+        let mut ctx = ServiceContext::for_testing(Arc::new(mock_kube));
+        ctx.cache = cache_with_ready_mesh_member("my-service", "test");
+        let ctx = Arc::new(ctx);
 
         ctx.graph.put_service("test", "my-service", &service.spec);
 
@@ -1616,7 +1606,9 @@ mod tests {
         let mut mock = mock_kube();
         mock.expect_cleanup_orphaned_resources()
             .returning(|_, _, _| Err(Error::internal("cleanup failed")));
-        let ctx = Arc::new(ServiceContext::for_testing(Arc::new(mock)));
+        let mut ctx = ServiceContext::for_testing(Arc::new(mock));
+        ctx.cache = cache_with_ready_mesh_member("my-svc", "test");
+        let ctx = Arc::new(ctx);
 
         let mut service = sample_service("my-svc");
         service.status = Some(LatticeServiceStatus::with_phase(ServicePhase::Compiling));

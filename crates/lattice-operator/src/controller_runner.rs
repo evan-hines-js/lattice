@@ -243,6 +243,7 @@ async fn resolve_workload_params(
     );
     // Build per-controller resource cache with the types needed during compilation.
     // Each controller gets its own watch connections — no cross-pod state sharing.
+    // All reads during reconciliation come from this cache; writes go to etcd directly.
     let cache = lattice_cache::ResourceCache::builder()
         .watch(kube::Api::<lattice_common::crd::LatticeQuota>::namespaced(
             client.clone(),
@@ -251,6 +252,13 @@ async fn resolve_workload_params(
         .watch(kube::Api::<k8s_openapi::api::core::v1::Namespace>::all(
             client.clone(),
         ))
+        .watch(kube::Api::<LatticeMeshMember>::all(client.clone()))
+        .watch_with(
+            kube::Api::<k8s_openapi::api::core::v1::Secret>::all(client.clone()),
+            kube::runtime::watcher::Config::default()
+                .timeout(25)
+                .labels(lattice_common::LABEL_SERVICE_OWNER),
+        )
         .build();
 
     WorkloadControllerParams {

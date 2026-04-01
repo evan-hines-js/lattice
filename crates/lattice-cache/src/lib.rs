@@ -102,6 +102,20 @@ impl ResourceCache {
         }
     }
 
+    /// List cached objects of type `K` that match the given predicate.
+    ///
+    /// Filters in memory — no API calls. Returns an empty vec if the type
+    /// was not registered.
+    pub fn list_filtered<K>(&self, predicate: impl Fn(&K) -> bool) -> Vec<Arc<K>>
+    where
+        K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
+    {
+        match self.store_for::<K>() {
+            Some(store) => store.state().into_iter().filter(|obj| predicate(obj)).collect(),
+            None => vec![],
+        }
+    }
+
     /// Get a single cached object by name (cluster-scoped resources).
     pub fn get<K>(&self, name: &str) -> Option<Arc<K>>
     where
@@ -140,8 +154,24 @@ pub struct ResourceCacheBuilder {
 }
 
 impl ResourceCacheBuilder {
-    /// Register a resource type to watch. Spawns a background watcher.
-    pub fn watch<K>(mut self, api: Api<K>) -> Self
+    /// Register a resource type to watch with the default `WatcherConfig`.
+    /// Spawns a background watcher.
+    pub fn watch<K>(self, api: Api<K>) -> Self
+    where
+        K: Resource<DynamicType = ()>
+            + Clone
+            + fmt::Debug
+            + Send
+            + Sync
+            + serde::de::DeserializeOwned
+            + 'static,
+    {
+        self.watch_with(api, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
+    }
+
+    /// Register a resource type to watch with a custom `WatcherConfig`.
+    /// Spawns a background watcher.
+    pub fn watch_with<K>(mut self, api: Api<K>, config: WatcherConfig) -> Self
     where
         K: Resource<DynamicType = ()>
             + Clone
@@ -152,7 +182,7 @@ impl ResourceCacheBuilder {
             + 'static,
     {
         let (reader, writer) = reflector::store();
-        let stream = watcher::watcher(api, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS));
+        let stream = watcher::watcher(api, config);
 
         let type_name = std::any::type_name::<K>();
         tokio::spawn(async move {
@@ -176,6 +206,23 @@ impl ResourceCacheBuilder {
         self
     }
 
+    /// Seed objects into the cache without spawning a watcher.
+    ///
+    /// Inserts each object via the reflector writer, then stores only the
+    /// reader. Useful for tests that need pre-populated caches.
+    pub fn seed<K>(mut self, objects: Vec<K>) -> Self
+    where
+        K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
+    {
+        let (reader, mut writer) = reflector::store();
+        for obj in objects {
+            writer.apply_watcher_event(&watcher::Event::Apply(obj));
+        }
+        self.stores
+            .insert(TypeId::of::<K>(), Arc::new(TypedStore { store: reader }));
+        self
+    }
+
     /// Build the cache. All watchers are already running.
     pub fn build(self) -> ResourceCache {
         let type_names: Vec<&str> = self.stores.values().map(|s| s.type_name()).collect();
@@ -189,17 +236,97 @@ impl ResourceCacheBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
+    use kube::api::ObjectMeta;
+
+    fn make_namespace(name: &str) -> Namespace {
+        Namespace {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn make_configmap(name: &str, namespace: &str) -> ConfigMap {
+        ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(namespace.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn empty_cache_returns_empty() {
         let cache = ResourceCache::empty();
-        let result = cache.list::<k8s_openapi::api::core::v1::Namespace>();
+        let result = cache.list::<Namespace>();
         assert!(result.is_empty());
-        assert!(cache.get::<k8s_openapi::api::core::v1::Namespace>("test").is_none());
-        assert!(
-            cache
-                .get_namespaced::<k8s_openapi::api::core::v1::ConfigMap>("cm", "ns")
-                .is_none()
-        );
+        assert!(cache.get::<Namespace>("test").is_none());
+        assert!(cache.get_namespaced::<ConfigMap>("cm", "ns").is_none());
+    }
+
+    #[test]
+    fn seed_and_list() {
+        let cache = ResourceCache::builder()
+            .seed(vec![make_namespace("alpha"), make_namespace("beta")])
+            .build();
+
+        let namespaces = cache.list::<Namespace>();
+        assert_eq!(namespaces.len(), 2);
+    }
+
+    #[test]
+    fn seed_and_get() {
+        let cache = ResourceCache::builder()
+            .seed(vec![make_namespace("alpha")])
+            .build();
+
+        assert!(cache.get::<Namespace>("alpha").is_some());
+        assert!(cache.get::<Namespace>("missing").is_none());
+    }
+
+    #[test]
+    fn seed_namespaced_and_get() {
+        let cache = ResourceCache::builder()
+            .seed(vec![
+                make_configmap("cm1", "ns-a"),
+                make_configmap("cm2", "ns-b"),
+            ])
+            .build();
+
+        assert!(cache.get_namespaced::<ConfigMap>("cm1", "ns-a").is_some());
+        assert!(cache.get_namespaced::<ConfigMap>("cm1", "ns-b").is_none());
+    }
+
+    #[test]
+    fn list_filtered_returns_matching() {
+        let cache = ResourceCache::builder()
+            .seed(vec![
+                make_configmap("app-config", "prod"),
+                make_configmap("db-config", "prod"),
+                make_configmap("app-config", "staging"),
+            ])
+            .build();
+
+        let prod_only = cache.list_filtered::<ConfigMap>(|cm| {
+            cm.metadata.namespace.as_deref() == Some("prod")
+        });
+        assert_eq!(prod_only.len(), 2);
+
+        let app_only = cache.list_filtered::<ConfigMap>(|cm| {
+            cm.metadata.name.as_deref() == Some("app-config")
+        });
+        assert_eq!(app_only.len(), 2);
+    }
+
+    #[test]
+    fn list_filtered_on_unregistered_type_returns_empty() {
+        let cache = ResourceCache::empty();
+        let result = cache.list_filtered::<Namespace>(|_| true);
+        assert!(result.is_empty());
     }
 }
