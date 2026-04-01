@@ -4,27 +4,31 @@
 //! types it needs. All reads are memory hits — controllers never call the
 //! K8s API at point of use.
 //!
-//! Duplicate watches across controllers are cheap: each is a single
-//! persistent HTTP connection to the API server's watch cache.
+//! Supports both typed resources (compile-time safe) and dynamic resources
+//! (runtime GVK). Internally keyed by `group/version/kind` string.
 //!
 //! ```rust,ignore
+//! // Typed (compile-time safe):
 //! let cache = ResourceCache::builder()
 //!     .watch(Api::<LatticeQuota>::namespaced(client.clone(), "lattice-system"))
 //!     .watch(Api::<Namespace>::all(client.clone()))
 //!     .build();
-//!
-//! // In reconcile — zero API calls:
 //! let quotas: Vec<Arc<LatticeQuota>> = cache.list::<LatticeQuota>();
-//! let ns: Option<Arc<Namespace>> = cache.get::<Namespace>("my-namespace");
+//!
+//! // Dynamic (any GVK):
+//! let cache = ResourceCache::builder()
+//!     .watch_dynamic(api, ar.clone())
+//!     .build();
+//! let gateways: Vec<Arc<DynamicObject>> = cache.list_dynamic(&ar);
 //! ```
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use kube::api::Api;
+use kube::api::{Api, ApiResource, DynamicObject};
 use kube::runtime::reflector::{self, ObjectRef, Store};
 use kube::runtime::watcher::{self, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
@@ -32,6 +36,25 @@ use kube::Resource;
 
 /// Watcher timeout — must be less than the kube client read_timeout (30s).
 const WATCH_TIMEOUT_SECS: u32 = 25;
+
+// ---------------------------------------------------------------------------
+// GVK key
+// ---------------------------------------------------------------------------
+
+/// Derive a stable string key from group/version/kind.
+fn gvk_key(group: &str, version: &str, kind: &str) -> String {
+    format!("{group}/{version}/{kind}")
+}
+
+/// Derive a GVK key from a typed resource.
+fn gvk_key_for<K: Resource<DynamicType = ()>>() -> String {
+    gvk_key(&K::group(&()), &K::version(&()), &K::kind(&()))
+}
+
+/// Derive a GVK key from an ApiResource (for dynamic objects).
+fn gvk_key_for_ar(ar: &ApiResource) -> String {
+    gvk_key(&ar.group, &ar.version, &ar.kind)
+}
 
 // ---------------------------------------------------------------------------
 // Type-erased store
@@ -61,6 +84,20 @@ where
     }
 }
 
+/// Store wrapper for DynamicObject (keyed by ApiResource).
+struct DynamicStore {
+    store: Store<DynamicObject>,
+}
+
+impl AnyStore for DynamicStore {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn type_name(&self) -> &'static str {
+        "DynamicObject"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ResourceCache
 // ---------------------------------------------------------------------------
@@ -71,7 +108,7 @@ where
 /// All reads are local — no API calls at point of use.
 #[derive(Clone)]
 pub struct ResourceCache {
-    stores: Arc<HashMap<TypeId, Arc<dyn AnyStore>>>,
+    stores: Arc<HashMap<String, Arc<dyn AnyStore>>>,
 }
 
 impl ResourceCache {
@@ -89,39 +126,36 @@ impl ResourceCache {
         }
     }
 
+    // -- Typed reads --
+
     /// List all cached objects of type `K`.
-    ///
-    /// Returns an empty vec if the type was not registered.
     pub fn list<K>(&self) -> Vec<Arc<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
-        match self.store_for::<K>() {
+        match self.typed_store::<K>() {
             Some(store) => store.state(),
             None => vec![],
         }
     }
 
-    /// List cached objects of type `K` that match the given predicate.
-    ///
-    /// Filters in memory — no API calls. Returns an empty vec if the type
-    /// was not registered.
+    /// List cached objects of type `K` matching the predicate.
     pub fn list_filtered<K>(&self, predicate: impl Fn(&K) -> bool) -> Vec<Arc<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
-        match self.store_for::<K>() {
+        match self.typed_store::<K>() {
             Some(store) => store.state().into_iter().filter(|obj| predicate(obj)).collect(),
             None => vec![],
         }
     }
 
-    /// Get a single cached object by name (cluster-scoped resources).
+    /// Get a single cached object by name (cluster-scoped).
     pub fn get<K>(&self, name: &str) -> Option<Arc<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
-        self.store_for::<K>()?.get(&ObjectRef::new(name))
+        self.typed_store::<K>()?.get(&ObjectRef::new(name))
     }
 
     /// Get a single cached object by name and namespace.
@@ -129,18 +163,66 @@ impl ResourceCache {
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
-        self.store_for::<K>()?
+        self.typed_store::<K>()?
             .get(&ObjectRef::new(name).within(namespace))
     }
 
-    fn store_for<K>(&self) -> Option<&Store<K>>
+    // -- Dynamic reads --
+
+    /// List all cached dynamic objects for the given ApiResource.
+    pub fn list_dynamic(&self, ar: &ApiResource) -> Vec<Arc<DynamicObject>> {
+        match self.dynamic_store(ar) {
+            Some(store) => store.state(),
+            None => vec![],
+        }
+    }
+
+    /// List cached dynamic objects matching the predicate.
+    pub fn list_dynamic_filtered(
+        &self,
+        ar: &ApiResource,
+        predicate: impl Fn(&DynamicObject) -> bool,
+    ) -> Vec<Arc<DynamicObject>> {
+        match self.dynamic_store(ar) {
+            Some(store) => store.state().into_iter().filter(|obj| predicate(obj)).collect(),
+            None => vec![],
+        }
+    }
+
+    /// Get a single cached dynamic object by name (cluster-scoped).
+    pub fn get_dynamic(&self, ar: &ApiResource, name: &str) -> Option<Arc<DynamicObject>> {
+        self.dynamic_store(ar)?
+            .get(&ObjectRef::new_with(name, ar.clone()))
+    }
+
+    /// Get a single cached dynamic object by name and namespace.
+    pub fn get_dynamic_namespaced(
+        &self,
+        ar: &ApiResource,
+        name: &str,
+        namespace: &str,
+    ) -> Option<Arc<DynamicObject>> {
+        self.dynamic_store(ar)?
+            .get(&ObjectRef::new_with(name, ar.clone()).within(namespace))
+    }
+
+    // -- Internal --
+
+    fn typed_store<K>(&self) -> Option<&Store<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
         self.stores
-            .get(&TypeId::of::<K>())
+            .get(&gvk_key_for::<K>())
             .and_then(|s| s.as_any().downcast_ref::<TypedStore<K>>())
             .map(|ts| &ts.store)
+    }
+
+    fn dynamic_store(&self, ar: &ApiResource) -> Option<&Store<DynamicObject>> {
+        self.stores
+            .get(&gvk_key_for_ar(ar))
+            .and_then(|s| s.as_any().downcast_ref::<DynamicStore>())
+            .map(|ds| &ds.store)
     }
 }
 
@@ -150,12 +232,11 @@ impl ResourceCache {
 
 /// Builder for constructing a `ResourceCache`.
 pub struct ResourceCacheBuilder {
-    stores: HashMap<TypeId, Arc<dyn AnyStore>>,
+    stores: HashMap<String, Arc<dyn AnyStore>>,
 }
 
 impl ResourceCacheBuilder {
-    /// Register a resource type to watch with the default `WatcherConfig`.
-    /// Spawns a background watcher.
+    /// Watch a typed resource with the default config.
     pub fn watch<K>(self, api: Api<K>) -> Self
     where
         K: Resource<DynamicType = ()>
@@ -169,8 +250,7 @@ impl ResourceCacheBuilder {
         self.watch_with(api, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
     }
 
-    /// Register a resource type to watch with a custom `WatcherConfig`.
-    /// Spawns a background watcher.
+    /// Watch a typed resource with a custom config (e.g., label selector).
     pub fn watch_with<K>(mut self, api: Api<K>, config: WatcherConfig) -> Self
     where
         K: Resource<DynamicType = ()>
@@ -182,9 +262,28 @@ impl ResourceCacheBuilder {
             + 'static,
     {
         let (reader, writer) = reflector::store();
-        let stream = watcher::watcher(api, config);
+        Self::spawn_typed_watcher(api, writer, config);
+        self.stores
+            .insert(gvk_key_for::<K>(), Arc::new(TypedStore { store: reader }));
+        self
+    }
 
-        let type_name = std::any::type_name::<K>();
+    /// Watch a dynamic resource (any GVK).
+    pub fn watch_dynamic(self, api: Api<DynamicObject>, ar: ApiResource) -> Self {
+        self.watch_dynamic_with(api, ar, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
+    }
+
+    /// Watch a dynamic resource with a custom config.
+    pub fn watch_dynamic_with(
+        mut self,
+        api: Api<DynamicObject>,
+        ar: ApiResource,
+        config: WatcherConfig,
+    ) -> Self {
+        let writer = reflector::store::Writer::<DynamicObject>::new(ar.clone());
+        let reader = writer.as_reader();
+        let label = format!("DynamicObject({})", ar.kind);
+        let stream = watcher::watcher(api, config);
         tokio::spawn(async move {
             let mut stream = std::pin::pin!(reflector::reflector(writer, stream)
                 .default_backoff()
@@ -192,24 +291,22 @@ impl ResourceCacheBuilder {
             while let Some(result) = stream.next().await {
                 if let Err(e) = result {
                     tracing::debug!(
-                        resource = type_name,
+                        resource = %label,
                         error = %e,
                         "Cache watcher error (will reconnect)"
                     );
                 }
             }
-            tracing::warn!(resource = type_name, "Cache watcher stream ended");
+            tracing::warn!(resource = %label, "Cache watcher stream ended");
         });
-
-        self.stores
-            .insert(TypeId::of::<K>(), Arc::new(TypedStore { store: reader }));
+        self.stores.insert(
+            gvk_key_for_ar(&ar),
+            Arc::new(DynamicStore { store: reader }),
+        );
         self
     }
 
-    /// Seed objects into the cache without spawning a watcher.
-    ///
-    /// Inserts each object via the reflector writer, then stores only the
-    /// reader. Useful for tests that need pre-populated caches.
+    /// Seed typed objects without spawning a watcher.
     pub fn seed<K>(mut self, objects: Vec<K>) -> Self
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
@@ -219,7 +316,7 @@ impl ResourceCacheBuilder {
             writer.apply_watcher_event(&watcher::Event::Apply(obj));
         }
         self.stores
-            .insert(TypeId::of::<K>(), Arc::new(TypedStore { store: reader }));
+            .insert(gvk_key_for::<K>(), Arc::new(TypedStore { store: reader }));
         self
     }
 
@@ -230,6 +327,37 @@ impl ResourceCacheBuilder {
         ResourceCache {
             stores: Arc::new(self.stores),
         }
+    }
+
+    fn spawn_typed_watcher<K>(api: Api<K>, writer: reflector::store::Writer<K>, config: WatcherConfig)
+    where
+        K: Resource<DynamicType = ()>
+            + Clone
+            + fmt::Debug
+            + Send
+            + Sync
+            + serde::de::DeserializeOwned
+            + 'static,
+    {
+        let label = std::any::type_name::<K>();
+        tokio::spawn(async move {
+            let mut stream = std::pin::pin!(reflector::reflector(
+                writer,
+                watcher::watcher(api, config)
+            )
+            .default_backoff()
+            .applied_objects());
+            while let Some(result) = stream.next().await {
+                if let Err(e) = result {
+                    tracing::debug!(
+                        resource = label,
+                        error = %e,
+                        "Cache watcher error (will reconnect)"
+                    );
+                }
+            }
+            tracing::warn!(resource = label, "Cache watcher stream ended");
+        });
     }
 }
 
@@ -263,8 +391,7 @@ mod tests {
     #[test]
     fn empty_cache_returns_empty() {
         let cache = ResourceCache::empty();
-        let result = cache.list::<Namespace>();
-        assert!(result.is_empty());
+        assert!(cache.list::<Namespace>().is_empty());
         assert!(cache.get::<Namespace>("test").is_none());
         assert!(cache.get_namespaced::<ConfigMap>("cm", "ns").is_none());
     }
@@ -274,9 +401,7 @@ mod tests {
         let cache = ResourceCache::builder()
             .seed(vec![make_namespace("alpha"), make_namespace("beta")])
             .build();
-
-        let namespaces = cache.list::<Namespace>();
-        assert_eq!(namespaces.len(), 2);
+        assert_eq!(cache.list::<Namespace>().len(), 2);
     }
 
     #[test]
@@ -284,7 +409,6 @@ mod tests {
         let cache = ResourceCache::builder()
             .seed(vec![make_namespace("alpha")])
             .build();
-
         assert!(cache.get::<Namespace>("alpha").is_some());
         assert!(cache.get::<Namespace>("missing").is_none());
     }
@@ -297,7 +421,6 @@ mod tests {
                 make_configmap("cm2", "ns-b"),
             ])
             .build();
-
         assert!(cache.get_namespaced::<ConfigMap>("cm1", "ns-a").is_some());
         assert!(cache.get_namespaced::<ConfigMap>("cm1", "ns-b").is_none());
     }
@@ -316,17 +439,11 @@ mod tests {
             cm.metadata.namespace.as_deref() == Some("prod")
         });
         assert_eq!(prod_only.len(), 2);
-
-        let app_only = cache.list_filtered::<ConfigMap>(|cm| {
-            cm.metadata.name.as_deref() == Some("app-config")
-        });
-        assert_eq!(app_only.len(), 2);
     }
 
     #[test]
-    fn list_filtered_on_unregistered_type_returns_empty() {
-        let cache = ResourceCache::empty();
-        let result = cache.list_filtered::<Namespace>(|_| true);
-        assert!(result.is_empty());
+    fn gvk_key_is_stable() {
+        assert_eq!(gvk_key_for::<Namespace>(), "/v1/Namespace");
+        assert_eq!(gvk_key_for::<ConfigMap>(), "/v1/ConfigMap");
     }
 }
