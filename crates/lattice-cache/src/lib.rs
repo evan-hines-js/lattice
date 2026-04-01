@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use futures::StreamExt;
 use kube::api::{Api, ApiResource, DynamicObject};
 use kube::runtime::reflector::{self, ObjectRef, Store};
@@ -36,6 +37,37 @@ use kube::Resource;
 
 /// Watcher timeout — must be less than the kube client read_timeout (30s).
 const WATCH_TIMEOUT_SECS: u32 = 25;
+
+/// Spawn a reflector watcher for a dynamic resource and return the store reader.
+///
+/// Shared by both `ResourceCacheBuilder::watch_dynamic_with` (startup) and
+/// `ResourceCache::ensure_dynamic` (lazy registration).
+fn spawn_dynamic_watcher(
+    api: Api<DynamicObject>,
+    ar: &ApiResource,
+    config: WatcherConfig,
+) -> Store<DynamicObject> {
+    let writer = reflector::store::Writer::<DynamicObject>::new(ar.clone());
+    let reader = writer.as_reader();
+    let label = format!("DynamicObject({})", ar.kind);
+    let stream = watcher::watcher(api, config);
+    tokio::spawn(async move {
+        let mut stream = std::pin::pin!(reflector::reflector(writer, stream)
+            .default_backoff()
+            .applied_objects());
+        while let Some(result) = stream.next().await {
+            if let Err(e) = result {
+                tracing::debug!(
+                    resource = %label,
+                    error = %e,
+                    "Cache watcher error (will reconnect)"
+                );
+            }
+        }
+        tracing::warn!(resource = %label, "Cache watcher stream ended");
+    });
+    reader
+}
 
 // ---------------------------------------------------------------------------
 // GVK key
@@ -106,9 +138,12 @@ impl AnyStore for DynamicStore {
 ///
 /// Built per-controller with exactly the types that controller needs.
 /// All reads are local — no API calls at point of use.
+///
+/// Supports lazy registration of dynamic watches via `ensure_dynamic`
+/// for CRDs that may not be installed at startup.
 #[derive(Clone)]
 pub struct ResourceCache {
-    stores: Arc<HashMap<String, Arc<dyn AnyStore>>>,
+    stores: Arc<DashMap<String, Arc<dyn AnyStore>>>,
 }
 
 impl ResourceCache {
@@ -122,8 +157,27 @@ impl ResourceCache {
     /// Create an empty cache (no watches). Used in tests.
     pub fn empty() -> Self {
         Self {
-            stores: Arc::new(HashMap::new()),
+            stores: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Ensure a dynamic watch exists for the given ApiResource.
+    ///
+    /// If the cache already has a store for this GVK, this is a no-op and
+    /// returns `true`. Otherwise it spawns a new reflector watcher and
+    /// returns `false` — the caller should requeue to let the reflector
+    /// populate before reading.
+    pub fn ensure_dynamic(&self, api: Api<DynamicObject>, ar: ApiResource) -> bool {
+        let key = gvk_key_for_ar(&ar);
+        if self.stores.contains_key(&key) {
+            return true;
+        }
+
+        let reader = spawn_dynamic_watcher(api, &ar, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS));
+        self.stores
+            .insert(key, Arc::new(DynamicStore { store: reader }));
+        tracing::info!(kind = %ar.kind, "Lazily registered dynamic cache watch");
+        false
     }
 
     // -- Typed reads --
@@ -208,21 +262,31 @@ impl ResourceCache {
 
     // -- Internal --
 
-    fn typed_store<K>(&self) -> Option<&Store<K>>
+    fn typed_store<K>(&self) -> Option<Store<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
         self.stores
             .get(&gvk_key_for::<K>())
-            .and_then(|s| s.as_any().downcast_ref::<TypedStore<K>>())
-            .map(|ts| &ts.store)
+            .and_then(|entry| {
+                entry
+                    .value()
+                    .as_any()
+                    .downcast_ref::<TypedStore<K>>()
+                    .map(|ts| ts.store.clone())
+            })
     }
 
-    fn dynamic_store(&self, ar: &ApiResource) -> Option<&Store<DynamicObject>> {
+    fn dynamic_store(&self, ar: &ApiResource) -> Option<Store<DynamicObject>> {
         self.stores
             .get(&gvk_key_for_ar(ar))
-            .and_then(|s| s.as_any().downcast_ref::<DynamicStore>())
-            .map(|ds| &ds.store)
+            .and_then(|entry| {
+                entry
+                    .value()
+                    .as_any()
+                    .downcast_ref::<DynamicStore>()
+                    .map(|ds| ds.store.clone())
+            })
     }
 }
 
@@ -280,25 +344,7 @@ impl ResourceCacheBuilder {
         ar: ApiResource,
         config: WatcherConfig,
     ) -> Self {
-        let writer = reflector::store::Writer::<DynamicObject>::new(ar.clone());
-        let reader = writer.as_reader();
-        let label = format!("DynamicObject({})", ar.kind);
-        let stream = watcher::watcher(api, config);
-        tokio::spawn(async move {
-            let mut stream = std::pin::pin!(reflector::reflector(writer, stream)
-                .default_backoff()
-                .applied_objects());
-            while let Some(result) = stream.next().await {
-                if let Err(e) = result {
-                    tracing::debug!(
-                        resource = %label,
-                        error = %e,
-                        "Cache watcher error (will reconnect)"
-                    );
-                }
-            }
-            tracing::warn!(resource = %label, "Cache watcher stream ended");
-        });
+        let reader = spawn_dynamic_watcher(api, &ar, config);
         self.stores.insert(
             gvk_key_for_ar(&ar),
             Arc::new(DynamicStore { store: reader }),
@@ -324,8 +370,12 @@ impl ResourceCacheBuilder {
     pub fn build(self) -> ResourceCache {
         let type_names: Vec<&str> = self.stores.values().map(|s| s.type_name()).collect();
         tracing::info!(types = ?type_names, "Resource cache ready");
+        let map = DashMap::with_capacity(self.stores.len());
+        for (k, v) in self.stores {
+            map.insert(k, v);
+        }
         ResourceCache {
-            stores: Arc::new(self.stores),
+            stores: Arc::new(map),
         }
     }
 

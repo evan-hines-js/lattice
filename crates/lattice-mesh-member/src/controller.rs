@@ -458,7 +458,7 @@ async fn do_reconcile(
     }
 
     let waypoint_ready = if !policies.service_entries.is_empty() {
-        is_waypoint_programmed(&ctx.cache, registry, namespace)
+        is_waypoint_programmed(&ctx.client, &ctx.cache, registry, namespace).await
     } else {
         true
     };
@@ -567,18 +567,30 @@ async fn ensure_namespace_ambient(
 /// before the waypoint is fully programmed. Returns `true` only when the
 /// Gateway has `Programmed: True` in its status conditions.
 ///
-/// Reads from the ResourceCache instead of hitting the K8s API directly.
-/// Falls back to a direct API call if the Gateway CRD was not registered
-/// in the cache (e.g., CRD not installed at cache build time).
-fn is_waypoint_programmed(
+/// Reads from the ResourceCache. If the Gateway CRD was not installed at
+/// cache build time, lazily registers a watch so subsequent reconciles
+/// pick it up from cache.
+async fn is_waypoint_programmed(
+    client: &Client,
     cache: &lattice_cache::ResourceCache,
     registry: &CrdRegistry,
     namespace: &str,
 ) -> bool {
-    let ar = match registry.resolve_cached(CrdKind::Gateway) {
-        Some(ar) => ar,
-        None => return false,
+    let ar = match registry.resolve(CrdKind::Gateway).await {
+        Ok(Some(ar)) => ar,
+        _ => return false,
     };
+
+    // Ensure the cache is watching Gateways. If this is the first time
+    // (CRD installed after operator startup), the reflector needs a moment
+    // to sync — return false and let the 10s requeue pick it up.
+    if !cache.ensure_dynamic(
+        Api::<DynamicObject>::all_with(client.clone(), &ar),
+        ar.clone(),
+    ) {
+        info!("registered Gateway watch in cache, will check on next reconcile");
+        return false;
+    }
 
     let waypoint = mesh::waypoint_name(namespace);
 

@@ -2657,6 +2657,7 @@ dependencies = [
 name = "lattice-cache"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "futures",
  "k8s-openapi",
  "kube",

@@ -226,10 +226,9 @@ pub async fn reconcile_infrastructure(
         config.parent_grpc_port = parent.endpoint.grpc_port;
     }
 
-    // Compute trust domain from root CA fingerprint.
-    // None = CA not available yet; Istio manifests will be skipped and
-    // applied on the next reconcile once the CA exists.
-    config.trust_domain = lattice_infra::bootstrap::read_trust_domain(client).await;
+    let istio_ca = lattice_infra::bootstrap::resolve_istio_ca(client).await;
+    config.trust_domain = istio_ca.trust_domain;
+    config.root_ca = istio_ca.root_ca;
 
     // Populate remote networks for Istio meshNetworks.
     // If CRDs can't be listed, skip the entire reconcile — applying manifests

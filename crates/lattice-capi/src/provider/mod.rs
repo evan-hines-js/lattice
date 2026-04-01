@@ -545,10 +545,12 @@ pub fn generate_machine_deployment_for_pool(
         }
     });
 
-    // Set replicas only when autoscaling is disabled — otherwise the
-    // autoscaler owns this field and we must not overwrite it.
+    // Set replicas=0 when autoscaling is disabled. Workers must not be
+    // provisioned until after pivot — the Ready phase scales up via
+    // scale_pool once the cluster is self-managing. When autoscaling IS
+    // enabled, omit replicas entirely so the cluster-autoscaler owns it.
     if !has_autoscaling {
-        spec["replicas"] = serde_json::json!(pool.spec.replicas);
+        spec["replicas"] = serde_json::json!(0);
     }
 
     // Build annotations for autoscaler if min/max are set

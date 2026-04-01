@@ -373,11 +373,20 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Kube { source } => {
-                // Retry on transient K8s errors (connection, timeout)
-                // Don't retry on 4xx errors (validation, not found, etc.)
+                // Non-retryable: permanent client errors that require a spec/config fix.
+                // Everything else (connection errors, 5xx, transient 4xx) is retryable.
+                const PERMANENT_4XX: &[u16] = &[
+                    400, // Bad Request
+                    401, // Unauthorized
+                    403, // Forbidden
+                    404, // Not Found
+                    405, // Method Not Allowed
+                    410, // Gone
+                    422, // Unprocessable Entity
+                ];
                 !matches!(
                     source,
-                    kube::Error::Api(ae) if (400..500).contains(&ae.code)
+                    kube::Error::Api(ae) if PERMANENT_4XX.contains(&ae.code)
                 )
             }
             Error::Validation { .. } => false,

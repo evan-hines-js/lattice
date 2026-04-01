@@ -308,7 +308,7 @@ spec:
                         "-n",
                         &capi_ns,
                         "-o",
-                        "jsonpath={.spec.replicas}/{.status.readyReplicas}",
+                        "jsonpath={.status.readyReplicas}/{.spec.replicas}",
                     ])
                     .await
                     {

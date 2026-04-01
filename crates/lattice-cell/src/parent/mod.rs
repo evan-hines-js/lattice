@@ -345,154 +345,176 @@ pub enum CellServerError {
     AlreadyRunning,
 }
 
-/// Load CA bundle from Secret or create a new one and persist it
+/// Parse a CA bundle from a loaded `lattice-ca` Secret.
+fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, CellServerError> {
+    let data = secret.data.ok_or_else(|| {
+        CellServerError::CaPersistence("CA secret exists but has no data".to_string())
+    })?;
+
+    let cert_pem = data
+        .get(CA_CERT_KEY)
+        .ok_or_else(|| {
+            CellServerError::CaPersistence(format!("CA secret missing {}", CA_CERT_KEY))
+        })
+        .and_then(|b| {
+            String::from_utf8(b.0.clone()).map_err(|e| {
+                CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_CERT_KEY, e))
+            })
+        })?;
+
+    let key_pem = data
+        .get(CA_KEY_KEY)
+        .ok_or_else(|| {
+            CellServerError::CaPersistence(format!("CA secret missing {}", CA_KEY_KEY))
+        })
+        .and_then(|b| {
+            String::from_utf8(b.0.clone()).map_err(|e| {
+                CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_KEY_KEY, e))
+            })
+        })?;
+
+    let active_ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
+        .map_err(|e| CellServerError::CaPersistence(format!("Failed to load CA: {}", e)))?;
+
+    let mut cas = vec![active_ca];
+
+    if let Some(trust_pem) = data.get(CA_TRUST_KEY) {
+        if let Ok(trust_str) = String::from_utf8(trust_pem.0.clone()) {
+            for pem in pem::parse_many(trust_str.as_bytes())
+                .map_err(|e| {
+                    CellServerError::CaPersistence(format!(
+                        "Failed to parse trust bundle: {}",
+                        e
+                    ))
+                })?
+                .iter()
+            {
+                if let Ok(trust_ca) =
+                    CertificateAuthority::from_pem(&pem::encode(pem), &key_pem)
+                {
+                    cas.push(trust_ca);
+                }
+            }
+        }
+    }
+
+    let bundle = CertificateAuthorityBundle::from_cas(cas).map_err(|e| {
+        CellServerError::CaPersistence(format!("Failed to create CA bundle: {}", e))
+    })?;
+
+    let info = bundle.active().cert_info().map_err(|e| {
+        CellServerError::CaPersistence(format!("Failed to read CA info: {}", e))
+    })?;
+
+    info!(
+        ca_count = bundle.len(),
+        lifetime_fraction = format!("{:.1}%", info.lifetime_fraction() * 100.0),
+        needs_rotation = bundle.needs_rotation().unwrap_or(false),
+        "Loaded CA bundle from Secret {}/{}",
+        LATTICE_SYSTEM_NAMESPACE,
+        CA_SECRET
+    );
+    Ok(bundle)
+}
+
+/// Create a new CA and persist it to the `lattice-ca` Secret.
 ///
-/// This ensures the CA survives operator restarts. The CA is stored in a Secret
-/// named `lattice-ca` in the `lattice-system` namespace.
+/// Only called on the bootstrap cluster during initial install. All other
+/// clusters receive the CA via distribution (bootstrap manifests or gRPC
+/// resource sync) and load it with [`load_ca`].
+pub async fn create_ca(client: &Client) -> Result<CertificateAuthorityBundle, CellServerError> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    // Don't overwrite if it already exists (idempotent for retries)
+    if let Ok(secret) = secrets.get(CA_SECRET).await {
+        info!("CA Secret already exists, loading it");
+        return load_ca_from_secret(secret);
+    }
+
+    info!("Creating new CA for bootstrap cluster");
+    let ca = CertificateAuthority::new("Lattice CA")
+        .map_err(|e| CellServerError::CaCreation(e.to_string()))?;
+
+    let secret = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(CA_SECRET.to_string()),
+            namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+            labels: Some(BTreeMap::from([(
+                "lattice.dev/distribute".to_string(),
+                "true".to_string(),
+            )])),
+            ..Default::default()
+        },
+        type_: Some("Opaque".to_string()),
+        data: Some(BTreeMap::from([
+            (
+                CA_CERT_KEY.to_string(),
+                ByteString(ca.ca_cert_pem().as_bytes().to_vec()),
+            ),
+            (
+                CA_KEY_KEY.to_string(),
+                ByteString(ca.ca_key_pem().as_bytes().to_vec()),
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    secrets
+        .create(&PostParams::default(), &secret)
+        .await
+        .map_err(|e| {
+            CellServerError::CaPersistence(format!("Failed to create CA secret: {}", e))
+        })?;
+
+    info!(
+        "Created and persisted new CA to Secret {}/{}",
+        LATTICE_SYSTEM_NAMESPACE, CA_SECRET
+    );
+    Ok(CertificateAuthorityBundle::new(ca))
+}
+
+/// Load the CA bundle from the `lattice-ca` Secret.
 ///
-/// The secret format supports CA rotation:
-/// - `ca.crt` - PEM bundle of all trusted CA certificates (newest first)
-/// - `ca.key` - Private key for the active (newest) CA only
-/// - `ca-trust.crt` - (optional) Additional CA certs for verification only (rotated out CAs)
+/// The CA is created externally (by [`create_ca`] on the bootstrap cluster
+/// or distributed via the install CLI / gRPC resource sync). The operator
+/// never creates its own CA implicitly — doing so would race with the
+/// distributed CA and cause cert mismatches after pod restarts.
 ///
-/// # Arguments
-/// * `client` - Kubernetes client for accessing the Secret
-///
-/// # Returns
-/// The CA bundle, either loaded from the Secret or newly created
-pub async fn load_or_create_ca(
+/// Waits up to 5 minutes for the Secret to appear (it may be applied
+/// concurrently by bootstrap manifests or the gRPC resource sync).
+pub async fn load_ca(
     client: &Client,
 ) -> Result<CertificateAuthorityBundle, CellServerError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Try to load existing CA from Secret
     match secrets.get(CA_SECRET).await {
-        Ok(secret) => {
-            // CA Secret exists, load it
-            let data = secret.data.ok_or_else(|| {
-                CellServerError::CaPersistence("CA secret exists but has no data".to_string())
-            })?;
-
-            let cert_pem = data
-                .get(CA_CERT_KEY)
-                .ok_or_else(|| {
-                    CellServerError::CaPersistence(format!("CA secret missing {}", CA_CERT_KEY))
-                })
-                .and_then(|b| {
-                    String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!(
-                            "Invalid {} encoding: {}",
-                            CA_CERT_KEY, e
-                        ))
-                    })
-                })?;
-
-            let key_pem = data
-                .get(CA_KEY_KEY)
-                .ok_or_else(|| {
-                    CellServerError::CaPersistence(format!("CA secret missing {}", CA_KEY_KEY))
-                })
-                .and_then(|b| {
-                    String::from_utf8(b.0.clone()).map_err(|e| {
-                        CellServerError::CaPersistence(format!(
-                            "Invalid {} encoding: {}",
-                            CA_KEY_KEY, e
-                        ))
-                    })
-                })?;
-
-            // Load the active CA (has the private key)
-            let active_ca = CertificateAuthority::from_pem(&cert_pem, &key_pem)
-                .map_err(|e| CellServerError::CaPersistence(format!("Failed to load CA: {}", e)))?;
-
-            let mut cas = vec![active_ca];
-
-            // Load additional trust CAs if present (for rotation transition)
-            if let Some(trust_pem) = data.get(CA_TRUST_KEY) {
-                if let Ok(trust_str) = String::from_utf8(trust_pem.0.clone()) {
-                    // Parse multiple PEM certificates from the trust bundle
-                    for pem in pem::parse_many(trust_str.as_bytes())
-                        .map_err(|e| {
-                            CellServerError::CaPersistence(format!(
-                                "Failed to parse trust bundle: {}",
-                                e
-                            ))
-                        })?
-                        .iter()
-                    {
-                        // Create a trust-only CA (we use the active key as placeholder since
-                        // we only need the cert for verification). In practice, this CA is
-                        // only used for verify_client_cert which only needs the cert.
-                        if let Ok(trust_ca) =
-                            CertificateAuthority::from_pem(&pem::encode(pem), &key_pem)
-                        {
-                            cas.push(trust_ca);
-                        }
-                    }
-                }
-            }
-
-            let bundle = CertificateAuthorityBundle::from_cas(cas).map_err(|e| {
-                CellServerError::CaPersistence(format!("Failed to create CA bundle: {}", e))
-            })?;
-
-            let info = bundle.active().cert_info().map_err(|e| {
-                CellServerError::CaPersistence(format!("Failed to read CA info: {}", e))
-            })?;
-
-            info!(
-                ca_count = bundle.len(),
-                lifetime_fraction = format!("{:.1}%", info.lifetime_fraction() * 100.0),
-                needs_rotation = bundle.needs_rotation().unwrap_or(false),
-                "Loaded CA bundle from Secret {}/{}",
-                LATTICE_SYSTEM_NAMESPACE,
-                CA_SECRET
-            );
-            Ok(bundle)
-        }
+        Ok(secret) => load_ca_from_secret(secret),
         Err(kube::Error::Api(e)) if e.code == 404 => {
-            // CA Secret doesn't exist, create a new CA and persist it
-            info!("CA Secret not found, creating new CA");
-
-            let ca = CertificateAuthority::new("Lattice CA")
-                .map_err(|e| CellServerError::CaCreation(e.to_string()))?;
-
-            // Create Secret with CA cert and key
-            let secret = Secret {
-                metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
-                    name: Some(CA_SECRET.to_string()),
-                    namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-                    labels: Some(BTreeMap::from([
-                        ("lattice.dev/distribute".to_string(), "true".to_string()),
-                    ])),
-                    ..Default::default()
-                },
-                type_: Some("Opaque".to_string()),
-                data: Some(BTreeMap::from([
-                    (
-                        CA_CERT_KEY.to_string(),
-                        ByteString(ca.ca_cert_pem().as_bytes().to_vec()),
-                    ),
-                    (
-                        CA_KEY_KEY.to_string(),
-                        ByteString(ca.ca_key_pem().as_bytes().to_vec()),
-                    ),
-                ])),
-                ..Default::default()
-            };
-
-            secrets
-                .create(&PostParams::default(), &secret)
-                .await
-                .map_err(|e| {
-                    CellServerError::CaPersistence(format!("Failed to create CA secret: {}", e))
-                })?;
-
-            info!(
-                "Created and persisted new CA to Secret {}/{}",
-                LATTICE_SYSTEM_NAMESPACE, CA_SECRET
-            );
-            Ok(CertificateAuthorityBundle::new(ca))
+            // CA not present yet — wait for it to be distributed.
+            // On the bootstrap cluster, the operator creates it before
+            // ParentServers::new(). On all other clusters, it arrives via
+            // bootstrap manifests or gRPC resource sync.
+            const MAX_WAIT: Duration = Duration::from_secs(300);
+            let deadline = tokio::time::Instant::now() + MAX_WAIT;
+            info!("CA Secret not found, waiting up to 5m for it to be distributed...");
+            loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if let Ok(secret) = secrets.get(CA_SECRET).await {
+                    info!("CA Secret found, loading it");
+                    return load_ca_from_secret(secret);
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(CellServerError::CaPersistence(
+                        "Timed out waiting for lattice-ca Secret (5m). \
+                         The CA must be created by the bootstrap operator \
+                         or distributed by the install CLI before the \
+                         operator can start."
+                            .to_string(),
+                    ));
+                }
+                debug!("Still waiting for lattice-ca Secret...");
+            }
         }
         Err(e) => Err(CellServerError::CaPersistence(format!(
             "Failed to get CA secret: {}",
@@ -566,7 +588,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// Loads CA from Secret if it exists, otherwise creates and persists a new one.
     /// This ensures the CA survives operator restarts.
     pub async fn new(config: ParentConfig, client: &Client) -> Result<Self, CellServerError> {
-        let ca_bundle = Arc::new(RwLock::new(load_or_create_ca(client).await?));
+        let ca_bundle = Arc::new(RwLock::new(load_ca(client).await?));
         let subtree_registry = Arc::new(SubtreeRegistry::new(config.cluster_name.clone()));
 
         Ok(Self {

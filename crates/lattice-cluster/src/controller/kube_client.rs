@@ -220,7 +220,11 @@ impl KubeClient for KubeClientImpl {
     }
 
     async fn get_cluster(&self, name: &str) -> Result<Option<LatticeCluster>, Error> {
-        Ok(self.cache.get::<LatticeCluster>(name).map(|arc| (*arc).clone()))
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+        match api.get_opt(name).await? {
+            Some(c) => Ok(Some(c)),
+            None => Ok(None),
+        }
     }
 
     async fn get_secret(
@@ -229,7 +233,11 @@ impl KubeClient for KubeClientImpl {
         namespace: &str,
     ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error> {
         use k8s_openapi::api::core::v1::Secret;
-        Ok(self.cache.get_namespaced::<Secret>(name, namespace).map(|arc| (*arc).clone()))
+        let api: Api<Secret> = Api::namespaced(self.client.clone(), namespace);
+        match api.get_opt(name).await? {
+            Some(s) => Ok(Some(s)),
+            None => Ok(None),
+        }
     }
 
     async fn ensure_cell_service(
@@ -265,8 +273,8 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
-        // Read current cluster from cache to check existing finalizers
-        let cluster = match self.cache.get::<LatticeCluster>(cluster_name) {
+        // Read from API for optimistic concurrency (read-modify-write needs fresh data)
+        let cluster = match api.get_opt(cluster_name).await? {
             Some(c) => c,
             None => {
                 debug!(cluster = %cluster_name, "Cluster not found, skipping finalizer addition");
@@ -305,8 +313,8 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         let api: Api<LatticeCluster> = Api::all(self.client.clone());
 
-        // Read current cluster from cache to check existing finalizers
-        let cluster = match self.cache.get::<LatticeCluster>(cluster_name) {
+        // Read from API for optimistic concurrency (read-modify-write needs fresh data)
+        let cluster = match api.get_opt(cluster_name).await? {
             Some(c) => c,
             None => {
                 debug!(cluster = %cluster_name, "Cluster not found, finalizer already removed");
@@ -402,7 +410,8 @@ impl KubeClient for KubeClientImpl {
     }
 
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error> {
-        Ok(self.cache.list::<LatticeCluster>().into_iter().map(|arc| (*arc).clone()).collect())
+        let api: Api<LatticeCluster> = Api::all(self.client.clone());
+        Ok(api.list(&Default::default()).await?.items)
     }
 
     async fn get_cloud_provider(

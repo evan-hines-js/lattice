@@ -671,11 +671,11 @@ mod tests {
             );
         }
 
-        /// Story: MachineDeployment uses the configured replicas count when
-        /// autoscaling is disabled. The autoscaler owns the replicas field
-        /// when min/max are set.
+        /// Story: Workers start at replicas=0 — scaling happens post-pivot via
+        /// the Ready phase's scale_pool. The autoscaler owns the replicas
+        /// field when min/max are set.
         #[tokio::test]
-        async fn worker_deployment_uses_configured_replicas() {
+        async fn worker_deployment_starts_at_zero_replicas() {
             let provider = DockerProvider::new();
             let cluster = sample_cluster("my-cluster", 5);
             let bootstrap = BootstrapInfo::default();
@@ -694,7 +694,7 @@ mod tests {
             assert_eq!(deployment.metadata.name, "my-cluster-pool-default");
 
             let spec = deployment.spec.as_ref().expect("spec should exist");
-            assert_eq!(spec.get("replicas").expect("replicas should exist"), 5);
+            assert_eq!(spec.get("replicas").expect("replicas should exist"), 0);
             assert_eq!(
                 spec.get("clusterName").expect("clusterName should exist"),
                 "my-cluster"

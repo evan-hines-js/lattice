@@ -65,10 +65,10 @@ pub async fn reconcile(
 
     let secret_name = format!("istio-remote-secret-{}", source_cluster);
     let kubeconfig = if is_peer {
-        let (proxy_url, ca_cert, token) = load_peer_proxy_credentials(&ctx.cache)?;
+        let (proxy_url, ca_cert, token) = load_peer_proxy_credentials(&ctx.client).await?;
         build_remote_kubeconfig(&source_cluster, &proxy_url, &ca_cert, &token)
     } else {
-        load_direct_kubeconfig(&ctx.cache, &source_cluster)?
+        load_direct_kubeconfig(&ctx.client, &source_cluster).await?
     };
 
     let mut labels = BTreeMap::new();
@@ -244,27 +244,21 @@ async fn cleanup_service_stubs(
 ///
 /// Returns (proxy_url, ca_cert_pem, proxy_token) from the Secret written by
 /// the agent when it receives peer routes from the parent.
-///
-/// Reads from the ResourceCache (watching Secrets in lattice-system) instead
-/// of hitting the K8s API directly.
-fn load_peer_proxy_credentials(
-    cache: &lattice_cache::ResourceCache,
+async fn load_peer_proxy_credentials(
+    client: &Client,
 ) -> Result<(String, String, String), Error> {
     use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
-    let secret = cache
-        .get_namespaced::<Secret>("lattice-peer-proxy-credentials", LATTICE_SYSTEM_NAMESPACE)
-        .ok_or_else(|| {
-            Error::internal(
-                "peer proxy credentials not found in cache \
-                 (parent may not have sent PeerRouteSync yet)"
-                    .to_string(),
-            )
-        })?;
+    let api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let secret = api.get("lattice-peer-proxy-credentials").await.map_err(|e| {
+        Error::internal(format!(
+            "peer proxy credentials not found \
+             (parent may not have sent PeerRouteSync yet): {e}"
+        ))
+    })?;
 
     let data = secret
         .data
-        .clone()
         .ok_or_else(|| Error::internal("peer proxy credentials secret has no data".to_string()))?;
 
     let get_field = |key: &str| -> Result<String, Error> {
@@ -286,21 +280,20 @@ fn load_peer_proxy_credentials(
 ///
 /// Reads the `istiod-direct-kubeconfig-{cluster}` secret from istio-system,
 /// copied from the CAPI kubeconfig pre-pivot by the cluster controller.
-fn load_direct_kubeconfig(
-    cache: &lattice_cache::ResourceCache,
+async fn load_direct_kubeconfig(
+    client: &Client,
     cluster_name: &str,
 ) -> Result<String, Error> {
     let secret_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
+    let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
-    let secret = cache
-        .get_namespaced::<Secret>(&secret_name, "istio-system")
-        .ok_or_else(|| {
-            Error::internal(format!(
-                "direct kubeconfig secret '{}' not found in cache \
-                 (copied pre-pivot by cluster controller)",
-                secret_name
-            ))
-        })?;
+    let secret = api.get(&secret_name).await.map_err(|e| {
+        Error::internal(format!(
+            "direct kubeconfig secret '{}' not found in istio-system \
+             (copied pre-pivot by cluster controller): {e}",
+            secret_name
+        ))
+    })?;
 
     let data = secret.data.as_ref().ok_or_else(|| {
         Error::internal(format!(

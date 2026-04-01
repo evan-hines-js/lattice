@@ -221,6 +221,15 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
+    // Bootstrap clusters create the CA — all other clusters receive it via
+    // distribution. This must happen before ParentServers::new() which loads
+    // the CA from the Secret.
+    if config.is_bootstrap_cluster {
+        lattice_cell::create_ca(&client)
+            .await
+            .expect("failed to create bootstrap CA");
+    }
+
     // Create ParentServers ONCE — shared across cell lease re-acquisitions.
     // The Arc is stable: cluster controller always sees the same instance.
     // CellInfraGuard::drop calls shutdown() (running=false), re-acquisition

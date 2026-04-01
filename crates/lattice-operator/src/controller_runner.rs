@@ -390,14 +390,12 @@ pub fn build_cluster_controller(
     let cluster_issuer_ar = kube::discovery::ApiResource::from_gvk(
         &kube::api::GroupVersionKind::gvk("cert-manager.io", "v1", "ClusterIssuer"),
     );
+    // Cache cross-cutting resources the cluster controller reads during reconciliation.
+    // NOT the controller's own CRD (LatticeCluster) — that comes from the controller's
+    // reflector stream. NOT per-cluster Secrets — those vary by namespace.
     let cluster_cache = lattice_cache::ResourceCache::builder()
         .watch(kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone()))
-        .watch(kube::Api::<LatticeCluster>::all(client.clone()))
         .watch(kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(
-            client.clone(),
-            LATTICE_SYSTEM_NAMESPACE,
-        ))
-        .watch(kube::Api::<k8s_openapi::api::core::v1::Secret>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
@@ -574,11 +572,19 @@ pub fn build_mesh_member_controller(
 ) -> Pin<Box<dyn Future<Output = ()> + Send>> {
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
 
+    // Gateway watch is registered lazily via ensure_dynamic when the CRD
+    // is first needed (handles CRDs installed after operator startup).
     let mm_cache = lattice_cache::ResourceCache::builder()
         .watch(kube::Api::<k8s_openapi::api::core::v1::ConfigMap>::namespaced(
             client.clone(),
             "istio-system",
         ))
+        .watch_with(
+            kube::Api::<k8s_openapi::api::core::v1::Service>::all(client.clone()),
+            WatcherConfig::default()
+                .timeout(WATCH_TIMEOUT_SECS)
+                .labels("lattice.dev/service-stub"),
+        )
         .build();
 
     let mm_ctx = Arc::new(mesh_member_ctrl::MeshMemberContext {

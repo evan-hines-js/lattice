@@ -165,19 +165,74 @@ impl Default for InfrastructureConfig {
     }
 }
 
-/// Read the trust domain from the root CA secret in lattice-system.
-/// Returns `None` if the CA secret doesn't exist yet — callers MUST
-/// skip Istio configuration rather than proceed with a wrong trust domain.
-pub async fn read_trust_domain(client: &kube::Client) -> Option<String> {
+/// Istio CA configuration resolved from cluster state.
+///
+/// Single source of truth for Istio CA decisions. Callers set these fields
+/// on `InfrastructureConfig` directly — no separate cacerts/trust_domain logic needed.
+pub struct IstioCaConfig {
+    /// Trust domain derived from the root CA fingerprint.
+    /// `None` means lattice-ca doesn't exist yet — Istio must be skipped entirely.
+    pub trust_domain: Option<String>,
+    /// Root CA for generating the Istio `cacerts` intermediate CA.
+    /// `None` when cacerts already exists (no regeneration) or when lattice-ca is missing.
+    pub root_ca: Option<crate::pki::CertificateAuthority>,
+}
+
+/// Resolve the Istio CA configuration from cluster state.
+///
+/// Reads `lattice-ca` and checks whether `cacerts` already exists.
+/// Returns the trust domain and (optionally) the root CA for cacerts generation.
+///
+/// Rules:
+/// - No `lattice-ca` → trust_domain=None, root_ca=None → Istio skipped
+/// - `lattice-ca` exists + `cacerts` exists → trust_domain=Some, root_ca=None → Istio installed, no cacerts regen
+/// - `lattice-ca` exists + no `cacerts` → trust_domain=Some, root_ca=Some → Istio installed with cacerts
+pub async fn resolve_istio_ca(client: &kube::Client) -> IstioCaConfig {
     use k8s_openapi::api::core::v1::Secret;
-    use lattice_common::{CA_CERT_KEY, CA_SECRET, LATTICE_SYSTEM_NAMESPACE};
+    use lattice_common::{CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, LATTICE_SYSTEM_NAMESPACE};
 
     let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secret = api.get(CA_SECRET).await.ok()?;
-    let data = secret.data?;
-    let cert_bytes = data.get(CA_CERT_KEY)?;
-    let cert_pem = String::from_utf8_lossy(&cert_bytes.0);
-    trust_domain_from_ca(&cert_pem)
+    let secret = match api.get(CA_SECRET).await {
+        Ok(s) => s,
+        Err(_) => return IstioCaConfig { trust_domain: None, root_ca: None },
+    };
+
+    let data = match secret.data {
+        Some(d) => d,
+        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+    };
+
+    let cert_pem = match data.get(CA_CERT_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok()) {
+        Some(p) => p,
+        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+    };
+
+    let trust_domain = match trust_domain_from_ca(&cert_pem) {
+        Some(td) => td,
+        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+    };
+
+    // cacerts already exists — don't regenerate the intermediate CA
+    let cacerts_api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), "istio-system");
+    if cacerts_api.get("cacerts").await.is_ok() {
+        return IstioCaConfig { trust_domain: Some(trust_domain), root_ca: None };
+    }
+
+    // Need to generate cacerts — load the full CA (cert + key)
+    let root_ca = data
+        .get(CA_KEY_KEY)
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())
+        .and_then(|key_pem| crate::pki::CertificateAuthority::from_pem(&cert_pem, &key_pem).ok());
+
+    IstioCaConfig { trust_domain: Some(trust_domain), root_ca }
+}
+
+/// Read just the trust domain from `lattice-ca`.
+///
+/// Convenience wrapper around [`resolve_istio_ca`] for callers that only
+/// need the trust domain (e.g., ServiceGraph initialization).
+pub async fn read_trust_domain(client: &kube::Client) -> Option<String> {
+    resolve_istio_ca(client).await.trust_domain
 }
 
 /// Compute the trust domain from a root CA's certificate fingerprint.

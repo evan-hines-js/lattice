@@ -57,9 +57,11 @@ pub async fn handle_pivoting(
     match pivot_ops {
         Some(ops) => execute_pivot(&name, &capi_namespace, cluster, ctx, ops.as_ref()).await,
         None => {
-            // No pivot operations - non-cell mode
-            debug!("no pivot operations configured");
-            try_transition_to_ready(cluster, ctx, false).await
+            // Cell servers not ready yet — requeue and wait.
+            // Don't fall through to try_transition_to_ready for child clusters
+            // in Pivoting phase — that would skip the pivot entirely.
+            debug!("cell servers not ready, waiting to retry pivot");
+            Ok(Action::requeue(Duration::from_secs(5)))
         }
     }
 }
