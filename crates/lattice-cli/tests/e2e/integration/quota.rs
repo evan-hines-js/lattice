@@ -14,8 +14,6 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
-
 use tracing::info;
 
 use super::super::helpers::{
@@ -186,7 +184,7 @@ spec:
     let kc = kubeconfig.to_string();
     wait_for_condition(
         "quota to reflect workload usage",
-        Duration::from_secs(90),
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
@@ -278,7 +276,7 @@ spec:
     let kc = kubeconfig.to_string();
     wait_for_condition(
         "big service to be rejected by quota",
-        Duration::from_secs(90),
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
