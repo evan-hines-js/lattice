@@ -121,9 +121,8 @@ impl PodTemplateCompiler {
         // Compile pod-level security context (always returns secure defaults)
         let security_context = Some(Self::compile_pod_security_context(runtime));
 
-        // Resolve imagePullSecrets from spec resource names to K8s Secret names
-        let image_pull_secrets =
-            Self::compile_image_pull_secrets(runtime, workload, container_data.secret_refs)?;
+        // imagePullSecrets are injected by WorkloadCompiler after Cedar authorization
+        let image_pull_secrets = vec![];
 
         Ok(CompiledPodTemplate {
             containers,
@@ -569,53 +568,6 @@ impl PodTemplateCompiler {
 
         (init_containers, sidecar_containers)
     }
-
-    /// Resolve `imagePullSecrets` resource names to K8s Secret names
-    pub(crate) fn compile_image_pull_secrets(
-        runtime: &RuntimeSpec,
-        workload: &WorkloadSpec,
-        secret_refs: &BTreeMap<String, SecretRef>,
-    ) -> Result<Vec<LocalObjectReference>, CompilationError> {
-        runtime
-            .image_pull_secrets
-            .iter()
-            .map(|resource_name| {
-                let resource = workload.resources.get(resource_name).ok_or_else(|| {
-                    CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' which does not exist",
-                            resource_name
-                        ),
-                    )
-                })?;
-
-                if !resource.type_.is_secret() {
-                    return Err(CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' but it is type '{}', not 'secret'",
-                            resource_name, resource.type_
-                        ),
-                    ));
-                }
-
-                let secret_ref = secret_refs.get(resource_name).ok_or_else(|| {
-                    CompilationError::resource(
-                        resource_name,
-                        format!(
-                            "imagePullSecrets references resource '{}' but no SecretRef was compiled",
-                            resource_name
-                        ),
-                    )
-                })?;
-
-                Ok(LocalObjectReference {
-                    name: secret_ref.secret_name.clone(),
-                })
-            })
-            .collect()
-    }
 }
 
 // =============================================================================
@@ -939,94 +891,6 @@ mod tests {
         );
 
         assert!(result.is_ok());
-    }
-
-    // =========================================================================
-    // Story: Compile Image Pull Secrets
-    // =========================================================================
-
-    #[test]
-    fn image_pull_secrets_resolve_to_k8s_names() {
-        let runtime = RuntimeSpec {
-            image_pull_secrets: vec!["registry-creds".to_string()],
-            ..Default::default()
-        };
-
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "registry-creds".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Secret,
-                ..Default::default()
-            },
-        );
-        let workload = WorkloadSpec {
-            containers: BTreeMap::new(),
-            resources,
-            ..Default::default()
-        };
-
-        let mut secret_refs = BTreeMap::new();
-        secret_refs.insert(
-            "registry-creds".to_string(),
-            SecretRef {
-                secret_name: "myapp-registry-creds".to_string(),
-                remote_key: "registry/pull".to_string(),
-                keys: None,
-                store_name: "vault".to_string(),
-            },
-        );
-
-        let result =
-            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &secret_refs)
-                .unwrap();
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "myapp-registry-creds");
-    }
-
-    #[test]
-    fn image_pull_secrets_error_on_missing_resource() {
-        let runtime = RuntimeSpec {
-            image_pull_secrets: vec!["nonexistent".to_string()],
-            ..Default::default()
-        };
-
-        let workload = WorkloadSpec::default();
-
-        let result =
-            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &BTreeMap::new());
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not exist"));
-    }
-
-    #[test]
-    fn image_pull_secrets_error_on_non_secret_resource() {
-        let runtime = RuntimeSpec {
-            image_pull_secrets: vec!["redis".to_string()],
-            ..Default::default()
-        };
-
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "redis".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Service,
-                ..Default::default()
-            },
-        );
-        let workload = WorkloadSpec {
-            containers: BTreeMap::new(),
-            resources,
-            ..Default::default()
-        };
-
-        let result =
-            PodTemplateCompiler::compile_image_pull_secrets(&runtime, &workload, &BTreeMap::new());
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not 'secret'"));
     }
 
     // =========================================================================

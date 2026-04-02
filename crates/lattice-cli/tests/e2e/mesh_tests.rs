@@ -19,8 +19,8 @@ use lattice_common::crd::LatticeService;
 
 use super::helpers::{
     apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,
-    delete_namespace, ensure_fresh_namespace, run_kubectl,
-    with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    delete_namespace, ensure_fresh_namespace, run_kubectl, with_diagnostics, DiagnosticContext,
+    DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     create_api_gateway, create_api_orders, create_api_users, create_cache, create_db_orders,

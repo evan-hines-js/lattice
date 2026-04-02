@@ -282,6 +282,29 @@ impl ModelContext {
     }
 }
 
+/// Resolve ImageProvider credentials for all roles in a model.
+///
+/// Uses `merged_roles()` so that defaults-inherited imagePullSecrets are included.
+fn resolve_model_image_providers(
+    model: &LatticeModel,
+    cache: &lattice_cache::ResourceCache,
+) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
+    let merged = model.spec.merged_roles();
+    let mut provider_names = std::collections::BTreeSet::new();
+    for role in merged.values() {
+        for name in &role.entry_runtime.image_pull_secrets {
+            provider_names.insert(name.clone());
+        }
+        if let Some(ref rt) = role.worker_runtime {
+            for name in &rt.image_pull_secrets {
+                provider_names.insert(name.clone());
+            }
+        }
+    }
+    let names: Vec<_> = provider_names.into_iter().collect();
+    cache.resolve_image_providers(&names)
+}
+
 /// Reconcile a LatticeModel resource
 pub async fn reconcile(
     model: Arc<LatticeModel>,
@@ -317,7 +340,10 @@ pub async fn reconcile(
     // Always ensure roles are in the graph (crash recovery).
     register_graph(&model, &ctx.graph, namespace);
 
-    let generation = model.metadata.generation.unwrap_or(0);
+    let generation = model
+        .metadata
+        .generation
+        .ok_or(ModelError::MissingGeneration)?;
     let suffix = role_key_suffix(model.spec.roles.keys());
     let serving_name = format!("{}-{}", name, suffix);
     let phase = model
@@ -346,6 +372,8 @@ pub async fn reconcile(
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, &name, &ns_labels, &annotations);
 
+    let image_providers = resolve_model_image_providers(&model, &ctx.cache);
+
     match phase {
         ModelServingPhase::Pending => {
             let compiled = compile_model(
@@ -356,6 +384,7 @@ pub async fn reconcile(
                 &ctx.cedar,
                 &suffix,
                 Some(&quota_budget),
+                image_providers,
             )
             .await;
 
@@ -525,6 +554,7 @@ pub async fn reconcile(
                     &ctx.cedar,
                     &suffix,
                     Some(&quota_budget),
+                    image_providers,
                 )
                 .await
                 {

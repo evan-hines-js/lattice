@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
-use super::workload::resources::ResourceSpec;
+
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// CertIssuer defines a certificate issuer configuration.
@@ -110,8 +110,7 @@ pub struct AcmeIssuerSpec {
 #[serde(rename_all = "camelCase")]
 pub struct CaIssuerSpec {
     /// ESO-managed credential source for the CA certificate and private key.
-    /// The synced secret must contain `tls.crt` and `tls.key` entries.
-    pub credentials: ResourceSpec,
+    pub credentials: super::types::CredentialSpec,
 }
 
 /// Vault PKI issuer configuration
@@ -125,7 +124,7 @@ pub struct VaultIssuerSpec {
     pub path: String,
 
     /// ESO-managed credential source for Vault authentication
-    pub auth_credentials: ResourceSpec,
+    pub auth_credentials: super::types::CredentialSpec,
 }
 
 /// DNS configuration for a cluster.
@@ -225,11 +224,10 @@ impl CertIssuerSpec {
                 }
             }
             IssuerType::Ca => {
-                if self.ca.is_none() {
-                    return Err(crate::Error::validation(
-                        "ca config required when type is ca",
-                    ));
-                }
+                let ca = self.ca.as_ref().ok_or_else(|| {
+                    crate::Error::validation("ca config required when type is ca")
+                })?;
+                ca.credentials.validate()?;
             }
             IssuerType::Vault => {
                 let vault = self.vault.as_ref().ok_or_else(|| {
@@ -241,11 +239,7 @@ impl CertIssuerSpec {
                 if vault.path.is_empty() {
                     return Err(crate::Error::validation("vault.path cannot be empty"));
                 }
-                if !vault.auth_credentials.type_.is_secret() {
-                    return Err(crate::Error::validation(
-                        "vault.authCredentials must be type: secret",
-                    ));
-                }
+                vault.auth_credentials.validate()?;
             }
             IssuerType::SelfSigned => {
                 // No config needed — but reject extraneous fields
@@ -281,14 +275,12 @@ impl DnsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    use crate::crd::workload::resources::ResourceSpec;
+    use crate::crd::CredentialSpec;
     use std::collections::BTreeMap;
 
     fn make_issuer(name: &str, spec: CertIssuerSpec) -> CertIssuer {
         CertIssuer::new(name, spec)
     }
-
 
     // =========================================================================
     // ACME Issuer Tests
@@ -410,7 +402,7 @@ mod tests {
                 type_: IssuerType::Ca,
                 acme: None,
                 ca: Some(CaIssuerSpec {
-                    credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
+                    credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,
             },
@@ -484,7 +476,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: "pki".to_string(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -516,7 +508,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: String::new(),
                     path: "pki".to_string(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -534,7 +526,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: String::new(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         );

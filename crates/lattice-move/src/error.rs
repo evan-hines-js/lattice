@@ -97,6 +97,9 @@ impl MoveError {
                 | MoveError::AgentCommunication(_)
                 | MoveError::Timeout { .. }
                 | MoveError::BatchFailed { .. }
+                | MoveError::DeletionFailed(_)
+                | MoveError::PauseFailed(_)
+                | MoveError::NamespaceCreation { .. }
         )
     }
 }

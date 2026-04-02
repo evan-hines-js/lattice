@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::types::credential_secret_name;
-use super::workload::resources::ResourceSpec;
 
 /// InfraProvider defines a cloud account/region that clusters can be deployed to.
 ///
@@ -22,11 +21,9 @@ use super::workload::resources::ResourceSpec;
 ///   type: AWS
 ///   region: us-east-1
 ///   credentials:
-///     type: secret
 ///     id: infrastructure/aws/prod
-///     params:
-///       provider: lattice-local
-///       keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+///     provider: lattice-local
+///     keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
 ///   aws:
 ///     vpcId: vpc-xxx
 ///     subnetIds: [subnet-a, subnet-b]
@@ -53,11 +50,10 @@ pub struct InfraProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
-    /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
-    /// The controller creates an ExternalSecret that syncs credentials from a
-    /// ClusterSecretStore into `lattice-system` namespace.
+    /// ESO-managed credential source. The controller creates an ExternalSecret
+    /// that syncs credentials from a ClusterSecretStore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<ResourceSpec>,
+    pub credentials: Option<super::types::CredentialSpec>,
 
     /// Template data for shaping credentials using `${secret.*}` syntax.
     /// Each key becomes a key in the resulting K8s Secret.
@@ -213,6 +209,71 @@ impl std::fmt::Display for InfraProviderPhase {
     }
 }
 
+impl InfraProviderSpec {
+    /// Validate the spec. Returns an error if invalid.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        // Validate credentials if present
+        if let Some(ref credentials) = self.credentials {
+            credentials.validate()?;
+        }
+
+        // credentialData requires credentials
+        if self.credential_data.is_some() && self.credentials.is_none() {
+            return Err(crate::Error::validation(
+                "credentialData requires credentials to be set",
+            ));
+        }
+
+        // Provider-type-specific config validation
+        match self.provider_type {
+            InfraProviderType::AWS => {
+                // AWS provider doesn't strictly require aws config (it's optional BYOI),
+                // but does require credentials
+                if self.credentials.is_none() {
+                    return Err(crate::Error::validation(
+                        "AWS provider requires credentials",
+                    ));
+                }
+            }
+            InfraProviderType::Proxmox => {
+                if self.credentials.is_none() {
+                    return Err(crate::Error::validation(
+                        "Proxmox provider requires credentials",
+                    ));
+                }
+                let proxmox = self.proxmox.as_ref().ok_or_else(|| {
+                    crate::Error::validation("proxmox config required when type is proxmox")
+                })?;
+                if proxmox.server_url.is_empty() {
+                    return Err(crate::Error::validation(
+                        "proxmox.serverUrl cannot be empty",
+                    ));
+                }
+            }
+            InfraProviderType::OpenStack => {
+                if self.credentials.is_none() {
+                    return Err(crate::Error::validation(
+                        "OpenStack provider requires credentials",
+                    ));
+                }
+                let openstack = self.openstack.as_ref().ok_or_else(|| {
+                    crate::Error::validation("openstack config required when type is openstack")
+                })?;
+                if openstack.auth_url.is_empty() {
+                    return Err(crate::Error::validation(
+                        "openstack.authUrl cannot be empty",
+                    ));
+                }
+            }
+            InfraProviderType::Docker => {
+                // Docker providers require no credentials or provider-specific config
+            }
+        }
+
+        Ok(())
+    }
+}
+
 impl InfraProvider {
     /// Returns the ESO-synced credential secret name (`{name}-credentials`).
     /// `None` if no credentials are configured (e.g., Docker provider).
@@ -228,7 +289,7 @@ impl InfraProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::workload::resources::ResourceSpec;
+    use crate::crd::CredentialSpec;
 
     #[test]
     fn aws_provider_yaml() {
@@ -241,10 +302,8 @@ spec:
   type: aws
   region: us-east-1
   credentials:
-    type: secret
     id: infra/aws/prod
-    params:
-      provider: lattice-local
+    provider: lattice-local
   aws:
     vpcId: vpc-xxx
     subnetIds:
@@ -268,10 +327,8 @@ metadata:
 spec:
   type: proxmox
   credentials:
-    type: secret
     id: proxmox-creds
-    params:
-      provider: lattice-local
+    provider: lattice-local
   proxmox:
     serverUrl: https://pve.local:8006
     node: pve1
@@ -290,7 +347,7 @@ spec:
             InfraProviderSpec {
                 provider_type: InfraProviderType::AWS,
                 region: None,
-                credentials: Some(ResourceSpec::test_secret("infra/aws/prod", "vault-prod")),
+                credentials: Some(CredentialSpec::test("infra/aws/prod", "vault-prod")),
                 credential_data: None,
                 aws: None,
                 proxmox: None,
@@ -332,14 +389,12 @@ metadata:
 spec:
   type: openstack
   credentials:
-    type: secret
     id: infrastructure/openstack/credentials
-    params:
-      provider: vault-prod
-      keys:
-        - username
-        - password
-        - auth_url
+    provider: vault-prod
+    keys:
+      - username
+      - password
+      - auth_url
   credentialData:
     clouds.yaml: |
       clouds:
@@ -358,9 +413,7 @@ spec:
         assert!(provider.spec.credentials.is_some());
         assert!(provider.spec.credential_data.is_some());
 
-        let creds = provider.spec.credentials.as_ref().unwrap();
-        assert!(creds.type_.is_secret());
-
+        assert!(provider.spec.credentials.is_some());
         let data = provider.spec.credential_data.as_ref().unwrap();
         assert!(data.contains_key("clouds.yaml"));
         assert!(data["clouds.yaml"].contains("${secret.credentials.username}"));

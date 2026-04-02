@@ -31,6 +31,7 @@ pub struct ClusterConfig {
 /// Supported infrastructure provider types
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ProviderType {
     /// Docker/Kind provider for local development
     #[default]
@@ -135,6 +136,7 @@ impl std::fmt::Display for ProviderType {
 /// Bootstrap provider for cluster node initialization
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum BootstrapProvider {
     /// Standard kubeadm bootstrap (default)
     #[default]
@@ -242,7 +244,14 @@ impl ProviderConfig {
         }
     }
 
-    /// Get the provider type
+    /// Get the provider type.
+    ///
+    /// Precondition: `validate()` must have been called before this method.
+    /// All LatticeCluster objects pass through CRD validation on admission,
+    /// which calls `validate()` to ensure exactly one provider is set.
+    /// The Docker fallback exists only as a defensive default and should
+    /// never be reached in practice — if it is, it indicates a bug in the
+    /// validation pipeline.
     pub fn provider_type(&self) -> ProviderType {
         if self.aws.is_some() {
             ProviderType::Aws
@@ -326,6 +335,7 @@ fn is_default_bootstrap(b: &BootstrapProvider) -> bool {
 
 /// Taint effect for node taints
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaintEffect {
     /// Do not schedule new pods on this node
     NoSchedule,
@@ -756,9 +766,8 @@ pub struct RegistryMirror {
     /// Examples: `"harbor.corp.com"`, `"http://localhost:5555"`.
     pub mirror: String,
     /// ESO-managed credential source for registry authentication.
-    /// The synced secret must contain a `.dockerconfigjson` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<super::workload::resources::ResourceSpec>,
+    pub credentials: Option<CredentialSpec>,
 }
 
 // =============================================================================
@@ -973,6 +982,7 @@ impl ServiceRef {
 
 /// Cluster lifecycle phase
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClusterPhase {
     /// Cluster is waiting to be provisioned
     #[default]
@@ -1019,6 +1029,7 @@ impl std::fmt::Display for ClusterPhase {
 
 /// Condition status following Kubernetes conventions
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConditionStatus {
     /// Condition is true
     True,
@@ -1039,8 +1050,87 @@ impl std::fmt::Display for ConditionStatus {
     }
 }
 
+// =============================================================================
+// Provider Credentials
+// =============================================================================
+
+/// ESO-managed credential source for providers.
+///
+/// Used by InfraProvider, DNSProvider, ImageProvider, and CertIssuer to
+/// declare where credentials come from. The controller creates an ESO
+/// ExternalSecret that syncs credentials from a ClusterSecretStore.
+///
+/// Combined with `credential_data` (on the provider spec) for `${secret.*}`
+/// template interpolation to shape the resulting K8s Secret.
+///
+/// ```yaml
+/// credentials:
+///   id: infrastructure/aws/prod
+///   provider: vault-prod
+///   keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+/// ```
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialSpec {
+    /// Remote key/path in the secret store (e.g., "infrastructure/aws/prod")
+    pub id: String,
+
+    /// ClusterSecretStore name (e.g., "vault-prod", "lattice-local")
+    pub provider: String,
+
+    /// Specific keys to extract. When omitted, all keys are synced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+
+    /// How often ESO should refresh the secret (e.g., "1h", "30m")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_interval: Option<String>,
+
+    /// K8s Secret type override (e.g., "kubernetes.io/dockerconfigjson")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_type: Option<String>,
+}
+
+impl CredentialSpec {
+    /// Validate required fields. Returns an error if `id` or `provider` is empty.
+    pub fn validate(&self) -> Result<(), crate::Error> {
+        if self.id.is_empty() {
+            return Err(crate::Error::validation("credentials.id cannot be empty"));
+        }
+        if self.provider.is_empty() {
+            return Err(crate::Error::validation(
+                "credentials.provider cannot be empty",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Create a minimal credential spec (convenience for tests across crates)
+    pub fn test(id: &str, provider: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Create a credential spec with specific keys (convenience for tests across crates)
+    pub fn test_with_keys(id: &str, provider: &str, keys: &[&str]) -> Self {
+        Self {
+            id: id.to_string(),
+            provider: provider.to_string(),
+            keys: Some(keys.iter().map(|k| k.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+}
+
 /// Kubernetes-style condition for status reporting
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+///
+/// `PartialEq` compares type, status, and reason only — ignoring both
+/// `message` and `last_transition_time`. Message changes are informational,
+/// not state transitions.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub struct Condition {
     /// Type of condition (e.g., Ready, Provisioning)
     #[serde(rename = "type")]
@@ -1055,13 +1145,20 @@ pub struct Condition {
     /// Human-readable message
     pub message: String,
 
-    /// Last time the condition transitioned
+    /// When this condition last transitioned (type, status, or reason changed).
+    /// Preserved across reconciles when the condition is unchanged.
     #[serde(rename = "lastTransitionTime")]
     pub last_transition_time: DateTime<Utc>,
 }
 
+impl PartialEq for Condition {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_ == other.type_ && self.status == other.status && self.reason == other.reason
+    }
+}
+
 impl Condition {
-    /// Create a new condition with the current timestamp
+    /// Create a new condition with the current timestamp.
     pub fn new(
         type_: impl Into<String>,
         status: ConditionStatus,
@@ -1074,6 +1171,25 @@ impl Condition {
             reason: reason.into(),
             message: message.into(),
             last_transition_time: Utc::now(),
+        }
+    }
+
+    /// Merge a new condition into an existing conditions list.
+    ///
+    /// If a condition with the same type exists and hasn't changed state
+    /// (same type, status, reason — per PartialEq), preserves the existing
+    /// timestamp. Otherwise inserts the new condition with a fresh timestamp.
+    pub fn merge_into(new: Self, conditions: &mut Vec<Self>) {
+        if let Some(existing) = conditions.iter_mut().find(|c| c.type_ == new.type_) {
+            if *existing == new {
+                // State unchanged — preserve timestamp, update message only
+                existing.message = new.message;
+            } else {
+                // State changed — replace with new timestamp
+                *existing = new;
+            }
+        } else {
+            conditions.push(new);
         }
     }
 }

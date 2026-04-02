@@ -7,10 +7,8 @@ metadata:
 spec:
   providerType: proxmox
   credentials:
-    type: secret
     id: proxmox-credentials
-    params:
-      provider: lattice-local
+    provider: lattice-local
   proxmox:
     endpoint: "${PROXMOX_URL}"
     allowInsecure: true

@@ -376,7 +376,9 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_dns_forwarding(client, cluster, &ctx.cache).await {
                 warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
             }
-            if let Err(e) = super::external_dns::reconcile_external_dns(client, cluster, &ctx.cache).await {
+            if let Err(e) =
+                super::external_dns::reconcile_external_dns(client, cluster, &ctx.cache).await
+            {
                 warn!(error = %e, "failed to reconcile external-dns, will retry");
             }
             if let Err(e) = reconcile_cluster_autoscaler(client, cluster).await {
@@ -480,7 +482,11 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
 /// For each issuer entry, fetches the CertIssuer CRD, builds a ClusterIssuer JSON,
 /// and applies it via server-side apply. After applying all issuers, removes stale
 /// ClusterIssuers that are labeled as managed but no longer referenced in the spec.
-async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster, cache: &lattice_cache::ResourceCache) -> Result<(), Error> {
+async fn reconcile_issuers(
+    client: &Client,
+    cluster: &LatticeCluster,
+    cache: &lattice_cache::ResourceCache,
+) -> Result<(), Error> {
     let ns = cluster
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
@@ -559,10 +565,12 @@ async fn reconcile_issuers(client: &Client, cluster: &LatticeCluster, cache: &la
         };
 
         let dns_secret_ref = dns_provider.as_ref().and_then(|dp| dp.k8s_secret_ref());
-        let resolved_dp = dns_provider.as_ref().map(|dp| builder::ResolvedDnsProvider {
-            spec: &dp.spec,
-            secret_name: dns_secret_ref.as_ref().map(|r| r.name.as_str()),
-        });
+        let resolved_dp = dns_provider
+            .as_ref()
+            .map(|dp| builder::ResolvedDnsProvider {
+                spec: &dp.spec,
+                secret_name: dns_secret_ref.as_ref().map(|r| r.name.as_str()),
+            });
         let issuer_secret_ref = issuer_crd.k8s_secret_ref();
         let issuer_json = match builder::build_cluster_issuer(
             key,

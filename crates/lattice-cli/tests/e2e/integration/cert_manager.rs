@@ -121,12 +121,10 @@ spec:
   zone: {TEST_ZONE}
   resolver: "{resolver}"
   credentials:
-    type: secret
     id: {PIHOLE_SECRET_REMOTE_KEY}
-    params:
-      provider: lattice-local
-      keys:
-        - EXTERNAL_DNS_PIHOLE_PASSWORD
+    provider: lattice-local
+    keys:
+      - EXTERNAL_DNS_PIHOLE_PASSWORD
   pihole:
     url: "{pihole}""#
     );

@@ -40,13 +40,6 @@ spec:
           port: 6789
           protocol: TCP
     resources:
-      # Registry credentials for GHCR images
-      ghcr-creds:
-        type: secret
-        id: local-regcreds
-        params:
-          provider: lattice-local
-          refreshInterval: 1h
       # Owned volume (private to this service)
       config:
         type: volume
@@ -91,7 +84,7 @@ spec:
         capabilities: [NET_ADMIN, SYS_MODULE]
         allowedBinaries: ["*"]
   imagePullSecrets:
-    - ghcr-creds
+    - default
   replicas: 1
   ingress:
     routes:

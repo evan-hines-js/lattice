@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{
+    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+};
 use lattice_common::DistributableResources;
 use lattice_common::{
     INHERITED_LABEL, LATTICE_SYSTEM_NAMESPACE, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL,
@@ -244,10 +246,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
-        InfraProviderSpec, InfraProviderType, ResourceParams, ResourceSpec, ResourceType,
-        SecretParams,
-    };
+    use lattice_common::crd::{InfraProviderSpec, InfraProviderType};
 
     // =========================================================================
     // serialize_for_distribution Tests
@@ -313,13 +312,9 @@ mod tests {
     #[test]
     fn test_serialize_for_distribution_with_eso_credentials() {
         let mut cp = sample_cloud_provider();
-        cp.spec.credentials = Some(ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("infra/aws/prod".to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: "lattice-local".to_string(),
-                ..Default::default()
-            }),
+        cp.spec.credentials = Some(lattice_common::crd::CredentialSpec {
+            id: "infra/aws/prod".to_string(),
+            provider: "lattice-local".to_string(),
             ..Default::default()
         });
 

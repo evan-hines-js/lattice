@@ -19,8 +19,7 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
-    ensure_fresh_namespace, run_kubectl, with_diagnostics,
-    CedarPolicySpec, DiagnosticContext,
+    ensure_fresh_namespace, run_kubectl, with_diagnostics, CedarPolicySpec, DiagnosticContext,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,

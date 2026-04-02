@@ -83,6 +83,7 @@ impl DockerProvider {
         match bootstrap {
             BootstrapProvider::Rke2 => DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
             BootstrapProvider::Kubeadm => DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
+            _ => DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
         }
     }
 

@@ -40,7 +40,9 @@ pub async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let name = issuer.name_any();
     let client = &ctx.client;
-    let generation = issuer.metadata.generation.unwrap_or(0);
+    let generation = issuer.metadata.generation.ok_or_else(|| {
+        ReconcileError::Validation("CertIssuer missing metadata.generation".into())
+    })?;
 
     // Skip work if spec unchanged and already Ready
     if status_check::is_status_unchanged(
@@ -98,9 +100,9 @@ async fn validate_issuer(client: &Client, issuer: &CertIssuer) -> Result<(), Rec
         .validate()
         .map_err(|e| ReconcileError::Validation(e.to_string()))?;
 
-    let ns = issuer
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let ns = issuer.namespace().ok_or_else(|| {
+        ReconcileError::Validation("CertIssuer missing metadata.namespace".into())
+    })?;
 
     match issuer.spec.type_ {
         IssuerType::Acme => {
@@ -202,9 +204,9 @@ async fn update_status(
     }
 
     let name = issuer.name_any();
-    let namespace = issuer
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let namespace = issuer.namespace().ok_or_else(|| {
+        ReconcileError::Validation("CertIssuer missing metadata.namespace".into())
+    })?;
 
     let status = CertIssuerStatus {
         phase,
@@ -227,11 +229,8 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
-        AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec,
-        VaultIssuerSpec,
-    };
-    use lattice_common::crd::workload::resources::ResourceSpec;
+    use lattice_common::crd::CredentialSpec;
+    use lattice_common::crd::{AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, VaultIssuerSpec};
 
     // =========================================================================
     // Test Helpers
@@ -260,7 +259,7 @@ mod tests {
                 type_: IssuerType::Ca,
                 acme: None,
                 ca: Some(CaIssuerSpec {
-                    credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
+                    credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,
             },
@@ -277,7 +276,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: "pki".to_string(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         )
@@ -412,7 +411,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: String::new(),
                     path: "pki".to_string(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         );
@@ -430,7 +429,7 @@ mod tests {
                 vault: Some(VaultIssuerSpec {
                     server: "https://vault.example.com".to_string(),
                     path: String::new(),
-                    auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                    auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
                 }),
             },
         );

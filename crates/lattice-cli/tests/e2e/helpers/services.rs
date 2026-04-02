@@ -22,11 +22,10 @@ use super::{
 // LatticeService Test Helpers
 // =============================================================================
 
-/// Build a LatticeService with busybox boilerplate: ghcr-creds, ports (http:8080),
-/// ObjectMeta, RuntimeSpec with imagePullSecrets.
+/// Build a LatticeService with busybox boilerplate: ports (http:8080),
+/// ObjectMeta, RuntimeSpec with imagePullSecrets (references "default" ImageProvider).
 ///
-/// Callers provide their own `containers` and `resources`; this helper adds
-/// ghcr-creds to `resources` and wraps everything in the standard shell.
+/// Callers provide their own `containers` and `resources`.
 pub fn build_busybox_service(
     name: &str,
     namespace: &str,
@@ -35,26 +34,8 @@ pub fn build_busybox_service(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{
-        LatticeServiceSpec, PortSpec, ResourceParams, ResourceSpec, ResourceType, RuntimeSpec,
-        SecretParams, ServicePortsSpec, WorkloadSpec,
+        LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, WorkloadSpec,
     };
-
-    // Add ghcr-creds only if not already provided by the caller
-    if !resources.contains_key("ghcr-creds") {
-        resources.insert(
-            "ghcr-creds".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Secret,
-                id: Some(REGCREDS_REMOTE_KEY.to_string()),
-                params: ResourceParams::Secret(SecretParams {
-                    provider: REGCREDS_PROVIDER.to_string(),
-                    refresh_interval: Some("1h".to_string()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-    }
 
     let mut ports = BTreeMap::new();
     ports.insert(
@@ -79,7 +60,7 @@ pub fn build_busybox_service(
                 service: Some(ServicePortsSpec { ports }),
             },
             runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             ..Default::default()
@@ -276,7 +257,7 @@ pub async fn wait_for_service_phase(
         let expected_msg = expected_msg.clone();
         async move {
             let jsonpath = match &expected_msg {
-                Some(_) => "jsonpath={.status.phase} {.status.conditions[0].message}",
+                Some(_) => "jsonpath={.status.phase} {.status.message}",
                 None => "jsonpath={.status.phase}",
             };
             let output = run_kubectl(&[
@@ -524,8 +505,7 @@ pub async fn seed_all_local_test_secrets(kubeconfig: &str) -> Result<(), String>
 /// Build a LatticeService exercising all 5 secret routes programmatically.
 ///
 /// Build a LatticeService with a runtime-configurable provider name exercising
-/// all 5 secret routes. Every service includes `ghcr-creds` for imagePullSecrets
-/// since all images come from GHCR.
+/// all 5 secret routes. imagePullSecrets references the "default" ImageProvider.
 pub fn create_service_with_all_secret_routes(
     name: &str,
     namespace: &str,
@@ -651,7 +631,7 @@ pub fn create_service_with_all_secret_routes(
         },
     );
 
-    // Route 4: ghcr-creds for imagePullSecrets (custom provider)
+    // Route 4: ghcr-creds with explicit dockerconfigjson type
     resources.insert(
         "ghcr-creds".to_string(),
         ResourceSpec {
@@ -660,6 +640,7 @@ pub fn create_service_with_all_secret_routes(
             params: ResourceParams::Secret(SecretParams {
                 provider: provider.to_string(),
                 refresh_interval: Some("1h".to_string()),
+                secret_type: Some("kubernetes.io/dockerconfigjson".to_string()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1002,9 +983,9 @@ pub async fn verify_synced_secret_keys(
 /// Wait for the operator's built-in ClusterSecretStore, seed GHCR regcreds,
 /// and apply a broad Cedar policy permitting all services to access them.
 ///
-/// Call this before deploying any LatticeService in a test — every service
-/// declares `ghcr-creds` as an imagePullSecret resource pointing at
-/// `local-regcreds`, so the local webhook must be ready to serve it.
+/// Call this before deploying any LatticeService in a test — ensures the
+/// ImageProvider and local webhook infrastructure are ready to serve
+/// registry credentials for image pulls.
 pub async fn setup_regcreds_infrastructure(kubeconfig: &str) -> Result<(), String> {
     // Wait for the operator's built-in lattice-local ClusterSecretStore
     wait_for_cluster_secret_store_ready(kubeconfig, REGCREDS_PROVIDER).await?;

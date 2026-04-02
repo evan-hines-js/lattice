@@ -106,11 +106,11 @@ pub use topology::{
     UfmDiscoveryConfig,
 };
 pub use types::{
-    BootstrapProvider, CertPolicy, ClusterConfig, ClusterPhase, Condition, ConditionStatus,
-    ControlPlaneSpec, EndpointsSpec, GpuCapacity, InstanceType, KubernetesSpec, NodeCapacityHint,
-    NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig, ProviderSpec, ProviderType,
-    RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec, TaintEffect, WorkerPoolSpec,
-    credential_secret_name,
+    credential_secret_name, BootstrapProvider, CertPolicy, ClusterConfig, ClusterPhase, Condition,
+    ConditionStatus, ControlPlaneSpec, CredentialSpec, EndpointsSpec, GpuCapacity, InstanceType,
+    KubernetesSpec, NodeCapacityHint, NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig,
+    ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec,
+    TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

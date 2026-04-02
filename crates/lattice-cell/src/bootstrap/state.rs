@@ -139,7 +139,6 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         &self.image
     }
 
-
     /// Register a cluster for bootstrap.
     ///
     /// Creates a bootstrap token and stores the registration in memory.

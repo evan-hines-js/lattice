@@ -31,7 +31,9 @@ use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::fetch_distributable_resources;
 use crate::server::AgentServer;
-use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{
+    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+};
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
@@ -104,8 +106,6 @@ impl ParentConfig {
         }
     }
 }
-
-
 
 /// Cell servers handle - manages the lifecycle of gRPC and bootstrap HTTP servers
 ///
@@ -337,9 +337,7 @@ fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, Cel
 
     let cert_pem = data
         .get(CA_CERT_KEY)
-        .ok_or_else(|| {
-            CellServerError::CaPersistence(format!("CA secret missing {}", CA_CERT_KEY))
-        })
+        .ok_or_else(|| CellServerError::CaPersistence(format!("CA secret missing {}", CA_CERT_KEY)))
         .and_then(|b| {
             String::from_utf8(b.0.clone()).map_err(|e| {
                 CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_CERT_KEY, e))
@@ -348,9 +346,7 @@ fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, Cel
 
     let key_pem = data
         .get(CA_KEY_KEY)
-        .ok_or_else(|| {
-            CellServerError::CaPersistence(format!("CA secret missing {}", CA_KEY_KEY))
-        })
+        .ok_or_else(|| CellServerError::CaPersistence(format!("CA secret missing {}", CA_KEY_KEY)))
         .and_then(|b| {
             String::from_utf8(b.0.clone()).map_err(|e| {
                 CellServerError::CaPersistence(format!("Invalid {} encoding: {}", CA_KEY_KEY, e))
@@ -366,16 +362,11 @@ fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, Cel
         if let Ok(trust_str) = String::from_utf8(trust_pem.0.clone()) {
             for pem in pem::parse_many(trust_str.as_bytes())
                 .map_err(|e| {
-                    CellServerError::CaPersistence(format!(
-                        "Failed to parse trust bundle: {}",
-                        e
-                    ))
+                    CellServerError::CaPersistence(format!("Failed to parse trust bundle: {}", e))
                 })?
                 .iter()
             {
-                if let Ok(trust_ca) =
-                    CertificateAuthority::from_pem(&pem::encode(pem), &key_pem)
-                {
+                if let Ok(trust_ca) = CertificateAuthority::from_pem(&pem::encode(pem), &key_pem) {
                     cas.push(trust_ca);
                 }
             }
@@ -386,9 +377,10 @@ fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, Cel
         CellServerError::CaPersistence(format!("Failed to create CA bundle: {}", e))
     })?;
 
-    let info = bundle.active().cert_info().map_err(|e| {
-        CellServerError::CaPersistence(format!("Failed to read CA info: {}", e))
-    })?;
+    let info = bundle
+        .active()
+        .cert_info()
+        .map_err(|e| CellServerError::CaPersistence(format!("Failed to read CA info: {}", e)))?;
 
     info!(
         ca_count = bundle.len(),
@@ -466,9 +458,7 @@ pub async fn create_ca(client: &Client) -> Result<CertificateAuthorityBundle, Ce
 ///
 /// Waits up to 5 minutes for the Secret to appear (it may be applied
 /// concurrently by bootstrap manifests or the gRPC resource sync).
-pub async fn load_ca(
-    client: &Client,
-) -> Result<CertificateAuthorityBundle, CellServerError> {
+pub async fn load_ca(client: &Client) -> Result<CertificateAuthorityBundle, CellServerError> {
     let secrets: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
     // Try to load existing CA from Secret
@@ -540,9 +530,10 @@ async fn persist_ca_bundle(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(CA_SECRET.to_string()),
             namespace: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
-            labels: Some(BTreeMap::from([
-                ("lattice.dev/distribute".to_string(), "true".to_string()),
-            ])),
+            labels: Some(BTreeMap::from([(
+                "lattice.dev/distribute".to_string(),
+                "true".to_string(),
+            )])),
             ..Default::default()
         },
         type_: Some("Opaque".to_string()),
@@ -576,9 +567,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         Ok(Self {
             running: AtomicBool::new(false),
-            agent_registry: Arc::new(AgentRegistry::new_with_cluster(
-                config.cluster_name.clone(),
-            )),
+            agent_registry: Arc::new(AgentRegistry::new_with_cluster(config.cluster_name.clone())),
             config,
             ca_bundle,
             kube_client: client.clone(),
@@ -593,9 +582,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     pub fn with_ca(config: ParentConfig, ca: CertificateAuthority, client: Client) -> Self {
         Self {
             running: AtomicBool::new(false),
-            agent_registry: Arc::new(AgentRegistry::new_with_cluster(
-                config.cluster_name.clone(),
-            )),
+            agent_registry: Arc::new(AgentRegistry::new_with_cluster(config.cluster_name.clone())),
             config,
             ca_bundle: Arc::new(RwLock::new(CertificateAuthorityBundle::new(ca))),
             kube_client: client,
@@ -1097,5 +1084,4 @@ mod tests {
         servers.shutdown().await;
         assert!(servers.bootstrap_state().await.is_none());
     }
-
 }

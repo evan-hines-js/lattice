@@ -24,8 +24,7 @@ use futures::future::try_join_all;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::Api;
 use lattice_common::crd::{
-    LatticeService, LatticeServiceSpec, ResourceParams, ResourceSpec, ResourceType, RuntimeSpec,
-    SecretParams, WorkloadSpec,
+    LatticeService, LatticeServiceSpec, ResourceSpec, RuntimeSpec, WorkloadSpec,
 };
 use lattice_common::template::TemplateString;
 use tracing::info;
@@ -34,7 +33,6 @@ use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
     with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
-    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     curl_container, inbound_allow, nginx_container, outbound_dep, postgres_container, postgres_port,
@@ -58,19 +56,6 @@ fn build_postgres_service() -> LatticeService {
     let mut resources: BTreeMap<String, ResourceSpec> = BTreeMap::new();
     let (k, v) = inbound_allow("app-server");
     resources.insert(k, v);
-    resources.insert(
-        "ghcr-creds".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: REGCREDS_PROVIDER.to_string(),
-                refresh_interval: Some("1h".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
 
     let mut labels = BTreeMap::new();
     labels.insert("lattice.dev/environment".to_string(), NAMESPACE.to_string());
@@ -89,7 +74,7 @@ fn build_postgres_service() -> LatticeService {
                 service: Some(postgres_port()),
             },
             runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             ..Default::default()

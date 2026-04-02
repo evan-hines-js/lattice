@@ -108,13 +108,13 @@ async fn verify_route3(kubeconfig: &str, namespace: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Route 4: imagePullSecrets (Vault backend)
+/// Route 4: imagePullSecrets via ImageProvider
 async fn verify_route4(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     verify_pod_image_pull_secrets(
         kubeconfig,
         namespace,
         &service_pod_selector("vr4-pull-secrets"),
-        "vr4-pull-secrets-ghcr-creds",
+        "vr4-pull-secrets-default-credentials",
     )
     .await?;
     info!("[Vault/Route4] imagePullSecrets test passed!");
@@ -176,7 +176,7 @@ async fn verify_combined(kubeconfig: &str, namespace: &str) -> Result<(), String
         kubeconfig,
         namespace,
         &label,
-        "vault-routes-combined-ghcr-creds",
+        "vault-routes-combined-default-credentials",
     )
     .await?;
     verify_synced_secret_keys(
@@ -333,7 +333,7 @@ fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeServic
         },
     );
 
-    // Route 4: ghcr-creds for imagePullSecrets (Vault-backed)
+    // Route 4: ghcr-creds with explicit dockerconfigjson type (Vault-backed)
     resources.insert(
         "ghcr-creds".to_string(),
         ResourceSpec {
@@ -342,6 +342,7 @@ fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeServic
             params: ResourceParams::Secret(SecretParams {
                 provider: VAULT_STORE_NAME.to_string(),
                 refresh_interval: Some("1h".to_string()),
+                secret_type: Some("kubernetes.io/dockerconfigjson".to_string()),
                 ..Default::default()
             }),
             ..Default::default()

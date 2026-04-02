@@ -70,8 +70,9 @@ pub async fn compile_job(
     provider_type: ProviderType,
     cedar: &PolicyEngine,
     quota_budget: Option<&lattice_quota::QuotaBudget>,
+    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
 ) -> Result<CompiledJob, JobError> {
-    let name = job.metadata.name.as_deref().unwrap_or_default();
+    let name = job.metadata.name.as_deref().ok_or(JobError::MissingName)?;
     let namespace = job
         .metadata
         .namespace
@@ -141,8 +142,8 @@ pub async fn compile_job(
         )
         .with_cluster_name(cluster_name)
         .with_graph(graph)
-        .with_image_pull_secrets(&task_spec.runtime.image_pull_secrets)
-        .with_owner_references(owner_refs.clone());
+        .with_owner_references(owner_refs.clone())
+        .with_image_providers(image_providers.clone());
 
         if let Some(budget) = quota_budget {
             compiler = compiler.with_quota_budget(budget.clone(), task_spec.replicas.unwrap_or(1));
@@ -707,6 +708,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -738,6 +740,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -763,6 +766,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(JobError::NoTasks)));
@@ -788,6 +792,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(JobError::MissingNamespace)));
@@ -817,6 +822,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1040,6 +1046,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1086,6 +1093,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1144,6 +1152,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1201,6 +1210,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1237,6 +1247,7 @@ mod tests {
             ProviderType::Docker,
             &cedar,
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();

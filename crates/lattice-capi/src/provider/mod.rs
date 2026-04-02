@@ -262,7 +262,6 @@ pub fn get_cluster_name(cluster: &LatticeCluster) -> Result<&str> {
         .ok_or_else(|| Error::validation("cluster name required"))
 }
 
-
 // ============================================================================
 // Configuration Structs
 // ============================================================================
@@ -357,6 +356,11 @@ fn generate_kube_vip_manifest(
     let kubeconfig_path = match bootstrap {
         BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
         BootstrapProvider::Kubeadm => "/etc/kubernetes/super-admin.conf",
+        _ => {
+            return Err(Error::provider(format!(
+                "unsupported bootstrap provider: {bootstrap}"
+            )))
+        }
     };
 
     let pod = Pod {
@@ -490,6 +494,7 @@ pub fn format_capi_version(
     match bootstrap {
         BootstrapProvider::Kubeadm => format!("v{}", v),
         BootstrapProvider::Rke2 => format!("v{}+rke2r1", v),
+        _ => format!("v{}", v),
     }
 }
 
@@ -513,6 +518,7 @@ pub fn generate_machine_deployment_for_pool(
     let bootstrap_config_kind = match config.bootstrap {
         BootstrapProvider::Kubeadm => "KubeadmConfigTemplate",
         BootstrapProvider::Rke2 => "RKE2ConfigTemplate",
+        _ => "KubeadmConfigTemplate",
     };
     let version = format_capi_version(config.k8s_version, &config.bootstrap);
 
@@ -611,8 +617,7 @@ pub fn generate_machine_deployment_for_pool(
             .as_ref()
             .and_then(|it| it.gpu.as_ref())
         {
-            capacity_labels
-                .insert("nvidia.com/gpu.product".to_string(), gpu.model.clone());
+            capacity_labels.insert("nvidia.com/gpu.product".to_string(), gpu.model.clone());
         }
         let labels_str: Vec<String> = capacity_labels
             .iter()
@@ -672,6 +677,7 @@ pub fn generate_bootstrap_config_template_for_pool(
     match config.bootstrap {
         BootstrapProvider::Kubeadm => generate_kubeadm_config_template_for_pool(config, pool),
         BootstrapProvider::Rke2 => generate_rke2_config_template_for_pool(config, pool),
+        _ => generate_kubeadm_config_template_for_pool(config, pool),
     }
 }
 
@@ -979,6 +985,7 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
     let cp_kind = match config.bootstrap {
         BootstrapProvider::Kubeadm => "KubeadmControlPlane",
         BootstrapProvider::Rke2 => "RKE2ControlPlane",
+        _ => "KubeadmControlPlane",
     };
 
     // In CAPI v1beta2, refs use apiGroup (not apiVersion) and no namespace
@@ -1027,6 +1034,10 @@ pub fn generate_control_plane(
     match config.bootstrap {
         BootstrapProvider::Kubeadm => generate_kubeadm_control_plane(config, infra, cp_config),
         BootstrapProvider::Rke2 => generate_rke2_control_plane(config, infra, cp_config),
+        _ => Err(Error::provider(format!(
+            "unsupported bootstrap provider: {}",
+            config.bootstrap
+        ))),
     }
 }
 
@@ -1439,7 +1450,6 @@ pub trait Provider: Send + Sync {
     ///
     /// `Ok(())` if the spec is valid, or an error describing what's wrong
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()>;
-
 }
 
 /// Create a provider instance for the given provider type
@@ -1468,6 +1478,9 @@ pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<B
         ProviderType::Azure => Err(Error::provider(
             "Azure provider not yet implemented".to_string(),
         )),
+        _ => Err(Error::provider(format!(
+            "unsupported provider type: {provider_type}"
+        ))),
     }
 }
 

@@ -173,7 +173,11 @@ impl ResourceCache {
             return true;
         }
 
-        let reader = spawn_dynamic_watcher(api, &ar, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS));
+        let reader = spawn_dynamic_watcher(
+            api,
+            &ar,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        );
         self.stores
             .insert(key, Arc::new(DynamicStore { store: reader }));
         tracing::info!(kind = %ar.kind, "Lazily registered dynamic cache watch");
@@ -199,7 +203,11 @@ impl ResourceCache {
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
         match self.typed_store::<K>() {
-            Some(store) => store.state().into_iter().filter(|obj| predicate(obj)).collect(),
+            Some(store) => store
+                .state()
+                .into_iter()
+                .filter(|obj| predicate(obj))
+                .collect(),
             None => vec![],
         }
     }
@@ -238,7 +246,11 @@ impl ResourceCache {
         predicate: impl Fn(&DynamicObject) -> bool,
     ) -> Vec<Arc<DynamicObject>> {
         match self.dynamic_store(ar) {
-            Some(store) => store.state().into_iter().filter(|obj| predicate(obj)).collect(),
+            Some(store) => store
+                .state()
+                .into_iter()
+                .filter(|obj| predicate(obj))
+                .collect(),
             None => vec![],
         }
     }
@@ -260,33 +272,56 @@ impl ResourceCache {
             .get(&ObjectRef::new_with(name, ar.clone()).within(namespace))
     }
 
+    // -- Domain helpers --
+
+    /// Resolve ImageProvider credentials from the cache by name.
+    ///
+    /// For each provider name, looks up the ImageProvider CRD in `lattice-system`
+    /// and extracts its credentials. Missing or credential-less providers are
+    /// skipped — the workload compiler produces the authoritative error when a
+    /// referenced provider is absent from the resolved map.
+    pub fn resolve_image_providers(
+        &self,
+        provider_names: &[String],
+    ) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
+        use lattice_common::crd::ImageProvider;
+
+        let mut result = std::collections::BTreeMap::new();
+        for name in provider_names {
+            if let Some(provider) =
+                self.get_namespaced::<ImageProvider>(name, lattice_common::LATTICE_SYSTEM_NAMESPACE)
+            {
+                if let Some(ref credentials) = provider.spec.credentials {
+                    result.insert(name.clone(), credentials.clone());
+                }
+            }
+        }
+        result
+    }
+
     // -- Internal --
 
     fn typed_store<K>(&self) -> Option<Store<K>>
     where
         K: Resource<DynamicType = ()> + Clone + fmt::Debug + Send + Sync + 'static,
     {
-        self.stores
-            .get(&gvk_key_for::<K>())
-            .and_then(|entry| {
-                entry
-                    .value()
-                    .as_any()
-                    .downcast_ref::<TypedStore<K>>()
-                    .map(|ts| ts.store.clone())
-            })
+        self.stores.get(&gvk_key_for::<K>()).and_then(|entry| {
+            entry
+                .value()
+                .as_any()
+                .downcast_ref::<TypedStore<K>>()
+                .map(|ts| ts.store.clone())
+        })
     }
 
     fn dynamic_store(&self, ar: &ApiResource) -> Option<Store<DynamicObject>> {
-        self.stores
-            .get(&gvk_key_for_ar(ar))
-            .and_then(|entry| {
-                entry
-                    .value()
-                    .as_any()
-                    .downcast_ref::<DynamicStore>()
-                    .map(|ds| ds.store.clone())
-            })
+        self.stores.get(&gvk_key_for_ar(ar)).and_then(|entry| {
+            entry
+                .value()
+                .as_any()
+                .downcast_ref::<DynamicStore>()
+                .map(|ds| ds.store.clone())
+        })
     }
 }
 
@@ -334,7 +369,11 @@ impl ResourceCacheBuilder {
 
     /// Watch a dynamic resource (any GVK).
     pub fn watch_dynamic(self, api: Api<DynamicObject>, ar: ApiResource) -> Self {
-        self.watch_dynamic_with(api, ar, WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS))
+        self.watch_dynamic_with(
+            api,
+            ar,
+            WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+        )
     }
 
     /// Watch a dynamic resource with a custom config.
@@ -379,8 +418,11 @@ impl ResourceCacheBuilder {
         }
     }
 
-    fn spawn_typed_watcher<K>(api: Api<K>, writer: reflector::store::Writer<K>, config: WatcherConfig)
-    where
+    fn spawn_typed_watcher<K>(
+        api: Api<K>,
+        writer: reflector::store::Writer<K>,
+        config: WatcherConfig,
+    ) where
         K: Resource<DynamicType = ()>
             + Clone
             + fmt::Debug
@@ -391,12 +433,10 @@ impl ResourceCacheBuilder {
     {
         let label = std::any::type_name::<K>();
         tokio::spawn(async move {
-            let mut stream = std::pin::pin!(reflector::reflector(
-                writer,
-                watcher::watcher(api, config)
-            )
-            .default_backoff()
-            .applied_objects());
+            let mut stream =
+                std::pin::pin!(reflector::reflector(writer, watcher::watcher(api, config))
+                    .default_backoff()
+                    .applied_objects());
             while let Some(result) = stream.next().await {
                 if let Err(e) = result {
                     tracing::debug!(
@@ -485,9 +525,8 @@ mod tests {
             ])
             .build();
 
-        let prod_only = cache.list_filtered::<ConfigMap>(|cm| {
-            cm.metadata.namespace.as_deref() == Some("prod")
-        });
+        let prod_only =
+            cache.list_filtered::<ConfigMap>(|cm| cm.metadata.namespace.as_deref() == Some("prod"));
         assert_eq!(prod_only.len(), 2);
     }
 

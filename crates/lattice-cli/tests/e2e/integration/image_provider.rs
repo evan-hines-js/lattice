@@ -69,10 +69,8 @@ spec:
   type: generic
   registry: test-registry.example.com
   credentials:
-    type: secret
     id: test-image-creds
-    params:
-      provider: lattice-local
+    provider: lattice-local
 "#;
     apply_yaml(kubeconfig, image_provider).await?;
     info!("[ImageProvider] CRD created");
@@ -81,8 +79,8 @@ spec:
     wait_for_resource_phase(
         kubeconfig,
         "imageprovider",
-        "test-registry",
         LATTICE_NS,
+        "test-registry",
         "Ready",
         DEFAULT_TIMEOUT,
     )
@@ -197,10 +195,13 @@ async fn cleanup(kubeconfig: &str) {
 #[tokio::test]
 #[ignore]
 async fn test_image_provider_standalone() {
-    super::super::context::init_test_env("Set LATTICE_KUBECONFIG or LATTICE_WORKLOAD_KUBECONFIG");
+    super::super::context::init_e2e_test();
     let ctx = super::super::context::InfraContext::from_env()
         .expect("Set LATTICE_KUBECONFIG or LATTICE_WORKLOAD_KUBECONFIG");
-    let kubeconfig = ctx.workload_kubeconfig.as_deref().unwrap_or(&ctx.mgmt_kubeconfig);
+    let kubeconfig = ctx
+        .workload_kubeconfig
+        .as_deref()
+        .unwrap_or(&ctx.mgmt_kubeconfig);
     run_image_provider_tests(kubeconfig)
         .await
         .expect("ImageProvider tests failed");

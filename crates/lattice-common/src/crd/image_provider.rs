@@ -14,7 +14,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
-use super::workload::resources::ResourceSpec;
 
 /// ImageProvider defines credentials for a container image registry.
 ///
@@ -33,11 +32,9 @@ use super::workload::resources::ResourceSpec;
 ///   type: ghcr
 ///   registry: ghcr.io
 ///   credentials:
-///     type: secret
 ///     id: ci/ghcr-token
-///     params:
-///       provider: vault-prod
-///       keys: [username, token]
+///     provider: vault-prod
+///     keys: [username, token]
 ///   credentialData:
 ///     .dockerconfigjson: |
 ///       {"auths":{"ghcr.io":{"auth":"${secret.credentials.username}:${secret.credentials.token}"}}}
@@ -77,11 +74,10 @@ pub struct ImageProviderSpec {
     /// Registry hostname (e.g., "ghcr.io", "docker.io", "123456789.dkr.ecr.us-east-1.amazonaws.com")
     pub registry: String,
 
-    /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
-    /// The controller creates an ExternalSecret that syncs credentials from a
-    /// ClusterSecretStore into a `kubernetes.io/dockerconfigjson` Secret.
+    /// ESO-managed credential source. The controller creates an ExternalSecret
+    /// that syncs credentials from a ClusterSecretStore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<ResourceSpec>,
+    pub credentials: Option<super::types::CredentialSpec>,
 
     /// Template data for shaping credentials using `${secret.*}` syntax.
     /// Must produce a `.dockerconfigjson` key with valid Docker config JSON.
@@ -188,10 +184,21 @@ impl ImageProviderSpec {
             return Err(crate::Error::validation("registry cannot be empty"));
         }
 
+        if let Some(ref credentials) = self.credentials {
+            credentials.validate()?;
+        }
+
+        if self.credential_data.is_some() && self.credentials.is_none() {
+            return Err(crate::Error::validation(
+                "credentialData requires credentials to be set",
+            ));
+        }
+
         if self.provider_type == ImageProviderType::Ecr {
-            let ecr = self.ecr.as_ref().ok_or_else(|| {
-                crate::Error::validation("ecr config required when type is ecr")
-            })?;
+            let ecr = self
+                .ecr
+                .as_ref()
+                .ok_or_else(|| crate::Error::validation("ecr config required when type is ecr"))?;
             if ecr.region.is_empty() {
                 return Err(crate::Error::validation("ecr.region cannot be empty"));
             }
@@ -229,7 +236,7 @@ impl ImageProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::workload::resources::ResourceSpec;
+    use crate::crd::CredentialSpec;
 
     #[test]
     fn ghcr_provider_yaml() {
@@ -242,11 +249,9 @@ spec:
   type: ghcr
   registry: ghcr.io
   credentials:
-    type: secret
     id: ci/ghcr-token
-    params:
-      provider: vault-prod
-      keys: [username, token]
+    provider: vault-prod
+    keys: [username, token]
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let provider: ImageProvider = serde_json::from_value(value).expect("parse");
@@ -258,7 +263,10 @@ spec:
 
     #[test]
     fn ecr_requires_config() {
-        let spec = ImageProviderSpec::new(ImageProviderType::Ecr, "123456789.dkr.ecr.us-east-1.amazonaws.com");
+        let spec = ImageProviderSpec::new(
+            ImageProviderType::Ecr,
+            "123456789.dkr.ecr.us-east-1.amazonaws.com",
+        );
         assert!(spec.validate().is_err());
     }
 
@@ -269,7 +277,10 @@ spec:
                 region: "us-east-1".to_string(),
                 account_id: Some("123456789".to_string()),
             }),
-            ..ImageProviderSpec::new(ImageProviderType::Ecr, "123456789.dkr.ecr.us-east-1.amazonaws.com")
+            ..ImageProviderSpec::new(
+                ImageProviderType::Ecr,
+                "123456789.dkr.ecr.us-east-1.amazonaws.com",
+            )
         };
         assert!(spec.validate().is_ok());
     }
@@ -291,7 +302,11 @@ spec:
         let provider = ImageProvider::new(
             "ghcr",
             ImageProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys("ci/ghcr", "vault-prod", &["token"])),
+                credentials: Some(CredentialSpec::test_with_keys(
+                    "ci/ghcr",
+                    "vault-prod",
+                    &["token"],
+                )),
                 ..ImageProviderSpec::new(ImageProviderType::Ghcr, "ghcr.io")
             },
         );
@@ -309,7 +324,10 @@ spec:
                     region: "us-east-1".to_string(),
                     account_id: None,
                 }),
-                ..ImageProviderSpec::new(ImageProviderType::Ecr, "123456789.dkr.ecr.us-east-1.amazonaws.com")
+                ..ImageProviderSpec::new(
+                    ImageProviderType::Ecr,
+                    "123456789.dkr.ecr.us-east-1.amazonaws.com",
+                )
             },
         );
         assert!(provider.k8s_secret_ref().is_none());
@@ -341,11 +359,9 @@ spec:
   type: harbor
   registry: harbor.internal.com
   credentials:
-    type: secret
     id: ci/harbor
-    params:
-      provider: vault-prod
-      keys: [username, password]
+    provider: vault-prod
+    keys: [username, password]
   credentialData:
     .dockerconfigjson: |
       {"auths":{"harbor.internal.com":{"auth":"${secret.credentials.username}:${secret.credentials.password}"}}}

@@ -31,10 +31,10 @@ use lattice_proto::{
     SubtreeState,
 };
 
+use crate::connection::ClusterInfo;
 use crate::connection::K8sResponseRegistry;
 use crate::kubeconfig::patch_kubeconfig_for_proxy;
 use crate::state_sync;
-use crate::connection::ClusterInfo;
 use crate::{AgentConnection, SharedAgentRegistry};
 use lattice_infra::{extract_cluster_id_from_cert, MtlsError, ServerMtlsConfig};
 use tonic::transport::server::TlsConnectInfo;
@@ -840,9 +840,7 @@ async fn process_agent_message(
                             subtree_clusters = clusters.len(),
                             "Full sync: updating subtree registry"
                         );
-                        registry
-                            .handle_full_sync(cluster_name, clusters)
-                            .await;
+                        registry.handle_full_sync(cluster_name, clusters).await;
                     }
                     Err(e) => {
                         error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
@@ -860,9 +858,7 @@ async fn process_agent_message(
                                 "Delta: updating subtree registry"
                             );
                         }
-                        registry
-                            .handle_delta(cluster_name, added, removed)
-                            .await;
+                        registry.handle_delta(cluster_name, added, removed).await;
                     }
                     Err(e) => {
                         error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
@@ -1269,14 +1265,10 @@ mod tests {
             Some(Payload::SubtreeState(state)) => {
                 if state.is_full_sync {
                     if let Ok(clusters) = convert_subtree_to_cluster_infos(state) {
-                        registry
-                            .handle_full_sync(cluster_name, clusters)
-                            .await;
+                        registry.handle_full_sync(cluster_name, clusters).await;
                     }
                 } else if let Ok((added, removed)) = extract_delta_changes(state) {
-                    registry
-                        .handle_delta(cluster_name, added, removed)
-                        .await;
+                    registry.handle_delta(cluster_name, added, removed).await;
                 }
                 // Note: service routes (LatticeClusterRoutes CRD) not tested here
                 // since test_handle_message doesn't have a kube client

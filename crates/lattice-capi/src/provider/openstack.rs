@@ -291,7 +291,6 @@ impl Provider for OpenStackProvider {
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]

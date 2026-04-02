@@ -5,7 +5,7 @@
 //! target namespaces — this controller only validates the spec.
 //!
 //! Docker providers require no credentials. All others require the
-//! `credentials` field (ESO ResourceSpec), optionally with `credentialData`
+//! `credentials` field (ESO CredentialSpec), optionally with `credentialData`
 //! templates for complex credential shapes.
 
 use std::sync::Arc;
@@ -19,10 +19,7 @@ use lattice_common::crd::{
     InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType,
 };
 use lattice_common::status_check;
-use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
-    REQUEUE_SUCCESS_SECS,
-};
+use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
 
@@ -36,7 +33,9 @@ pub async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let name = cp.name_any();
     let client = &ctx.client;
-    let generation = cp.metadata.generation.unwrap_or(0);
+    let generation = cp.metadata.generation.ok_or_else(|| {
+        ReconcileError::Validation("InfraProvider missing metadata.generation".into())
+    })?;
 
     // Skip work if spec unchanged and already Ready
     if status_check::is_status_unchanged(
@@ -49,6 +48,20 @@ pub async fn reconcile(
     }
 
     info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling InfraProvider");
+
+    if let Err(e) = cp.spec.validate() {
+        let msg = e.to_string();
+        warn!(cloud_provider = %name, error = %msg, "Validation failed");
+        update_status(
+            client,
+            &cp,
+            InfraProviderPhase::Failed,
+            Some(msg),
+            Some(generation),
+        )
+        .await?;
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
+    }
 
     match validate_credentials(&cp) {
         Ok(()) => {
@@ -90,7 +103,7 @@ pub async fn reconcile(
 /// Validate credentials for the cloud provider.
 ///
 /// Docker providers require no credentials. All others require the
-/// `credentials` field (ESO ResourceSpec). ExternalSecrets are created
+/// `credentials` field (ESO CredentialSpec). ExternalSecrets are created
 /// by consumers in their target namespaces, not by this controller.
 fn validate_credentials(cp: &InfraProvider) -> Result<(), ReconcileError> {
     if cp.spec.credential_data.is_some() && cp.spec.credentials.is_none() {
@@ -136,9 +149,9 @@ async fn update_status(
     }
 
     let name = cp.name_any();
-    let namespace = cp
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let namespace = cp.namespace().ok_or_else(|| {
+        ReconcileError::Validation("InfraProvider missing metadata.namespace".into())
+    })?;
 
     let status = InfraProviderStatus {
         phase,
@@ -164,13 +177,11 @@ async fn update_status(
 mod tests {
     use super::*;
     use kube::core::ObjectMeta;
-    use lattice_common::crd::{
-        InfraProviderSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams,
-    };
+    use lattice_common::crd::{CredentialSpec, InfraProviderSpec};
     use lattice_common::template::extract_secret_refs;
+    use lattice_common::LATTICE_SYSTEM_NAMESPACE;
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;
-
 
     fn sample_provider(provider_type: InfraProviderType) -> InfraProvider {
         let (name, region) = match provider_type {
@@ -184,7 +195,10 @@ mod tests {
         let credentials = if provider_type == InfraProviderType::Docker {
             None
         } else {
-            Some(ResourceSpec::test_secret(&format!("infra/{name}"), "lattice-local"))
+            Some(CredentialSpec::test(
+                &format!("infra/{name}"),
+                "lattice-local",
+            ))
         };
 
         InfraProvider::new(
@@ -244,17 +258,15 @@ mod tests {
     async fn simple_mode_builds_external_secret() {
         let cp = sample_provider(InfraProviderType::AWS);
 
-        let resource = cp.spec.credentials.as_ref().unwrap();
-        let params = resource.params.as_secret().unwrap();
-        let remote_key = resource.secret_remote_key().unwrap();
+        let creds = cp.spec.credentials.as_ref().unwrap();
         let secret_name = format!("{}-credentials", cp.name_any());
 
         let es = build_external_secret(
             &secret_name,
             LATTICE_SYSTEM_NAMESPACE,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
             None,
         );
 
@@ -276,18 +288,14 @@ mod tests {
             InfraProviderSpec {
                 provider_type: InfraProviderType::OpenStack,
                 region: None,
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some("infrastructure/openstack/creds".to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: "vault-prod".to_string(),
-                        keys: Some(vec![
-                            "username".to_string(),
-                            "password".to_string(),
-                            "auth_url".to_string(),
-                        ]),
-                        ..Default::default()
-                    }),
+                credentials: Some(CredentialSpec {
+                    id: "infrastructure/openstack/creds".to_string(),
+                    provider: "vault-prod".to_string(),
+                    keys: Some(vec![
+                        "username".to_string(),
+                        "password".to_string(),
+                        "auth_url".to_string(),
+                    ]),
                     ..Default::default()
                 }),
                 credential_data: Some(credential_data.clone()),
@@ -298,9 +306,7 @@ mod tests {
             },
         );
 
-        let resource = cp.spec.credentials.as_ref().unwrap();
-        let params = resource.params.as_secret().unwrap();
-        let remote_key = resource.secret_remote_key().unwrap();
+        let creds = cp.spec.credentials.as_ref().unwrap();
         let secret_name = format!("{}-credentials", cp.name_any());
 
         let mut template_data = BTreeMap::new();
@@ -314,9 +320,9 @@ mod tests {
         let es = build_templated_external_secret(
             &secret_name,
             LATTICE_SYSTEM_NAMESPACE,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
             template_data,
             &all_refs,
         )

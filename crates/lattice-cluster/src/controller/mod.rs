@@ -227,6 +227,12 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 lattice_common::REQUEUE_SUCCESS_SECS,
             )))
         }
+        _ => {
+            warn!(?current_phase, "unknown cluster phase, requeueing");
+            Ok(Action::requeue(Duration::from_secs(
+                lattice_common::REQUEUE_ERROR_SECS,
+            )))
+        }
     };
 
     // Record reconcile metrics and update phase gauge
@@ -244,6 +250,7 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 ClusterPhase::Deleting | ClusterPhase::Unpivoting => {
                     metrics::ClusterPhase::Deleting
                 }
+                _ => metrics::ClusterPhase::Pending,
             };
             metrics::set_cluster_phase_count(phase_label, 1);
         }

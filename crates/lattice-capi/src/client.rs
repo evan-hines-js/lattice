@@ -314,6 +314,11 @@ impl CAPIClient for CAPIClientImpl {
         let (cp_kind, cp_group) = match bootstrap {
             BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
             BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+            _ => {
+                return Err(Error::provider(format!(
+                    "unsupported bootstrap provider: {bootstrap}"
+                )))
+            }
         };
 
         let cp_ar = lattice_common::kube_utils::build_api_resource_with_discovery(
@@ -534,6 +539,11 @@ impl CAPIClient for CAPIClientImpl {
         let (cp_kind, cp_group) = match bootstrap {
             BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
             BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+            _ => {
+                return Err(Error::provider(format!(
+                    "unsupported bootstrap provider: {bootstrap}"
+                )))
+            }
         };
 
         let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
@@ -574,6 +584,11 @@ impl CAPIClient for CAPIClientImpl {
         let (cp_kind, cp_group) = match bootstrap {
             BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
             BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
+            _ => {
+                return Err(Error::provider(format!(
+                    "unsupported bootstrap provider: {bootstrap}"
+                )))
+            }
         };
 
         let ar = lattice_common::kube_utils::build_api_resource_with_discovery(

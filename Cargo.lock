@@ -2661,6 +2661,7 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lattice-common",
  "serde",
  "tokio",
  "tracing",

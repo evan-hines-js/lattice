@@ -244,18 +244,19 @@ async fn cleanup_service_stubs(
 ///
 /// Returns (proxy_url, ca_cert_pem, proxy_token) from the Secret written by
 /// the agent when it receives peer routes from the parent.
-async fn load_peer_proxy_credentials(
-    client: &Client,
-) -> Result<(String, String, String), Error> {
+async fn load_peer_proxy_credentials(client: &Client) -> Result<(String, String, String), Error> {
     use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
     let api: Api<Secret> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secret = api.get("lattice-peer-proxy-credentials").await.map_err(|e| {
-        Error::internal(format!(
-            "peer proxy credentials not found \
+    let secret = api
+        .get("lattice-peer-proxy-credentials")
+        .await
+        .map_err(|e| {
+            Error::internal(format!(
+                "peer proxy credentials not found \
              (parent may not have sent PeerRouteSync yet): {e}"
-        ))
-    })?;
+            ))
+        })?;
 
     let data = secret
         .data
@@ -280,10 +281,7 @@ async fn load_peer_proxy_credentials(
 ///
 /// Reads the `istiod-direct-kubeconfig-{cluster}` secret from istio-system,
 /// copied from the CAPI kubeconfig pre-pivot by the cluster controller.
-async fn load_direct_kubeconfig(
-    client: &Client,
-    cluster_name: &str,
-) -> Result<String, Error> {
+async fn load_direct_kubeconfig(client: &Client, cluster_name: &str) -> Result<String, Error> {
     let secret_name = lattice_common::istiod_kubeconfig_secret_name(cluster_name);
     let api: Api<Secret> = Api::namespaced(client.clone(), "istio-system");
 
@@ -365,7 +363,10 @@ async fn update_mesh_networks(
     let cm = match cache.get_namespaced::<ConfigMap>("istio", "istio-system") {
         Some(cm) => cm,
         None => {
-            error!("istio ConfigMap not found in cache for meshNetworks {}", operation);
+            error!(
+                "istio ConfigMap not found in cache for meshNetworks {}",
+                operation
+            );
             return;
         }
     };

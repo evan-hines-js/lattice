@@ -568,7 +568,7 @@ mod tests {
                     requests: Some(ResourceQuantity {
                         cpu: Some("500m".to_string()),
                         memory: Some("1Gi".to_string()),
-                        }),
+                    }),
                     limits: Some(ResourceQuantity {
                         cpu: Some("1".to_string()),
                         memory: Some("2Gi".to_string()),

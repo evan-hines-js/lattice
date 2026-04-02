@@ -5,8 +5,8 @@
 
 use tracing::{debug, info};
 
-use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 use kube::ResourceExt;
+use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 use lattice_common::crd::{InfraProvider, LatticeCluster, ProviderType};
 use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 
@@ -58,7 +58,8 @@ impl AgentClient {
                 })?;
 
             if let Some(ref credentials) = cp.spec.credentials {
-                if let Some(ns) = lattice_capi::installer::infra_provider_namespace(infrastructure) {
+                if let Some(ns) = lattice_capi::installer::infra_provider_namespace(infrastructure)
+                {
                     lattice_secret_provider::credentials::ensure_credentials(
                         &client,
                         &cp.name_any(),

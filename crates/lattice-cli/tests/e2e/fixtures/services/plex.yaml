@@ -34,13 +34,6 @@ spec:
           port: 32400
           protocol: TCP
     resources:
-      # Registry credentials for GHCR images
-      ghcr-creds:
-        type: secret
-        id: local-regcreds
-        params:
-          provider: lattice-local
-          refreshInterval: 1h
       # Owned volume (private to this service)
       config:
         type: volume
@@ -51,5 +44,5 @@ spec:
         type: volume
         id: media-storage
   imagePullSecrets:
-    - ghcr-creds
+    - default
   replicas: 1

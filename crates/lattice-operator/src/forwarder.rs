@@ -98,20 +98,16 @@ impl K8sRequestForwarder for SubtreeForwarder {
 
         let params = Self::build_params(target_path, request);
 
-        let mut rx = match tunnel_request_streaming(
-            &self.registry,
-            first_hop,
-            route.command_tx,
-            params,
-        )
-        .await
-        {
-            Ok((_request_id, rx)) => rx,
-            Err(e) => {
-                let (status, msg) = tunnel_error_to_status(&e);
-                return build_k8s_status_response(&request_id, status, &msg);
-            }
-        };
+        let mut rx =
+            match tunnel_request_streaming(&self.registry, first_hop, route.command_tx, params)
+                .await
+            {
+                Ok((_request_id, rx)) => rx,
+                Err(e) => {
+                    let (status, msg) = tunnel_error_to_status(&e);
+                    return build_k8s_status_response(&request_id, status, &msg);
+                }
+            };
 
         match rx.recv().await {
             Some(response) => response,
@@ -183,14 +179,10 @@ impl ExecRequestForwarder for SubtreeForwarder {
             source_groups: request.source_groups,
         };
 
-        let (session, data_rx) = start_exec_session(
-            &self.registry,
-            first_hop,
-            route.command_tx,
-            exec_params,
-        )
-        .await
-        .map_err(|e| format!("failed to start exec session: {}", e))?;
+        let (session, data_rx) =
+            start_exec_session(&self.registry, first_hop, route.command_tx, exec_params)
+                .await
+                .map_err(|e| format!("failed to start exec session: {}", e))?;
 
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(64);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);

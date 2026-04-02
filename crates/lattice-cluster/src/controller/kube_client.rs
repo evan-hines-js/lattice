@@ -25,7 +25,6 @@ pub struct NodeCounts {
     pub pool_resources: Vec<lattice_common::crd::PoolResourceSummary>,
 }
 
-
 /// Trait abstracting Kubernetes client operations for LatticeCluster
 ///
 /// This trait allows mocking the Kubernetes client in tests while using
@@ -249,7 +248,11 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        if self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE).is_some() {
+        if self
+            .cache
+            .get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE)
+            .is_some()
+        {
             debug!("cell service already exists");
         } else {
             info!("creating cell LoadBalancer service");
@@ -359,7 +362,10 @@ impl KubeClient for KubeClientImpl {
     async fn get_cell_host(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        let svc = match self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE) {
+        let svc = match self
+            .cache
+            .get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE)
+        {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -406,7 +412,10 @@ impl KubeClient for KubeClientImpl {
     async fn cell_service_exists(&self) -> Result<bool, Error> {
         use k8s_openapi::api::core::v1::Service;
 
-        Ok(self.cache.get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE).is_some())
+        Ok(self
+            .cache
+            .get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE)
+            .is_some())
     }
 
     async fn list_clusters(&self) -> Result<Vec<LatticeCluster>, Error> {
@@ -420,7 +429,10 @@ impl KubeClient for KubeClientImpl {
     ) -> Result<Option<lattice_common::crd::InfraProvider>, Error> {
         use lattice_common::crd::InfraProvider;
 
-        Ok(self.cache.get_namespaced::<InfraProvider>(name, LATTICE_SYSTEM_NAMESPACE).map(|arc| (*arc).clone()))
+        Ok(self
+            .cache
+            .get_namespaced::<InfraProvider>(name, LATTICE_SYSTEM_NAMESPACE)
+            .map(|arc| (*arc).clone()))
     }
 
     async fn cordon_node(&self, name: &str) -> Result<(), Error> {
@@ -468,10 +480,7 @@ impl KubeClient for KubeClientImpl {
         use lattice_common::resources::GPU_RESOURCE;
 
         let pods = self.cache.list_filtered::<Pod>(|pod| {
-            pod.status
-                .as_ref()
-                .and_then(|s| s.phase.as_deref())
-                == Some("Pending")
+            pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending")
         });
 
         let max_req = pods
@@ -517,7 +526,10 @@ impl KubeClient for KubeClientImpl {
     async fn get_operator_deployment_image(&self) -> Result<Option<String>, Error> {
         use k8s_openapi::api::apps::v1::Deployment;
 
-        let deploy = match self.cache.get_namespaced::<Deployment>(OPERATOR_NAME, LATTICE_SYSTEM_NAMESPACE) {
+        let deploy = match self
+            .cache
+            .get_namespaced::<Deployment>(OPERATOR_NAME, LATTICE_SYSTEM_NAMESPACE)
+        {
             Some(d) => d,
             None => return Ok(None),
         };

@@ -1101,7 +1101,7 @@ mod tests {
                 ..Default::default()
             },
             runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),
@@ -1153,7 +1153,7 @@ mod tests {
             task.workload.containers["main"].command,
             Some(vec!["/usr/bin/python".to_string(), "train.py".to_string()])
         );
-        assert_eq!(task.runtime.image_pull_secrets, vec!["ghcr-creds"]);
+        assert_eq!(task.runtime.image_pull_secrets, vec!["default"]);
         assert_eq!(task.restart_policy, Some(RestartPolicy::Never));
     }
 

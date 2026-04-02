@@ -267,7 +267,6 @@ pub struct AgentRegistry {
     proxy_config: std::sync::OnceLock<KubeconfigProxyConfig>,
 
     // -- Subtree routing (merged from SubtreeRegistry) --
-
     /// This cell's cluster name
     cluster_name: String,
     /// All clusters reachable through this cell (direct + transitive via child agents).

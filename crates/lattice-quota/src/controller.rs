@@ -103,7 +103,6 @@ pub async fn reconcile(
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SECS)))
 }
 
-
 /// Resolve namespace labels from the cache.
 fn ns_labels(cache: &ResourceCache, namespace: &str) -> BTreeMap<String, String> {
     cache
@@ -148,8 +147,7 @@ fn compute_usage(
             continue;
         }
         for task in job.spec.tasks.values() {
-            if let Ok(demand) =
-                compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
+            if let Ok(demand) = compute_workload_demand(&task.workload, task.replicas.unwrap_or(1))
             {
                 total += &demand;
             }

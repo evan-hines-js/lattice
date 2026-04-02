@@ -165,7 +165,11 @@ async fn handle_child_cluster(
 
         for ns in &target_namespaces {
             lattice_secret_provider::credentials::ensure_credentials(
-                client, &provider_name, credentials, credential_data, ns,
+                client,
+                &provider_name,
+                credentials,
+                credential_data,
+                ns,
                 "lattice-cluster-controller",
             )
             .await

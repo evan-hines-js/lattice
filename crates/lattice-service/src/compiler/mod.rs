@@ -143,9 +143,8 @@ pub struct ServiceCompiler<'a> {
     eso_content_hash: String,
     quota_budget: Option<lattice_quota::QuotaBudget>,
     /// ImageProvider credentials keyed by provider name.
-    /// The compiler injects these as synthetic secret resources so the
-    /// existing ESO pipeline creates ExternalSecrets in the service namespace.
-    image_providers: BTreeMap<String, lattice_common::crd::workload::resources::ResourceSpec>,
+    /// Passed through to WorkloadCompiler for imagePullSecrets injection.
+    image_providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -199,13 +198,10 @@ impl<'a> ServiceCompiler<'a> {
     }
 
     /// Set ImageProvider credentials for imagePullSecrets resolution.
-    ///
-    /// Each entry maps an ImageProvider name to its credentials ResourceSpec.
-    /// The compiler injects these as synthetic secret resources so the ESO
-    /// pipeline creates ExternalSecrets in the service namespace.
+    /// Passed through to WorkloadCompiler.
     pub fn with_image_providers(
         mut self,
-        providers: BTreeMap<String, lattice_common::crd::workload::resources::ResourceSpec>,
+        providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
     ) -> Self {
         self.image_providers = providers;
         self
@@ -243,29 +239,11 @@ impl<'a> ServiceCompiler<'a> {
             .as_deref()
             .ok_or(CompilationError::missing_metadata("namespace"))?;
 
-        // Inject ImageProvider credentials as synthetic secret resources.
-        // Each imagePullSecrets entry becomes a type=secret resource so the ESO
-        // pipeline creates an ExternalSecret in the service namespace.
-        let mut workload = service.spec.workload.clone();
-        for provider_name in &service.spec.runtime.image_pull_secrets {
-            if let Some(credentials) = self.image_providers.get(provider_name) {
-                let mut resource = credentials.clone();
-                // Force dockerconfigjson type so kubelet can use it for image pulls
-                if let lattice_common::crd::ResourceParams::Secret(ref mut params) =
-                    resource.params
-                {
-                    params.secret_type =
-                        Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string());
-                }
-                workload.resources.insert(provider_name.clone(), resource);
-            }
-        }
-
         let mut compiler = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
             "service",
-            &workload,
+            &service.spec.workload,
             &service.spec.runtime,
             self.provider_type,
             self.cedar,
@@ -276,9 +254,9 @@ impl<'a> ServiceCompiler<'a> {
             graph: self.graph,
         })
         .with_annotations(&service.metadata.annotations.clone().unwrap_or_default())
-        .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
         .with_ingress(service.spec.ingress.clone())
-        .with_eso_content_hash(self.eso_content_hash.clone());
+        .with_eso_content_hash(self.eso_content_hash.clone())
+        .with_image_providers(self.image_providers.clone());
 
         if let Some(ref budget) = self.quota_budget {
             compiler = compiler.with_quota_budget(budget.clone(), service.spec.replicas);

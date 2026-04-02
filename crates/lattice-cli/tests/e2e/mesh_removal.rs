@@ -22,8 +22,8 @@ use lattice_common::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
 
 use super::helpers::{
     apply_cedar_policies_batch, apply_mesh_wildcard_inbound_policy, client_from_kubeconfig,
-    create_with_retry, delete_namespace, ensure_fresh_namespace,
-    with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
+    create_with_retry, delete_namespace, ensure_fresh_namespace, with_diagnostics, CedarPolicySpec,
+    DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_fixtures::{
     build_lattice_service, curl_container, external_outbound_dep, inbound_allow, inbound_allow_all,

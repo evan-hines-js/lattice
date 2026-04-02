@@ -294,8 +294,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         route_update_tx,
                         all_routes_rx,
                     };
-                    match setup_cell_infra(&config, cell).await
-                    {
+                    match setup_cell_infra(&config, cell).await {
                         Ok(agent_token) => {
                             let _guard = CellInfraGuard {
                                 agent_token,
@@ -756,8 +755,15 @@ async fn activate_cell_services(
         .await?;
     tracing::info!("Cell servers started");
 
-    start_auth_proxy(client, servers.clone(), cluster_name, &extra_sans, cedar, all_routes_rx)
-        .await;
+    start_auth_proxy(
+        client,
+        servers.clone(),
+        cluster_name,
+        &extra_sans,
+        cedar,
+        all_routes_rx,
+    )
+    .await;
     start_ca_rotation(servers.clone());
 
     if let Some(state) = servers.bootstrap_state().await {
@@ -777,8 +783,10 @@ async fn cell_activation_watcher(cell: CellInfraConfig) {
         route_update_tx,
         all_routes_rx,
     } = cell;
-    let self_cluster_name = self_cluster_name.expect("self_cluster_name required for cell_activation_watcher");
-    let route_update_tx = route_update_tx.expect("route_update_tx required for cell_activation_watcher");
+    let self_cluster_name =
+        self_cluster_name.expect("self_cluster_name required for cell_activation_watcher");
+    let route_update_tx =
+        route_update_tx.expect("route_update_tx required for cell_activation_watcher");
     use lattice_operator::startup::{
         discover_cell_host, ensure_cell_service_exists, LOAD_BALANCER_POLL_INTERVAL,
     };

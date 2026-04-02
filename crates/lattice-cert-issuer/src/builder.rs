@@ -42,8 +42,7 @@ pub fn build_cluster_issuer(
             spec.ca
                 .as_ref()
                 .ok_or("ca config required when type is ca")?;
-            let secret_name = issuer_secret_name
-                .ok_or("CA issuer requires ESO credentials")?;
+            let secret_name = issuer_secret_name.ok_or("CA issuer requires ESO credentials")?;
             json!({
                 "ca": {
                     "secretName": secret_name
@@ -85,8 +84,7 @@ pub fn build_cluster_issuer(
                 .vault
                 .as_ref()
                 .ok_or("vault config required when type is vault")?;
-            let secret_name = issuer_secret_name
-                .ok_or("Vault issuer requires ESO credentials")?;
+            let secret_name = issuer_secret_name.ok_or("Vault issuer requires ESO credentials")?;
             json!({
                 "vault": {
                     "server": vault.server,
@@ -137,7 +135,10 @@ fn build_dns01_solver(dp: &ResolvedDnsProvider<'_>) -> Result<Value, String> {
     }
 }
 
-fn require_secret_name<'a>(dp: &'a ResolvedDnsProvider<'_>, provider: &str) -> Result<&'a str, String> {
+fn require_secret_name<'a>(
+    dp: &'a ResolvedDnsProvider<'_>,
+    provider: &str,
+) -> Result<&'a str, String> {
     dp.secret_name
         .ok_or_else(|| format!("{provider} DNS-01 requires ESO credentials on the DNSProvider"))
 }
@@ -226,11 +227,11 @@ fn azure_dns01_solver(dp: &ResolvedDnsProvider<'_>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_common::crd::CredentialSpec;
     use lattice_common::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
         PiholeConfig, Route53Config, VaultIssuerSpec,
     };
-    use lattice_common::crd::workload::resources::ResourceSpec;
 
     fn assert_metadata(val: &Value, expected_name: &str) {
         assert_eq!(val["apiVersion"], "cert-manager.io/v1");
@@ -261,11 +262,12 @@ mod tests {
             type_: IssuerType::Ca,
             acme: None,
             ca: Some(CaIssuerSpec {
-                credentials: ResourceSpec::test_secret("pki/internal-ca", "lattice-local"),
+                credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
             }),
             vault: None,
         };
-        let result = build_cluster_issuer("internal", &spec, Some("internal-credentials"), None).unwrap();
+        let result =
+            build_cluster_issuer("internal", &spec, Some("internal-credentials"), None).unwrap();
         assert_metadata(&result, "lattice-internal");
         assert_eq!(result["spec"]["ca"]["secretName"], "internal-credentials");
     }
@@ -355,9 +357,15 @@ mod tests {
         let r53 = &solver["dns01"]["route53"];
         assert_eq!(r53["region"], "us-east-1");
         assert_eq!(r53["hostedZoneID"], "Z1234567890");
-        assert_eq!(r53["accessKeyIDSecretRef"]["name"], "route53-prod-credentials");
+        assert_eq!(
+            r53["accessKeyIDSecretRef"]["name"],
+            "route53-prod-credentials"
+        );
         assert_eq!(r53["accessKeyIDSecretRef"]["key"], "access-key-id");
-        assert_eq!(r53["secretAccessKeySecretRef"]["name"], "route53-prod-credentials");
+        assert_eq!(
+            r53["secretAccessKeySecretRef"]["name"],
+            "route53-prod-credentials"
+        );
         assert_eq!(r53["secretAccessKeySecretRef"]["key"], "secret-access-key");
     }
 
@@ -427,7 +435,10 @@ mod tests {
         let solver = &result["spec"]["acme"]["solvers"][0];
         let gdns = &solver["dns01"]["cloudDNS"];
         assert_eq!(gdns["project"], "my-project");
-        assert_eq!(gdns["serviceAccountSecretRef"]["name"], "gcp-dns-credentials");
+        assert_eq!(
+            gdns["serviceAccountSecretRef"]["name"],
+            "gcp-dns-credentials"
+        );
         assert_eq!(gdns["serviceAccountSecretRef"]["key"], "key.json");
     }
 
@@ -543,10 +554,11 @@ mod tests {
             vault: Some(VaultIssuerSpec {
                 server: "https://vault.example.com".to_string(),
                 path: "pki/issue/my-role".to_string(),
-                auth_credentials: ResourceSpec::test_secret("vault/auth", "lattice-local"),
+                auth_credentials: CredentialSpec::test("vault/auth", "lattice-local"),
             }),
         };
-        let result = build_cluster_issuer("vault-pki", &spec, Some("vault-pki-credentials"), None).unwrap();
+        let result =
+            build_cluster_issuer("vault-pki", &spec, Some("vault-pki-credentials"), None).unwrap();
         assert_metadata(&result, "lattice-vault-pki");
 
         let vault = &result["spec"]["vault"];

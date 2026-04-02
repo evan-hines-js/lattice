@@ -28,16 +28,9 @@ spec:
           security:
             runAsUser: 65534
             apparmorProfile: Unconfined
-      resources:
-        ghcr-creds:
-          type: secret
-          id: local-regcreds
-          params:
-            provider: lattice-local
-            refreshInterval: 1h
     entryRuntime:
       imagePullSecrets:
-        - ghcr-creds
+        - default
   roles:
     prefill:
       replicas: 1

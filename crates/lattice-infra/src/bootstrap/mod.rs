@@ -194,28 +194,54 @@ pub async fn resolve_istio_ca(client: &kube::Client) -> IstioCaConfig {
     let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let secret = match api.get(CA_SECRET).await {
         Ok(s) => s,
-        Err(_) => return IstioCaConfig { trust_domain: None, root_ca: None },
+        Err(_) => {
+            return IstioCaConfig {
+                trust_domain: None,
+                root_ca: None,
+            }
+        }
     };
 
     let data = match secret.data {
         Some(d) => d,
-        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+        None => {
+            return IstioCaConfig {
+                trust_domain: None,
+                root_ca: None,
+            }
+        }
     };
 
-    let cert_pem = match data.get(CA_CERT_KEY).and_then(|b| String::from_utf8(b.0.clone()).ok()) {
+    let cert_pem = match data
+        .get(CA_CERT_KEY)
+        .and_then(|b| String::from_utf8(b.0.clone()).ok())
+    {
         Some(p) => p,
-        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+        None => {
+            return IstioCaConfig {
+                trust_domain: None,
+                root_ca: None,
+            }
+        }
     };
 
     let trust_domain = match trust_domain_from_ca(&cert_pem) {
         Some(td) => td,
-        None => return IstioCaConfig { trust_domain: None, root_ca: None },
+        None => {
+            return IstioCaConfig {
+                trust_domain: None,
+                root_ca: None,
+            }
+        }
     };
 
     // cacerts already exists — don't regenerate the intermediate CA
     let cacerts_api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), "istio-system");
     if cacerts_api.get("cacerts").await.is_ok() {
-        return IstioCaConfig { trust_domain: Some(trust_domain), root_ca: None };
+        return IstioCaConfig {
+            trust_domain: Some(trust_domain),
+            root_ca: None,
+        };
     }
 
     // Need to generate cacerts — load the full CA (cert + key)
@@ -224,7 +250,10 @@ pub async fn resolve_istio_ca(client: &kube::Client) -> IstioCaConfig {
         .and_then(|b| String::from_utf8(b.0.clone()).ok())
         .and_then(|key_pem| crate::pki::CertificateAuthority::from_pem(&cert_pem, &key_pem).ok());
 
-    IstioCaConfig { trust_domain: Some(trust_domain), root_ca }
+    IstioCaConfig {
+        trust_domain: Some(trust_domain),
+        root_ca,
+    }
 }
 
 /// Read just the trust domain from `lattice-ca`.

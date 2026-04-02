@@ -16,10 +16,7 @@ use tracing::{debug, info, warn};
 
 use lattice_common::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
 use lattice_common::status_check;
-use lattice_common::{
-    ControllerContext, ReconcileError, LATTICE_SYSTEM_NAMESPACE, REQUEUE_ERROR_SECS,
-    REQUEUE_SUCCESS_SECS,
-};
+use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
 
@@ -33,7 +30,9 @@ pub async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let name = provider.name_any();
     let client = &ctx.client;
-    let generation = provider.metadata.generation.unwrap_or(0);
+    let generation = provider.metadata.generation.ok_or_else(|| {
+        ReconcileError::Validation("DNSProvider missing metadata.generation".into())
+    })?;
 
     // Skip work if spec unchanged and already Ready
     if status_check::is_status_unchanged(
@@ -99,7 +98,8 @@ fn validate_provider(provider: &DNSProvider) -> Result<(), ReconcileError> {
         ));
     }
 
-    if provider.spec.credentials.is_none() && provider.spec.provider_type != DNSProviderType::Pihole {
+    if provider.spec.credentials.is_none() && provider.spec.provider_type != DNSProviderType::Pihole
+    {
         return Err(ReconcileError::Validation(format!(
             "{} provider requires credentials",
             provider.spec.provider_type
@@ -128,9 +128,9 @@ async fn update_status(
     }
 
     let name = provider.name_any();
-    let namespace = provider
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let namespace = provider.namespace().ok_or_else(|| {
+        ReconcileError::Validation("DNSProvider missing metadata.namespace".into())
+    })?;
 
     let status = DNSProviderStatus {
         phase,
@@ -155,10 +155,10 @@ async fn update_status(
 mod tests {
     use super::*;
     use lattice_common::crd::{
-        AzureDnsConfig, CloudflareConfig, DNSProviderSpec, GoogleDnsConfig, PiholeConfig, ResourceSpec, Route53Config,
+        AzureDnsConfig, CloudflareConfig, CredentialSpec, DNSProviderSpec, GoogleDnsConfig,
+        PiholeConfig, Route53Config,
     };
-    use lattice_common::EXTERNAL_DNS_NAMESPACE;
-
+    use lattice_common::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(
@@ -176,7 +176,7 @@ mod tests {
         DNSProvider::new(
             "route53-prod",
             DNSProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys(
+                credentials: Some(CredentialSpec::test_with_keys(
                     "dns/aws/prod",
                     "vault-prod",
                     &["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
@@ -194,7 +194,7 @@ mod tests {
         DNSProvider::new(
             "cloudflare-prod",
             DNSProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys(
+                credentials: Some(CredentialSpec::test_with_keys(
                     "dns/cloudflare/prod",
                     "vault-prod",
                     &["CF_API_TOKEN"],
@@ -401,7 +401,11 @@ mod tests {
         let provider = DNSProvider::new(
             "google-prod",
             DNSProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys("dns/gcp/prod", "vault-prod", &["key.json"])),
+                credentials: Some(CredentialSpec::test_with_keys(
+                    "dns/gcp/prod",
+                    "vault-prod",
+                    &["key.json"],
+                )),
                 google: Some(GoogleDnsConfig {
                     project: "my-project".to_string(),
                 }),
@@ -416,7 +420,11 @@ mod tests {
         let provider = DNSProvider::new(
             "azure-prod",
             DNSProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys("dns/azure/prod", "vault-prod", &["azure.json"])),
+                credentials: Some(CredentialSpec::test_with_keys(
+                    "dns/azure/prod",
+                    "vault-prod",
+                    &["azure.json"],
+                )),
                 azure: Some(AzureDnsConfig {
                     subscription_id: "sub-123".to_string(),
                     resource_group: "rg-dns".to_string(),

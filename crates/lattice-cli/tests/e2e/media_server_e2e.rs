@@ -14,9 +14,8 @@ use lattice_common::crd::LatticeService;
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,
-    ensure_test_cluster_issuer, load_service_config, run_kubectl,
-    wait_for_condition, wait_for_service_phase, with_diagnostics, CedarPolicySpec,
-    DiagnosticContext, DEFAULT_TIMEOUT,
+    ensure_test_cluster_issuer, load_service_config, run_kubectl, wait_for_condition,
+    wait_for_service_phase, with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::mesh_helpers::retry_verification;
 

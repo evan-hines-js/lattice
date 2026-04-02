@@ -114,6 +114,7 @@ pub async fn compile_model(
     cedar: &PolicyEngine,
     role_suffix: &str,
     quota_budget: Option<&lattice_quota::QuotaBudget>,
+    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
 ) -> Result<CompiledModel, ModelError> {
     let name = model
         .metadata
@@ -136,6 +137,7 @@ pub async fn compile_model(
         graph,
         has_topology: model.spec.topology.is_some(),
         quota_budget,
+        image_providers,
     };
 
     let mut compiled = compile_roles(name, &roles, &ctx).await?;
@@ -215,6 +217,7 @@ struct CompilationCtx<'a> {
     graph: &'a ServiceGraph,
     has_topology: bool,
     quota_budget: Option<&'a lattice_quota::QuotaBudget>,
+    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
 }
 
 /// Compile a single workload (entry or worker) through the WorkloadCompiler pipeline.
@@ -246,7 +249,7 @@ async fn compile_workload(
     )
     .with_cluster_name(ctx.cluster_name)
     .with_graph(ctx.graph)
-    .with_image_pull_secrets(&runtime.image_pull_secrets);
+    .with_image_providers(ctx.image_providers.clone());
 
     if let Some(budget) = ctx.quota_budget {
         compiler = compiler.with_quota_budget(budget.clone(), 1);
@@ -276,31 +279,6 @@ async fn compile_workload(
     );
 
     Ok((template, compiled.config, compiled.mesh_member, policies))
-}
-
-/// When worker_runtime falls back to entry_runtime, imagePullSecrets may
-/// reference secret resources only declared in entry_workload. Returns a
-/// modified clone with those resources propagated, or None if no changes needed.
-fn prepare_worker_workload(
-    worker_workload: &lattice_common::crd::WorkloadSpec,
-    entry_workload: &lattice_common::crd::WorkloadSpec,
-    worker_runtime: &lattice_common::crd::RuntimeSpec,
-    has_explicit_worker_runtime: bool,
-) -> Option<lattice_common::crd::WorkloadSpec> {
-    if has_explicit_worker_runtime {
-        return None;
-    }
-    let mut cloned = worker_workload.clone();
-    for secret_name in &worker_runtime.image_pull_secrets {
-        if !cloned.resources.contains_key(secret_name) {
-            if let Some(resource) = entry_workload.resources.get(secret_name) {
-                cloned
-                    .resources
-                    .insert(secret_name.clone(), resource.clone());
-            }
-        }
-    }
-    Some(cloned)
 }
 
 /// Aggregated output from compiling all roles.
@@ -352,18 +330,10 @@ async fn compile_roles(
                     .as_ref()
                     .unwrap_or(&role_spec.entry_runtime);
 
-                let effective = prepare_worker_workload(
-                    worker_workload,
-                    &role_spec.entry_workload,
-                    worker_runtime,
-                    role_spec.worker_runtime.is_some(),
-                );
-                let workload_ref = effective.as_ref().unwrap_or(worker_workload);
-
                 let (template, config, mm, policies) = compile_workload(
                     ctx,
                     &worker_workload_name(name, role_name),
-                    workload_ref,
+                    worker_workload,
                     worker_runtime,
                     &format!("{}-worker", role_name),
                 )
@@ -1015,6 +985,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1044,6 +1015,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1066,6 +1038,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(ModelError::NoRoles)));
@@ -1093,6 +1066,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingNamespace)));
@@ -1123,6 +1097,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1159,6 +1134,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1215,6 +1191,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1269,6 +1246,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1317,6 +1295,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1357,6 +1336,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1438,6 +1418,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1502,6 +1483,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1545,25 +1527,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_inherits_image_pull_secrets_from_entry_runtime() {
-        // When worker_runtime is None, the worker uses entry_runtime. If
-        // entry_runtime has imagePullSecrets referencing resources only in
-        // entry_workload, the compiler should propagate those resources to
-        // the worker workload so compilation succeeds.
-        let mut entry_resources = BTreeMap::new();
-        entry_resources.insert(
-            "ghcr-creds".to_string(),
-            ResourceSpec {
-                type_: ResourceType::Secret,
-                id: Some("registry-creds".to_string()),
-                params: ResourceParams::Secret(SecretParams {
-                    provider: "lattice-local".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-
+    async fn worker_with_separate_workload_compiles() {
+        // When worker_runtime is None, the worker uses entry_runtime.
+        // imagePullSecrets reference ImageProvider names (not resources),
+        // so no resource propagation between entry and worker is needed.
         let mut entry_containers = BTreeMap::new();
         entry_containers.insert(
             "main".to_string(),
@@ -1586,20 +1553,15 @@ mod tests {
             replicas: Some(1),
             entry_workload: WorkloadSpec {
                 containers: entry_containers,
-                resources: entry_resources,
                 ..Default::default()
             },
-            entry_runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
-                ..Default::default()
-            },
+            entry_runtime: RuntimeSpec::default(),
             worker_replicas: Some(2),
             worker_workload: Some(WorkloadSpec {
                 containers: worker_containers,
-                // No resources — ghcr-creds only declared in entry
                 ..Default::default()
             }),
-            worker_runtime: None, // Falls back to entry_runtime
+            worker_runtime: None,
             autoscaling: None,
         };
 
@@ -1610,7 +1572,6 @@ mod tests {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = permit_all_cedar();
 
-        // This should succeed — the compiler propagates ghcr-creds to the worker workload
         let compiled = compile_model(
             &model,
             &graph,
@@ -1619,9 +1580,10 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
-        .expect("worker should compile with entry runtime's imagePullSecrets");
+        .expect("worker with separate workload should compile");
 
         assert_eq!(compiled.model_serving.spec.template.roles.len(), 1);
     }
@@ -1652,6 +1614,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1719,6 +1682,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingName)));
@@ -1752,6 +1716,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await;
         assert!(matches!(result, Err(ModelError::MissingInferencePort)));
@@ -1790,6 +1755,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1873,6 +1839,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1914,6 +1881,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -1975,6 +1943,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();
@@ -2195,6 +2164,7 @@ mod tests {
             &cedar,
             "test",
             None,
+            std::collections::BTreeMap::new(),
         )
         .await
         .unwrap();

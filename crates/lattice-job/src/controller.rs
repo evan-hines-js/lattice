@@ -234,6 +234,21 @@ pub struct JobContext {
     pub cache: lattice_cache::ResourceCache,
 }
 
+/// Resolve ImageProvider credentials for all tasks in a job.
+fn resolve_job_image_providers(
+    job: &LatticeJob,
+    cache: &lattice_cache::ResourceCache,
+) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
+    let mut provider_names = std::collections::BTreeSet::new();
+    for task in job.spec.tasks.values() {
+        for name in &task.runtime.image_pull_secrets {
+            provider_names.insert(name.clone());
+        }
+    }
+    let names: Vec<_> = provider_names.into_iter().collect();
+    cache.resolve_image_providers(&names)
+}
+
 impl JobContext {
     /// Create a new JobContext with the given dependencies
     pub fn new(
@@ -392,7 +407,7 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         return Ok(Action::await_change());
     }
 
-    let generation = job.metadata.generation.unwrap_or(0);
+    let generation = job.metadata.generation.ok_or(JobError::MissingGeneration)?;
 
     // Compute cost once per reconcile — always fresh, no stale preservation.
     let job_spec = &job.spec;
@@ -545,6 +560,8 @@ async fn submit_job(
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, job_name, &ns_labels, &annotations);
 
+    let image_providers = resolve_job_image_providers(job, &ctx.cache);
+
     let compiled = match compile_job(
         job,
         &ctx.graph,
@@ -552,6 +569,7 @@ async fn submit_job(
         ctx.provider_type,
         &ctx.cedar,
         Some(&quota_budget),
+        image_providers,
     )
     .await
     {

@@ -8,10 +8,8 @@ spec:
   providerType: aws
   region: us-east-1
   credentials:
-    type: secret
     id: aws-credentials
-    params:
-      provider: lattice-local
+    provider: lattice-local
   aws:
     sshKeyName: lattice-e2e
   labels:

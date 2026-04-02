@@ -814,7 +814,7 @@ impl Installer {
                 self.create_cloud_provider(client, InfraProviderType::Docker, "")
                     .await
             }
-            ProviderType::Gcp | ProviderType::Azure => {
+            ProviderType::Gcp | ProviderType::Azure | _ => {
                 info!(
                     "Provider {:?} credential setup not yet implemented",
                     self.provider()
@@ -911,9 +911,6 @@ impl Installer {
         secret_name: &str,
     ) -> Result<()> {
         use kube::api::{Api, Patch, PatchParams};
-        use lattice_common::crd::{ResourceParams, ResourceType, SecretParams};
-        use lattice_common::crd::workload::resources::ResourceSpec;
-
         let provider_ref = &self.cluster.spec.provider_ref;
         let region = self
             .cluster
@@ -927,13 +924,9 @@ impl Installer {
         let credentials = if secret_name.is_empty() {
             None
         } else {
-            Some(ResourceSpec {
-                type_: ResourceType::Secret,
-                id: Some(secret_name.to_string()),
-                params: ResourceParams::Secret(SecretParams {
-                    provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
-                    ..Default::default()
-                }),
+            Some(lattice_common::crd::CredentialSpec {
+                id: secret_name.to_string(),
+                provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
                 ..Default::default()
             })
         };
@@ -979,11 +972,7 @@ impl Installer {
         };
 
         use kube::api::{Api, ObjectMeta, Patch, PatchParams};
-        use lattice_common::crd::{
-            ImageProvider, ImageProviderSpec, ImageProviderType, ResourceParams, ResourceType,
-            SecretParams,
-        };
-        use lattice_common::crd::workload::resources::ResourceSpec;
+        use lattice_common::crd::{ImageProvider, ImageProviderSpec, ImageProviderType};
         use std::collections::BTreeMap;
 
         // Create seed Secret in lattice-secrets for ESO to serve
@@ -994,6 +983,7 @@ impl Installer {
                 namespace: Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string()),
                 labels: Some(BTreeMap::from([
                     ("lattice.dev/secret-source".to_string(), "true".to_string()),
+                    ("lattice.dev/distribute".to_string(), "true".to_string()),
                 ])),
                 ..Default::default()
             },
@@ -1011,14 +1001,15 @@ impl Installer {
             "default",
             ImageProviderSpec {
                 provider_type: ImageProviderType::Generic,
-                registry: "*".to_string(), // default provider for all registries
-                credentials: Some(ResourceSpec {
-                    type_: ResourceType::Secret,
-                    id: Some(seed_secret_name.to_string()),
-                    params: ResourceParams::Secret(SecretParams {
-                        provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
-                        ..Default::default()
-                    }),
+                registry: parse_first_registry(creds).ok_or_else(|| {
+                    Error::validation(
+                        "Failed to parse registry from dockerconfigjson — \
+                         expected exactly one entry in {\"auths\":{\"registry.example.com\":{...}}}",
+                    )
+                })?,
+                credentials: Some(lattice_common::crd::CredentialSpec {
+                    id: seed_secret_name.to_string(),
+                    provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
                     ..Default::default()
                 }),
                 credential_data: None,
@@ -1056,9 +1047,9 @@ impl Installer {
 
         let mut applied = std::collections::HashSet::new();
         for mirror in mirrors {
-            let remote_key = match mirror.credentials.as_ref().and_then(|r| r.id.as_ref()) {
-                Some(key) => key,
-                None => continue,
+            let remote_key = match mirror.credentials.as_ref() {
+                Some(r) if !r.id.is_empty() => &r.id,
+                _ => continue,
             };
 
             if !applied.insert(remote_key.clone()) {
@@ -1092,13 +1083,9 @@ impl Installer {
                 })?;
 
             // Apply to lattice-secrets as an ESO source secret
-            secret.metadata.namespace =
-                Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string());
+            secret.metadata.namespace = Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string());
             let labels = secret.metadata.labels.get_or_insert_with(Default::default);
-            labels.insert(
-                "lattice.dev/secret-source".to_string(),
-                "true".to_string(),
-            );
+            labels.insert("lattice.dev/secret-source".to_string(), "true".to_string());
             labels.insert("lattice.dev/distribute".to_string(), "true".to_string());
 
             info!(
@@ -1646,6 +1633,34 @@ fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
     }
 
     serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
+}
+
+/// Extract the registry hostname from a `.dockerconfigjson` string.
+///
+/// Parses `{"auths":{"ghcr.io":{...}}}` and returns `"ghcr.io"`.
+/// Returns `None` if the JSON is invalid, has no `auths`, or has multiple registries
+/// (ambiguous — the caller should specify which one).
+///
+/// Handles URL-format keys (e.g., `https://index.docker.io/v1/`) by extracting the hostname.
+fn parse_first_registry(docker_config_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(docker_config_json).ok()?;
+    let auths = value.get("auths")?.as_object()?;
+    if auths.len() != 1 {
+        return None;
+    }
+    let key = auths.keys().next()?;
+    // Strip URL scheme and path if present (e.g., "https://index.docker.io/v1/" → "index.docker.io")
+    let hostname = key
+        .strip_prefix("https://")
+        .or_else(|| key.strip_prefix("http://"))
+        .unwrap_or(key)
+        .split('/')
+        .next()
+        .unwrap_or(key);
+    if hostname.is_empty() {
+        return None;
+    }
+    Some(hostname.to_string())
 }
 
 /// Build registry credentials from GHCR_USER/GHCR_TOKEN environment variables.

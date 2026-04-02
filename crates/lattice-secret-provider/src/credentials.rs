@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use tracing::debug;
 
-use lattice_common::crd::workload::resources::ResourceSpec;
+use lattice_common::crd::CredentialSpec;
 use lattice_common::template::extract_secret_refs;
 use lattice_common::ReconcileError;
 
@@ -17,8 +17,8 @@ use crate::eso::{apply_external_secret, build_external_secret, build_templated_e
 pub struct ProviderCredentialConfig<'a> {
     /// Name of the provider resource (used to derive the secret name).
     pub provider_name: &'a str,
-    /// The ESO-managed credential source (ResourceSpec with type: secret).
-    pub credentials: &'a ResourceSpec,
+    /// ESO-managed credential source.
+    pub credentials: &'a CredentialSpec,
     /// Optional template data for shaping credentials using `${secret.*}` syntax.
     pub credential_data: Option<&'a BTreeMap<String, String>>,
     /// Namespace where the ESO ExternalSecret (and resulting K8s Secret) should live.
@@ -38,15 +38,10 @@ pub async fn reconcile_credentials(
     client: &kube::Client,
     config: &ProviderCredentialConfig<'_>,
 ) -> Result<String, ReconcileError> {
-    let params = config.credentials.params.as_secret().ok_or_else(|| {
-        ReconcileError::Validation(
-            "credentials must have type: secret with params.provider".into(),
-        )
-    })?;
-
-    let remote_key = config.credentials.secret_remote_key().ok_or_else(|| {
-        ReconcileError::Validation("credentials: missing 'id' field (remote key)".into())
-    })?;
+    let creds = config.credentials;
+    creds
+        .validate()
+        .map_err(|e| ReconcileError::Validation(e.to_string()))?;
 
     let secret_name = format!("{}-credentials", config.provider_name);
 
@@ -61,9 +56,9 @@ pub async fn reconcile_credentials(
         build_templated_external_secret(
             &secret_name,
             config.target_namespace,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
             template_data,
             &all_refs,
         )
@@ -72,12 +67,27 @@ pub async fn reconcile_credentials(
         build_external_secret(
             &secret_name,
             config.target_namespace,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
-            None,
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
+            creds.refresh_interval.clone(),
         )
     };
+
+    // Set the K8s Secret type if specified (e.g., dockerconfigjson for imagePullSecrets)
+    let mut es = es;
+    if let Some(ref secret_type) = creds.secret_type {
+        let template =
+            es.spec
+                .target
+                .template
+                .get_or_insert_with(|| crate::eso::ExternalSecretTemplate {
+                    engine_version: "v2".to_string(),
+                    type_: None,
+                    data: std::collections::BTreeMap::new(),
+                });
+        template.type_ = Some(secret_type.clone());
+    }
 
     apply_external_secret(client, &es, config.field_manager).await?;
 
@@ -91,7 +101,6 @@ pub async fn reconcile_credentials(
     Ok(secret_name)
 }
 
-
 /// Ensure credentials exist in a target namespace via ESO.
 ///
 /// Creates the namespace if needed, applies an ExternalSecret, and watches
@@ -100,7 +109,7 @@ pub async fn reconcile_credentials(
 pub async fn ensure_credentials(
     client: &kube::Client,
     provider_name: &str,
-    credentials: &ResourceSpec,
+    credentials: &CredentialSpec,
     credential_data: Option<&BTreeMap<String, String>>,
     target_namespace: &str,
     field_manager: &str,
@@ -140,20 +149,15 @@ pub async fn ensure_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{ResourceParams, ResourceType, SecretParams};
 
-    fn sample_credentials() -> ResourceSpec {
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("infrastructure/aws/prod".to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: "vault-prod".to_string(),
-                keys: Some(vec![
-                    "AWS_ACCESS_KEY_ID".to_string(),
-                    "AWS_SECRET_ACCESS_KEY".to_string(),
-                ]),
-                ..Default::default()
-            }),
+    fn sample_credentials() -> CredentialSpec {
+        CredentialSpec {
+            id: "infrastructure/aws/prod".to_string(),
+            provider: "vault-prod".to_string(),
+            keys: Some(vec![
+                "AWS_ACCESS_KEY_ID".to_string(),
+                "AWS_SECRET_ACCESS_KEY".to_string(),
+            ]),
             ..Default::default()
         }
     }
@@ -169,16 +173,14 @@ mod tests {
             field_manager: "test",
         };
 
-        let params = config.credentials.params.as_secret().unwrap();
-        let remote_key = config.credentials.secret_remote_key().unwrap();
         let secret_name = format!("{}-credentials", config.provider_name);
 
         let es = build_external_secret(
             &secret_name,
             config.target_namespace,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
             None,
         );
 
@@ -190,18 +192,14 @@ mod tests {
 
     #[test]
     fn config_builds_templated_external_secret() {
-        let creds = ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some("infra/openstack/creds".to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: "vault-prod".to_string(),
-                keys: Some(vec![
-                    "username".to_string(),
-                    "password".to_string(),
-                    "auth_url".to_string(),
-                ]),
-                ..Default::default()
-            }),
+        let creds = CredentialSpec {
+            id: "infra/openstack/creds".to_string(),
+            provider: "vault-prod".to_string(),
+            keys: Some(vec![
+                "username".to_string(),
+                "password".to_string(),
+                "auth_url".to_string(),
+            ]),
             ..Default::default()
         };
 
@@ -219,8 +217,6 @@ mod tests {
             field_manager: "test",
         };
 
-        let params = config.credentials.params.as_secret().unwrap();
-        let remote_key = config.credentials.secret_remote_key().unwrap();
         let secret_name = format!("{}-credentials", config.provider_name);
 
         let mut template_data = BTreeMap::new();
@@ -234,9 +230,9 @@ mod tests {
         let es = build_templated_external_secret(
             &secret_name,
             config.target_namespace,
-            &params.provider,
-            remote_key,
-            params.keys.as_deref(),
+            &creds.provider,
+            &creds.id,
+            creds.keys.as_deref(),
             template_data,
             &all_refs,
         )

@@ -20,6 +20,18 @@ pub struct ResolvedMirror {
     pub plain_http: bool,
 }
 
+/// Escape characters that could break YAML double-quoted strings.
+///
+/// Handles `\`, `"`, and newlines so that untrusted values (hostnames,
+/// credential tokens) cannot inject arbitrary YAML when interpolated
+/// into `format!("\"{}\"", ...)` strings.
+fn escape_yaml_value(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Parse the mirror field: strip `http://` or `https://` prefix, return (host, plain_http).
 fn parse_mirror_scheme(mirror: &str) -> (&str, bool) {
     if let Some(host) = mirror.strip_prefix("http://") {
@@ -58,7 +70,7 @@ pub fn resolve_mirrors(
         let creds = mirror
             .credentials
             .as_ref()
-            .and_then(|r| r.id.as_ref())
+            .map(|r| &r.id)
             .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (host, plain_http) = parse_mirror_scheme(&mirror.mirror);
@@ -75,7 +87,7 @@ pub fn resolve_mirrors(
         let infra_creds = infra
             .credentials
             .as_ref()
-            .and_then(|r| r.id.as_ref())
+            .map(|r| &r.id)
             .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (infra_host, infra_plain_http) = parse_mirror_scheme(&infra.mirror);
@@ -97,7 +109,7 @@ pub fn resolve_mirrors(
         let wildcard_creds = wildcard
             .credentials
             .as_ref()
-            .and_then(|r| r.id.as_ref())
+            .map(|r| &r.id)
             .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (wildcard_host, wildcard_plain_http) = parse_mirror_scheme(&wildcard.mirror);
@@ -149,7 +161,7 @@ pub fn generate_containerd_mirror_files(mirrors: &[ResolvedMirror]) -> Vec<serde
             "content": content,
             "owner": "root:root",
             "path": format!("/etc/containerd/certs.d/{}/hosts.toml", m.upstream),
-            "permissions": "0644"
+            "permissions": "0600"
         }));
 
         // Write credentials file once per unique mirror that has creds
@@ -194,10 +206,11 @@ pub fn generate_rke2_registries_file(mirrors: &[ResolvedMirror]) -> serde_json::
             &m.upstream
         };
         let scheme = if m.plain_http { "http" } else { "https" };
-        yaml.push_str(&format!("  \"{}\":\n", key));
+        yaml.push_str(&format!("  \"{}\":\n", escape_yaml_value(key)));
         yaml.push_str(&format!(
             "    endpoint:\n      - \"{}://{}\"\n",
-            scheme, m.mirror
+            scheme,
+            escape_yaml_value(&m.mirror)
         ));
     }
 
@@ -211,9 +224,12 @@ pub fn generate_rke2_registries_file(mirrors: &[ResolvedMirror]) -> serde_json::
     if !creds_map.is_empty() {
         yaml.push_str("configs:\n");
         for (mirror, creds) in &creds_map {
-            yaml.push_str(&format!("  \"{}\":\n", mirror));
+            yaml.push_str(&format!("  \"{}\":\n", escape_yaml_value(mirror)));
             yaml.push_str("    auth:\n");
-            yaml.push_str(&format!("      identitytoken: \"{}\"\n", creds));
+            yaml.push_str(&format!(
+                "      identitytoken: \"{}\"\n",
+                escape_yaml_value(creds)
+            ));
         }
     }
 
@@ -221,7 +237,7 @@ pub fn generate_rke2_registries_file(mirrors: &[ResolvedMirror]) -> serde_json::
         "content": yaml,
         "owner": "root:root",
         "path": "/etc/rancher/rke2/registries.yaml",
-        "permissions": "0644"
+        "permissions": "0600"
     })
 }
 
@@ -487,13 +503,13 @@ mod tests {
 
     #[test]
     fn resolve_mirrors_credentials_propagation() {
-        use lattice_common::crd::workload::resources::ResourceSpec;
+        use lattice_common::crd::CredentialSpec;
 
         let spec_mirrors = vec![
             RegistryMirror {
                 upstream: "docker.io".to_string(),
                 mirror: "harbor.corp.com".to_string(),
-                credentials: Some(ResourceSpec::test_secret("harbor-creds", "lattice-local")),
+                credentials: Some(CredentialSpec::test("harbor-creds", "lattice-local")),
             },
             RegistryMirror {
                 upstream: "*".to_string(),

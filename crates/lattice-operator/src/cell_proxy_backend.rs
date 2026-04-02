@@ -90,10 +90,9 @@ impl ProxyBackend for CellProxyBackend {
             source_groups: request.source_groups,
         };
 
-        let (session, data_rx) =
-            start_exec_session(&self.registry, agent_id, command_tx, params)
-                .await
-                .map_err(|e| ProxyError::SendFailed(e.to_string()))?;
+        let (session, data_rx) = start_exec_session(&self.registry, agent_id, command_tx, params)
+            .await
+            .map_err(|e| ProxyError::SendFailed(e.to_string()))?;
 
         Ok((Box::new(CellExecSession(session)), data_rx))
     }

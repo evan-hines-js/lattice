@@ -31,7 +31,9 @@ pub async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let name = ip.name_any();
     let client = &ctx.client;
-    let generation = ip.metadata.generation.unwrap_or(0);
+    let generation = ip.metadata.generation.ok_or_else(|| {
+        ReconcileError::Validation("ImageProvider missing metadata.generation".into())
+    })?;
 
     if status_check::is_status_unchanged(
         ip.status.as_ref(),
@@ -47,41 +49,98 @@ pub async fn reconcile(
     if let Err(e) = ip.spec.validate() {
         let msg = e.to_string();
         warn!(image_provider = %name, error = %msg, "Validation failed");
-        update_status(client, &ip, ImageProviderPhase::Failed, Some(msg), Some(generation)).await?;
+        update_status(
+            client,
+            &ip,
+            ImageProviderPhase::Failed,
+            Some(msg),
+            Some(generation),
+        )
+        .await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
-    // Sync credentials via ESO if configured
     if let Some(ref credentials) = ip.spec.credentials {
-        if let Err(e) = lattice_secret_provider::credentials::ensure_credentials(
+        // Force dockerconfigjson type so kubelet recognizes the Secret
+        let mut creds = credentials.clone();
+        if creds.secret_type.is_none() {
+            creds.secret_type = Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string());
+        }
+
+        // Interpolate ${registry} in credentialData if provided
+        let interpolated;
+        let credential_data = match ip.spec.credential_data.as_ref() {
+            Some(data) => {
+                interpolated = interpolate_registry(data, &ip.spec.registry)
+                    .map_err(|e| ReconcileError::Validation(e))?;
+                Some(&interpolated)
+            }
+            None => None,
+        };
+
+        if let Err(e) = lattice_secret_provider::credentials::reconcile_credentials(
             client,
-            &name,
-            credentials,
-            ip.spec.credential_data.as_ref(),
-            LATTICE_SYSTEM_NAMESPACE,
-            FIELD_MANAGER,
+            &lattice_secret_provider::credentials::ProviderCredentialConfig {
+                provider_name: &name,
+                credentials: &creds,
+                credential_data,
+                target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                field_manager: FIELD_MANAGER,
+            },
         )
         .await
         {
-            let msg = format!("Failed to sync credentials: {e}");
+            let msg = format!("Failed to create ExternalSecret: {e}");
             warn!(image_provider = %name, error = %msg);
-            update_status(client, &ip, ImageProviderPhase::Failed, Some(msg), Some(generation))
-                .await?;
+            update_status(
+                client,
+                &ip,
+                ImageProviderPhase::Failed,
+                Some(msg),
+                Some(generation),
+            )
+            .await?;
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
         }
     }
 
-    info!(image_provider = %name, "Credentials synced");
+    let status_msg = if ip.spec.credentials.is_some() {
+        "Credentials synced"
+    } else {
+        "Ready (no credentials configured)"
+    };
+    info!(image_provider = %name, "{status_msg}");
     update_status(
         client,
         &ip,
         ImageProviderPhase::Ready,
-        Some("Credentials synced".to_string()),
+        Some(status_msg.to_string()),
         Some(generation),
     )
     .await?;
 
     Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
+}
+
+/// Interpolate `${registry}` in credentialData values with the actual registry hostname.
+///
+/// Returns an error if the registry value contains Go template syntax (`{{`/`}}`),
+/// which could be used to inject into ESO's Go template engine and exfiltrate
+/// other secret values.
+fn interpolate_registry(
+    data: &std::collections::BTreeMap<String, String>,
+    registry: &str,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    if registry.contains("{{") || registry.contains("}}") {
+        return Err(format!(
+            "registry '{}' contains Go template syntax, which is not allowed",
+            registry
+        ));
+    }
+    Ok(data
+        .iter()
+        .map(|(k, v)| (k.clone(), v.replace("${registry}", registry)))
+        .collect())
 }
 
 async fn update_status(
@@ -102,9 +161,9 @@ async fn update_status(
     }
 
     let name = ip.name_any();
-    let namespace = ip
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let namespace = ip.namespace().ok_or_else(|| {
+        ReconcileError::Validation("ImageProvider missing metadata.namespace".into())
+    })?;
 
     let status = ImageProviderStatus {
         phase,
@@ -130,10 +189,7 @@ mod tests {
     use lattice_common::crd::{ImageProviderSpec, ImageProviderType};
 
     fn sample_provider(provider_type: ImageProviderType, registry: &str) -> ImageProvider {
-        ImageProvider::new(
-            "test",
-            ImageProviderSpec::new(provider_type, registry),
-        )
+        ImageProvider::new("test", ImageProviderSpec::new(provider_type, registry))
     }
 
     #[test]

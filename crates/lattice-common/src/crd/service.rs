@@ -231,6 +231,12 @@ impl LatticeServiceStatus {
         self
     }
 
+    /// Set conditions list (replacing existing)
+    pub fn conditions(mut self, conditions: Vec<Condition>) -> Self {
+        self.conditions = conditions;
+        self
+    }
+
     /// Set the observed generation for change detection
     pub fn observed_generation(mut self, gen: Option<i64>) -> Self {
         self.observed_generation = gen;
@@ -1455,12 +1461,6 @@ workload:
 
     #[test]
     fn service_with_image_pull_secrets() {
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            "ghcr-creds".to_string(),
-            secret_resource("local-regcreds", "local-test", None),
-        );
-
         let spec = LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers: {
@@ -1468,18 +1468,16 @@ workload:
                     c.insert("main".to_string(), simple_container());
                     c
                 },
-                resources,
                 ..Default::default()
             },
             runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             ..Default::default()
         };
 
-        assert_eq!(spec.runtime.image_pull_secrets, vec!["ghcr-creds"]);
-        assert!(spec.workload.resources.contains_key("ghcr-creds"));
+        assert_eq!(spec.runtime.image_pull_secrets, vec!["default"]);
     }
 
     #[test]

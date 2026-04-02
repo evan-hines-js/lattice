@@ -8,8 +8,7 @@ use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::types::{Condition, SecretRef};
-use super::workload::resources::ResourceSpec;
+use super::types::{Condition, CredentialSpec, SecretRef};
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 /// Storage provider type for backup destinations
@@ -96,7 +95,7 @@ pub struct BackupStorageSpec {
     /// The controller creates an ExternalSecret that syncs credentials
     /// from a ClusterSecretStore into a Velero-compatible secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<ResourceSpec>,
+    pub credentials: Option<CredentialSpec>,
 }
 
 /// Phase of a BackupStore

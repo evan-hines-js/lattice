@@ -11,6 +11,8 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use std::time::Duration;
+
 use super::super::helpers::DEFAULT_TIMEOUT;
 
 use tracing::info;

@@ -732,6 +732,7 @@ impl<S: MoveCommandSender> CellMover<S> {
         let uids = sequence.all_uids_for_deletion();
         let mut deleted = 0u32;
 
+        let mut errors = Vec::new();
         for uid in &uids {
             let node = match graph.get(uid) {
                 Some(n) => n,
@@ -742,15 +743,27 @@ impl<S: MoveCommandSender> CellMover<S> {
             {
                 Ok(_) => deleted += 1,
                 Err(e) => {
-                    warn!(
+                    error!(
                         uid = %uid,
                         kind = %node.identity.kind,
                         name = %node.identity.name,
                         error = %e,
                         "Failed to delete source resource"
                     );
+                    errors.push(format!(
+                        "{}/{}: {}",
+                        node.identity.kind, node.identity.name, e
+                    ));
                 }
             }
+        }
+
+        if !errors.is_empty() {
+            return Err(MoveError::DeletionFailed(format!(
+                "{} resource(s) failed: {}",
+                errors.len(),
+                errors.join("; ")
+            )));
         }
 
         info!(
@@ -781,23 +794,19 @@ async fn delete_resource_for_move(
         Err(e) => return Err(MoveError::Kube(e)),
     };
 
-    // Add delete-for-move annotation
+    // Add delete-for-move annotation (best-effort — doesn't block deletion)
     let annotation_patch = serde_json::json!({
         "metadata": { "annotations": { DELETE_FOR_MOVE_ANNOTATION: "" } }
     });
-
-    if let Err(e) = api
+    let _ = api
         .patch(
             &node.identity.name,
             &PatchParams::default(),
             &Patch::Merge(&annotation_patch),
         )
-        .await
-    {
-        warn!(kind = %node.identity.kind, name = %node.identity.name, error = %e, "Failed to add delete-for-move annotation");
-    }
+        .await;
 
-    // Remove finalizers to prevent infrastructure deletion
+    // Remove finalizers — MUST succeed, otherwise deletion hangs forever
     if !obj
         .metadata
         .finalizers
@@ -805,16 +814,18 @@ async fn delete_resource_for_move(
         .is_none_or(|f| f.is_empty())
     {
         let finalizer_patch = serde_json::json!({ "metadata": { "finalizers": null } });
-        if let Err(e) = api
-            .patch(
-                &node.identity.name,
-                &PatchParams::default(),
-                &Patch::Merge(&finalizer_patch),
-            )
-            .await
-        {
-            warn!(kind = %node.identity.kind, name = %node.identity.name, error = %e, "Failed to remove finalizers");
-        }
+        api.patch(
+            &node.identity.name,
+            &PatchParams::default(),
+            &Patch::Merge(&finalizer_patch),
+        )
+        .await
+        .map_err(|e| {
+            MoveError::DeletionFailed(format!(
+                "failed to remove finalizers from {}/{}: {}",
+                node.identity.kind, node.identity.name, e
+            ))
+        })?;
     }
 
     // Delete the resource

@@ -313,7 +313,6 @@ impl Provider for AwsProvider {
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]

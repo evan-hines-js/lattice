@@ -10,7 +10,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::SecretRef;
-use super::workload::resources::ResourceSpec;
 
 /// DNSProvider defines a DNS provider configuration for managing DNS records.
 ///
@@ -28,11 +27,9 @@ use super::workload::resources::ResourceSpec;
 ///   type: route53
 ///   zone: example.com
 ///   credentials:
-///     type: secret
-///     params:
-///       provider: vault-prod
-///       remoteKey: dns/aws/prod
-///       keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+///     id: dns/aws/prod
+///     provider: vault-prod
+///     keys: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
 ///   route53:
 ///     region: us-east-1
 ///     hostedZoneId: Z1234567890
@@ -65,11 +62,10 @@ pub struct DNSProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolver: Option<String>,
 
-    /// ESO-managed credential source. Same ResourceSpec as LatticeService secrets.
-    /// The controller creates an ExternalSecret that syncs credentials from a
-    /// ClusterSecretStore into the external-dns namespace.
+    /// ESO-managed credential source. The controller creates an ExternalSecret
+    /// that syncs credentials from a ClusterSecretStore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials: Option<ResourceSpec>,
+    pub credentials: Option<super::types::CredentialSpec>,
 
     /// Template data for shaping credentials using `${secret.*}` syntax.
     /// Each key becomes a key in the resulting K8s Secret.
@@ -286,6 +282,16 @@ impl DNSProviderSpec {
             DNSProviderType::Route53 | DNSProviderType::Cloudflare => {}
         }
 
+        if let Some(ref credentials) = self.credentials {
+            credentials.validate()?;
+        }
+
+        if self.credential_data.is_some() && self.credentials.is_none() {
+            return Err(crate::Error::validation(
+                "credentialData requires credentials to be set",
+            ));
+        }
+
         Ok(())
     }
 }
@@ -328,7 +334,7 @@ impl DNSProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::workload::resources::ResourceSpec;
+    use crate::crd::CredentialSpec;
 
     #[test]
     fn pihole_provider_yaml() {
@@ -347,7 +353,10 @@ spec:
         let provider: DNSProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, DNSProviderType::Pihole);
         assert_eq!(provider.spec.zone, "home.local");
-        assert_eq!(provider.spec.pihole.as_ref().unwrap().url, "http://pihole.local");
+        assert_eq!(
+            provider.spec.pihole.as_ref().unwrap().url,
+            "http://pihole.local"
+        );
         assert!(provider.spec.validate().is_ok());
     }
 
@@ -378,13 +387,11 @@ spec:
   type: route53
   zone: example.com
   credentials:
-    type: secret
     id: dns/aws/prod
-    params:
-      provider: vault-prod
-      keys:
-        - AWS_ACCESS_KEY_ID
-        - AWS_SECRET_ACCESS_KEY
+    provider: vault-prod
+    keys:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
   route53:
     region: us-east-1
     hostedZoneId: Z1234567890
@@ -395,8 +402,7 @@ spec:
         assert_eq!(provider.spec.zone, "example.com");
         assert!(provider.spec.credentials.is_some());
         let creds = provider.spec.credentials.as_ref().unwrap();
-        assert!(creds.type_.is_secret());
-        assert_eq!(creds.id, Some("dns/aws/prod".to_string()));
+        assert_eq!(creds.id, "dns/aws/prod");
         assert!(provider.spec.validate().is_ok());
     }
 
@@ -411,12 +417,10 @@ spec:
   type: cloudflare
   zone: example.com
   credentials:
-    type: secret
     id: dns/cloudflare/prod
-    params:
-      provider: vault-prod
-      keys:
-        - CF_API_TOKEN
+    provider: vault-prod
+    keys:
+      - CF_API_TOKEN
   cloudflare:
     proxied: true
 "#;
@@ -448,7 +452,9 @@ spec:
     #[test]
     fn google_with_config_valid() {
         let spec = DNSProviderSpec {
-            google: Some(GoogleDnsConfig { project: "my-project".to_string() }),
+            google: Some(GoogleDnsConfig {
+                project: "my-project".to_string(),
+            }),
             ..DNSProviderSpec::new(DNSProviderType::Google, "example.com")
         };
         assert!(spec.validate().is_ok());
@@ -509,7 +515,11 @@ spec:
         let provider = DNSProvider::new(
             "route53-prod",
             DNSProviderSpec {
-                credentials: Some(ResourceSpec::test_secret_with_keys("dns/aws/prod", "vault-prod", &["key"])),
+                credentials: Some(CredentialSpec::test_with_keys(
+                    "dns/aws/prod",
+                    "vault-prod",
+                    &["key"],
+                )),
                 ..DNSProviderSpec::new(DNSProviderType::Route53, "example.com")
             },
         );
@@ -523,7 +533,9 @@ spec:
         let provider = DNSProvider::new(
             "pihole-local",
             DNSProviderSpec {
-                pihole: Some(PiholeConfig { url: "http://pihole.local".to_string() }),
+                pihole: Some(PiholeConfig {
+                    url: "http://pihole.local".to_string(),
+                }),
                 ..DNSProviderSpec::new(DNSProviderType::Pihole, "home.local")
             },
         );
@@ -542,14 +554,12 @@ spec:
   type: designate
   zone: internal.cloud
   credentials:
-    type: secret
     id: dns/openstack/prod
-    params:
-      provider: vault-prod
-      keys:
-        - username
-        - password
-        - auth_url
+    provider: vault-prod
+    keys:
+      - username
+      - password
+      - auth_url
   credentialData:
     openstack-env: |
       OS_USERNAME="${secret.credentials.username}"

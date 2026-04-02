@@ -12,3 +12,4 @@ futures.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
+lattice-common = { path = "../lattice-common" }

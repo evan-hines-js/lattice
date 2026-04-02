@@ -397,7 +397,6 @@ pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> 
     }
 }
 
-
 // =============================================================================
 // Public types
 // =============================================================================
@@ -494,7 +493,7 @@ impl InfraProviderInfo {
                 ],
                 needs_ipam: true,
             }),
-            ProviderType::Gcp | ProviderType::Azure => Err(Error::capi_installation(format!(
+            ProviderType::Gcp | ProviderType::Azure | _ => Err(Error::capi_installation(format!(
                 "Provider {:?} is not yet implemented",
                 provider
             ))),
@@ -552,7 +551,7 @@ impl CapiProviderConfig {
             ProviderType::Docker => "docker",
             ProviderType::OpenStack => "openstack",
             ProviderType::Proxmox => "proxmox",
-            ProviderType::Gcp | ProviderType::Azure => {
+            ProviderType::Gcp | ProviderType::Azure | _ => {
                 return Err(Error::capi_installation(format!(
                     "Provider {:?} is not yet implemented",
                     infrastructure

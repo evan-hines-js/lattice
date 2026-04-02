@@ -49,7 +49,6 @@ pub struct WorkloadCompiler<'a> {
     cluster_name: Option<&'a str>,
     volume_auth: Option<VolumeAuthorizationMode<'a>>,
     annotations: BTreeMap<String, String>,
-    image_pull_secrets: &'a [String],
     renderer: TemplateRenderer,
     graph: Option<&'a ServiceGraph>,
     ingress: Option<IngressSpec>,
@@ -58,6 +57,7 @@ pub struct WorkloadCompiler<'a> {
     eso_content_hash: String,
     quota_budget: Option<lattice_quota::QuotaBudget>,
     replicas: u32,
+    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -86,7 +86,6 @@ impl<'a> WorkloadCompiler<'a> {
             cluster_name: None,
             volume_auth: None,
             annotations: BTreeMap::new(),
-            image_pull_secrets: &[],
             renderer: TemplateRenderer::new(),
             graph: None,
             ingress: None,
@@ -95,6 +94,7 @@ impl<'a> WorkloadCompiler<'a> {
             eso_content_hash: String::new(),
             quota_budget: None,
             replicas: 1,
+            image_providers: std::collections::BTreeMap::new(),
         }
     }
 
@@ -113,12 +113,6 @@ impl<'a> WorkloadCompiler<'a> {
     /// Set annotations for template resolution context.
     pub fn with_annotations(mut self, annotations: &BTreeMap<String, String>) -> Self {
         self.annotations = annotations.clone();
-        self
-    }
-
-    /// Set image pull secret names for ESO dockerconfigjson inference.
-    pub fn with_image_pull_secrets(mut self, secrets: &'a [String]) -> Self {
-        self.image_pull_secrets = secrets;
         self
     }
 
@@ -160,6 +154,19 @@ impl<'a> WorkloadCompiler<'a> {
     pub fn with_quota_budget(mut self, budget: lattice_quota::QuotaBudget, replicas: u32) -> Self {
         self.quota_budget = Some(budget);
         self.replicas = replicas;
+        self
+    }
+
+    /// Set ImageProvider credentials for imagePullSecrets resolution.
+    ///
+    /// Maps ImageProvider names to their CredentialSpec. During compilation,
+    /// each entry referenced in `runtime.image_pull_secrets` produces an ESO
+    /// ExternalSecret and a pod imagePullSecret entry.
+    pub fn with_image_providers(
+        mut self,
+        providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    ) -> Self {
+        self.image_providers = providers;
         self
     }
 
@@ -212,12 +219,7 @@ impl<'a> WorkloadCompiler<'a> {
         )?;
 
         // Compile secrets
-        let compiled_secrets = SecretsCompiler::compile(
-            self.name,
-            self.namespace,
-            self.workload,
-            self.image_pull_secrets,
-        )?;
+        let compiled_secrets = SecretsCompiler::compile(self.name, self.namespace, self.workload)?;
 
         // Quota enforcement — check resource limits before authorization
         if let Some(ref budget) = self.quota_budget {
@@ -495,6 +497,60 @@ impl<'a> WorkloadCompiler<'a> {
         // Assemble config and compute hash
         let mut all_external_secrets = compiled_secrets.external_secrets;
         all_external_secrets.extend(file_external_secrets);
+
+        // Inject ImageProvider credentials for imagePullSecrets (runs after
+        // Cedar authorization — these are platform-level, not user secrets).
+        //
+        // Security model: ImageProviders are admin-only resources, RBAC-gated
+        // to lattice-system namespace. Only cluster admins can create or modify
+        // ImageProvider CRDs, so credentials injected here are trusted by
+        // virtue of the CRD itself being access-controlled. This is
+        // intentionally outside Cedar scope — Cedar authorizes user secret
+        // access, not platform infrastructure credentials.
+        for provider_name in &self.runtime.image_pull_secrets {
+            let creds = self.image_providers.get(provider_name).ok_or_else(|| {
+                CompilationError::resource(
+                    provider_name,
+                    format!(
+                        "imagePullSecrets references ImageProvider '{}' which was not found",
+                        provider_name
+                    ),
+                )
+            })?;
+
+            // Include workload name to avoid collisions when multiple services
+            // in the same namespace reference the same ImageProvider.
+            let secret_name = format!("{}-{}-credentials", self.name, provider_name);
+
+            let mut es = lattice_secret_provider::eso::build_external_secret(
+                &secret_name,
+                self.namespace,
+                &creds.provider,
+                &creds.id,
+                creds.keys.as_deref(),
+                creds.refresh_interval.clone(),
+            );
+
+            let secret_type = creds
+                .secret_type
+                .as_deref()
+                .unwrap_or(lattice_common::SECRET_TYPE_DOCKERCONFIG);
+            es.spec.target.template = Some(lattice_secret_provider::eso::ExternalSecretTemplate {
+                engine_version: "v2".to_string(),
+                type_: Some(secret_type.to_string()),
+                data: std::collections::BTreeMap::new(),
+            });
+
+            es.metadata.labels.insert(
+                lattice_common::LABEL_SERVICE_OWNER.to_string(),
+                self.name.to_string(),
+            );
+
+            all_external_secrets.push(es);
+            pod_template
+                .image_pull_secrets
+                .push(crate::k8s::LocalObjectReference { name: secret_name });
+        }
 
         let config = CompiledConfig {
             env_config_maps,

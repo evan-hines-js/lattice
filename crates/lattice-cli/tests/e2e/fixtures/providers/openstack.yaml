@@ -7,10 +7,8 @@ metadata:
 spec:
   providerType: openstack
   credentials:
-    type: secret
     id: openstack-credentials
-    params:
-      provider: lattice-local
+    provider: lattice-local
   openstack:
     authUrl: "${OS_AUTH_URL}"
     region: "${OS_REGION_NAME}"

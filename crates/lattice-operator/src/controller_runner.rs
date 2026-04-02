@@ -89,7 +89,10 @@ pub async fn leader_controller<F>(
             }
         }
 
-        tracing::info!(controller = name, "leadership acquired, starting controller");
+        tracing::info!(
+            controller = name,
+            "leadership acquired, starting controller"
+        );
         let controller = factory();
 
         tokio::select! {
@@ -209,13 +212,8 @@ impl SpawnContext {
                 let build = build.clone();
                 Box::pin(async move {
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
-                    let params = resolve_workload_params(
-                        &client,
-                        &config,
-                        &cedar,
-                        &graph_holder,
-                    )
-                    .await;
+                    let params =
+                        resolve_workload_params(&client, &config, &cedar, &graph_holder).await;
                     build(params).await;
                 }) as Pin<Box<dyn Future<Output = ()> + Send>>
             },
@@ -398,20 +396,28 @@ pub fn build_cluster_controller(
     // NOT the controller's own CRD (LatticeCluster) — that comes from the controller's
     // reflector stream. NOT per-cluster Secrets — those vary by namespace.
     let cluster_cache = lattice_cache::ResourceCache::builder()
-        .watch(kube::Api::<k8s_openapi::api::core::v1::Node>::all(client.clone()))
-        .watch(kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Node>::all(
             client.clone(),
-            LATTICE_SYSTEM_NAMESPACE,
         ))
+        .watch(
+            kube::Api::<k8s_openapi::api::core::v1::Service>::namespaced(
+                client.clone(),
+                LATTICE_SYSTEM_NAMESPACE,
+            ),
+        )
         .watch(kube::Api::<lattice_common::crd::InfraProvider>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
-        .watch(kube::Api::<k8s_openapi::api::core::v1::Pod>::all(client.clone()))
-        .watch(kube::Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
+        .watch(kube::Api::<k8s_openapi::api::core::v1::Pod>::all(
             client.clone(),
-            LATTICE_SYSTEM_NAMESPACE,
         ))
+        .watch(
+            kube::Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
+                client.clone(),
+                LATTICE_SYSTEM_NAMESPACE,
+            ),
+        )
         .watch(kube::Api::<lattice_common::crd::CertIssuer>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
@@ -579,10 +585,12 @@ pub fn build_mesh_member_controller(
     // Gateway watch is registered lazily via ensure_dynamic when the CRD
     // is first needed (handles CRDs installed after operator startup).
     let mm_cache = lattice_cache::ResourceCache::builder()
-        .watch(kube::Api::<k8s_openapi::api::core::v1::ConfigMap>::namespaced(
-            client.clone(),
-            "istio-system",
-        ))
+        .watch(
+            kube::Api::<k8s_openapi::api::core::v1::ConfigMap>::namespaced(
+                client.clone(),
+                "istio-system",
+            ),
+        )
         .watch_with(
             kube::Api::<k8s_openapi::api::core::v1::Service>::all(client.clone()),
             WatcherConfig::default()

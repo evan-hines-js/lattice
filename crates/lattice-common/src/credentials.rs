@@ -81,10 +81,7 @@ fn build_credential_secret(
 ) -> Secret {
     let mut labels = BTreeMap::new();
     labels.insert(PROVIDER_LABEL.to_string(), provider_type.to_string());
-    labels.insert(
-        "lattice.dev/secret-source".to_string(),
-        "true".to_string(),
-    );
+    labels.insert("lattice.dev/secret-source".to_string(), "true".to_string());
     labels.insert("lattice.dev/distribute".to_string(), "true".to_string());
 
     Secret {

@@ -10,8 +10,6 @@ use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, Rem
 
 use crate::error::CompilationError;
 use lattice_common::crd::WorkloadSpec;
-use lattice_common::SECRET_TYPE_DOCKERCONFIG;
-
 // =============================================================================
 // Generated Secrets Container
 // =============================================================================
@@ -147,13 +145,11 @@ impl SecretsCompiler {
     /// For each secret resource in the spec:
     /// 1. Validates the resource has required fields (`id` for remote key, `params.provider`)
     /// 2. Generates an ExternalSecret that syncs from the ClusterSecretStore
-    /// 3. Sets `kubernetes.io/dockerconfigjson` type for imagePullSecrets resources
-    /// 4. Registers the secret reference for template resolution
+    /// 3. Registers the secret reference for template resolution
     pub fn compile(
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
-        image_pull_secrets: &[String],
     ) -> Result<GeneratedSecrets, CompilationError> {
         let mut output = GeneratedSecrets::default();
 
@@ -190,12 +186,7 @@ impl SecretsCompiler {
                 .secret_k8s_name(service_name, resource_name)
                 .unwrap_or_else(|| format!("{}-{}", service_name, resource_name));
 
-            // Determine K8s Secret type: explicit param > imagePullSecrets inference > Opaque
-            let secret_type = params.secret_type.as_deref().or_else(|| {
-                image_pull_secrets
-                    .contains(resource_name)
-                    .then_some(SECRET_TYPE_DOCKERCONFIG)
-            });
+            let secret_type = params.secret_type.as_deref();
 
             let mut external_secret = eso::build_external_secret(
                 &k8s_secret_name,
@@ -304,7 +295,7 @@ mod tests {
             Some("1h"),
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert_eq!(output.external_secrets.len(), 1);
         let es = &output.external_secrets[0];
@@ -336,7 +327,7 @@ mod tests {
             None,
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 
         let secret_ref = output
             .secret_refs
@@ -359,7 +350,7 @@ mod tests {
             None,
         )]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 
         let es = &output.external_secrets[0];
 
@@ -394,7 +385,7 @@ mod tests {
             resource.id = None;
         }
 
-        let result = SecretsCompiler::compile("myapp", "prod", &spec, &[]);
+        let result = SecretsCompiler::compile("myapp", "prod", &spec);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -417,7 +408,7 @@ mod tests {
             resource.params = ResourceParams::None;
         }
 
-        let result = SecretsCompiler::compile("myapp", "prod", &spec, &[]);
+        let result = SecretsCompiler::compile("myapp", "prod", &spec);
         assert!(result.is_err());
     }
 
@@ -444,7 +435,7 @@ mod tests {
             ),
         ]);
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert_eq!(output.external_secrets.len(), 2);
         assert_eq!(output.secret_refs.len(), 2);
@@ -461,7 +452,7 @@ mod tests {
     fn no_secrets_returns_empty() {
         let spec = WorkloadSpec::default();
 
-        let output = SecretsCompiler::compile("myapp", "prod", &spec, &[]).unwrap();
+        let output = SecretsCompiler::compile("myapp", "prod", &spec).unwrap();
 
         assert!(output.is_empty());
     }

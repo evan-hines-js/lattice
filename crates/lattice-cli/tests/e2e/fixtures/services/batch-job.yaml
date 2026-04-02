@@ -23,15 +23,8 @@ spec:
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
       imagePullSecrets:
-        - ghcr-creds
+        - default
       restartPolicy: Never
     worker:
       replicas: 1
@@ -50,13 +43,6 @@ spec:
             security:
               runAsUser: 65534
               apparmorProfile: Unconfined
-        resources:
-          ghcr-creds:
-            type: secret
-            id: local-regcreds
-            params:
-              provider: lattice-local
-              refreshInterval: 1h
       imagePullSecrets:
-        - ghcr-creds
+        - default
       restartPolicy: OnFailure

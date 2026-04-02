@@ -99,7 +99,11 @@ impl ProxmoxProvider {
     }
 
     /// Generate ProxmoxCluster manifest
-    fn generate_proxmox_cluster(&self, cluster: &LatticeCluster, bootstrap: &BootstrapInfo) -> Result<CAPIManifest> {
+    fn generate_proxmox_cluster(
+        &self,
+        cluster: &LatticeCluster,
+        bootstrap: &BootstrapInfo,
+    ) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let cfg = Self::get_config(cluster)
             .ok_or_else(|| Error::validation("proxmox config required"))?;
@@ -412,7 +416,6 @@ impl Provider for ProxmoxProvider {
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
         validate_k8s_version(&spec.kubernetes.version)
     }
-
 }
 
 #[cfg(test)]

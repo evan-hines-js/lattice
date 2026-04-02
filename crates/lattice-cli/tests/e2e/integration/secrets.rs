@@ -327,13 +327,13 @@ async fn verify_route3(kubeconfig: &str, namespace: &str) -> Result<(), String> 
     Ok(())
 }
 
-/// Route 4: imagePullSecrets
+/// Route 4: imagePullSecrets via ImageProvider
 async fn verify_route4(kubeconfig: &str, namespace: &str) -> Result<(), String> {
     verify_pod_image_pull_secrets(
         kubeconfig,
         namespace,
         &service_pod_selector("route4-pull-secrets"),
-        "route4-pull-secrets-ghcr-creds",
+        "route4-pull-secrets-default-credentials",
     )
     .await?;
     info!("[Route4] imagePullSecrets test passed!");
@@ -395,7 +395,7 @@ async fn verify_combined(kubeconfig: &str, namespace: &str) -> Result<(), String
         kubeconfig,
         namespace,
         &label,
-        "secret-routes-combined-ghcr-creds",
+        "secret-routes-combined-default-credentials",
     )
     .await?;
     verify_synced_secret_keys(

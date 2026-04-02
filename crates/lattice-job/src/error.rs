@@ -25,6 +25,9 @@ pub enum JobError {
     #[error("missing namespace on LatticeJob")]
     MissingNamespace,
 
+    #[error("missing name on LatticeJob")]
+    MissingName,
+
     #[error("Volcano {kind} CRD (batch.volcano.sh/{kind}) not available")]
     VolcanoCrdMissing { kind: &'static str },
 
@@ -36,6 +39,9 @@ pub enum JobError {
 
     #[error("training task '{task}' container '{container}' must specify a command")]
     TrainingContainerNoCommand { task: String, container: String },
+
+    #[error("missing metadata.generation on LatticeJob")]
+    MissingGeneration,
 }
 
 impl Retryable for JobError {
@@ -47,10 +53,12 @@ impl Retryable for JobError {
             Self::Common(e) => e.is_retryable(),
             Self::NoTasks => false,
             Self::MissingNamespace => false,
+            Self::MissingName => false,
             Self::VolcanoCrdMissing { .. } => true,
             Self::CoordinatorTaskMissing(_) => false,
             Self::UnsupportedFramework(_) => false,
             Self::TrainingContainerNoCommand { .. } => false,
+            Self::MissingGeneration => false,
         }
     }
 }

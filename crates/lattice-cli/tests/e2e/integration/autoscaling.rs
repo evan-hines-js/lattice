@@ -216,10 +216,7 @@ pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
     let (cpu_result, prom_result) = tokio::join!(
         async {
             let diag = DiagnosticContext::new(&kc1, AUTOSCALING_NAMESPACE);
-            with_diagnostics(&diag, "Autoscaling/CPU", || {
-                run_cpu_autoscaling_test(&kc1)
-            })
-            .await
+            with_diagnostics(&diag, "Autoscaling/CPU", || run_cpu_autoscaling_test(&kc1)).await
         },
         async {
             let diag = DiagnosticContext::new(&kc2, PROM_NAMESPACE);

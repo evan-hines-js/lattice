@@ -29,8 +29,7 @@ use futures::future::try_join_all;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::Api;
 use lattice_common::crd::{
-    LatticeService, LatticeServiceSpec, ResourceParams, ResourceSpec, ResourceType, RuntimeSpec,
-    SecretParams, WorkloadSpec,
+    LatticeService, LatticeServiceSpec, ResourceSpec, RuntimeSpec, WorkloadSpec,
 };
 use tracing::info;
 
@@ -38,7 +37,6 @@ use super::super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,
     ensure_fresh_namespace, run_kubectl, setup_regcreds_infrastructure, wait_for_condition,
     with_diagnostics, CedarPolicySpec, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
-    REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
 };
 use super::super::mesh_fixtures::{
     build_lattice_service, curl_container, inbound_allow, inbound_allow_all, nginx_container,
@@ -55,22 +53,6 @@ const NAMESPACE: &str = "ecommerce-test";
 // Helpers
 // =============================================================================
 
-fn ghcr_creds() -> (String, ResourceSpec) {
-    (
-        "ghcr-creds".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: REGCREDS_PROVIDER.to_string(),
-                refresh_interval: Some("1h".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    )
-}
-
 /// Build a postgres database service with a custom name, inbound from a single service.
 fn build_db_service(db_name: &str, allowed_caller: &str) -> LatticeService {
     let container = postgres_container(db_name, "dbuser", "dbpass123");
@@ -79,8 +61,6 @@ fn build_db_service(db_name: &str, allowed_caller: &str) -> LatticeService {
 
     let mut resources: BTreeMap<String, ResourceSpec> = BTreeMap::new();
     let (k, v) = inbound_allow(allowed_caller);
-    resources.insert(k, v);
-    let (k, v) = ghcr_creds();
     resources.insert(k, v);
 
     let mut labels = BTreeMap::new();
@@ -100,7 +80,7 @@ fn build_db_service(db_name: &str, allowed_caller: &str) -> LatticeService {
                 service: Some(postgres_port()),
             },
             runtime: RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             ..Default::default()

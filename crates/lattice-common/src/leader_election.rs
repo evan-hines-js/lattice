@@ -447,8 +447,7 @@ impl LeaderGuard {
     /// Symmetric with `claim_traffic`. Only the cell infrastructure controller
     /// should call this (on leadership loss or shutdown).
     pub async fn release_traffic(&self) -> Result<(), LeaderElectionError> {
-        let api: Api<Pod> =
-            Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let api: Api<Pod> = Api::namespaced(self.elector.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let patch = json!({
             "metadata": {

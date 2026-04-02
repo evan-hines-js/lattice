@@ -65,11 +65,12 @@ pub struct RuntimeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automount_service_account_token: Option<bool>,
 
-    /// Image pull secrets — resource names referencing `type: secret` resources
+    /// Image pull secrets — ImageProvider names.
     ///
-    /// Each entry is a resource name from `resources` that must have `type: secret`.
-    /// The compiled K8s Secret name is resolved at compile time and added to the
-    /// pod's `imagePullSecrets` field.
+    /// Each entry references an ImageProvider CRD by name. The service compiler
+    /// creates an ESO ExternalSecret in the service namespace that syncs the
+    /// registry credentials, and wires the resulting Secret into the pod's
+    /// `imagePullSecrets` field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_pull_secrets: Vec<String>,
 }

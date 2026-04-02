@@ -1111,7 +1111,7 @@ fn build_simple_job(
                 ..Default::default()
             },
             runtime: lattice_common::crd::RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),
@@ -1251,7 +1251,7 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
                 ..Default::default()
             },
             runtime: lattice_common::crd::RuntimeSpec {
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             restart_policy: Some(RestartPolicy::Never),

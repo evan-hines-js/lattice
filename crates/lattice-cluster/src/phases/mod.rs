@@ -128,6 +128,12 @@ pub async fn update_status(
             "ValidationFailed",
             error_message.unwrap_or("Unknown error"),
         ),
+        _ => (
+            "Unknown",
+            ConditionStatus::Unknown,
+            "UnknownPhase",
+            "Cluster is in an unknown phase",
+        ),
     };
 
     // Idempotency guard: skip update if phase + message already match.
@@ -153,10 +159,13 @@ pub async fn update_status(
 
     // Preserve existing status fields (worker_pools, ready_workers, etc.)
     let current_status = cluster.status.clone().unwrap_or_default();
+    let mut conditions = current_status.conditions.clone();
+    Condition::merge_into(condition, &mut conditions);
+
     let mut status = LatticeClusterStatus {
         phase,
         message: Some(message.to_string()),
-        conditions: vec![condition],
+        conditions,
         // Preserve persistent fields
         worker_pools: current_status.worker_pools,
         ready_workers: current_status.ready_workers,
@@ -298,8 +307,7 @@ pub async fn generate_capi_manifests(
     // Resolve registry mirror credentials and compute the resolved mirror list
     if let Some(ref mirrors) = cluster.spec.registry_mirrors {
         if !mirrors.is_empty() {
-            let resolved_credentials =
-                resolve_registry_credentials(mirrors, ctx).await?;
+            let resolved_credentials = resolve_registry_credentials(mirrors, ctx).await?;
             bootstrap.registry_mirrors =
                 lattice_capi::provider::registry::resolve_mirrors(mirrors, &resolved_credentials);
         }
@@ -327,9 +335,7 @@ async fn resolve_registry_credentials(
     mirrors: &[lattice_common::crd::RegistryMirror],
     ctx: &crate::controller::Context,
 ) -> Result<std::collections::HashMap<String, String>, Error> {
-    use lattice_secret_provider::credentials::{
-        reconcile_credentials, ProviderCredentialConfig,
-    };
+    use lattice_secret_provider::credentials::{reconcile_credentials, ProviderCredentialConfig};
 
     let mut creds = std::collections::HashMap::new();
     let mut reconciled = std::collections::HashSet::new();
@@ -339,10 +345,10 @@ async fn resolve_registry_credentials(
             Some(r) => r,
             None => continue,
         };
-        let remote_key = match resource.id.as_ref() {
-            Some(key) => key.clone(),
-            None => continue,
-        };
+        let remote_key = resource.id.clone();
+        if remote_key.is_empty() {
+            continue;
+        }
         if !reconciled.insert(remote_key.clone()) {
             continue;
         }

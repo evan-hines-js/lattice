@@ -45,13 +45,6 @@ spec:
           port: 8989
           protocol: TCP
     resources:
-      # Registry credentials for GHCR images
-      ghcr-creds:
-        type: secret
-        id: local-regcreds
-        params:
-          provider: lattice-local
-          refreshInterval: 1h
       # Owned volume (private to this service)
       config:
         type: volume
@@ -69,7 +62,7 @@ spec:
         type: service
         direction: outbound
   imagePullSecrets:
-    - ghcr-creds
+    - default
   replicas: 1
   ingress:
     routes:

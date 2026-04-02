@@ -13,7 +13,9 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_common::crd::{CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider};
+use lattice_common::crd::{
+    CedarPolicy, ImageProvider, InfraProvider, OIDCProvider, SecretProvider,
+};
 use lattice_common::DistributableResources;
 use lattice_common::{kubeconfig_secret_name, LATTICE_SYSTEM_NAMESPACE};
 
@@ -280,7 +282,8 @@ async fn apply_secrets_to_namespaces(
 
         // Reject secrets targeting sensitive namespaces to prevent a
         // compromised parent from injecting secrets into kube-system etc.
-        const FORBIDDEN_NAMESPACES: &[&str] = &["kube-system", "kube-public", "kube-node-lease", "default"];
+        const FORBIDDEN_NAMESPACES: &[&str] =
+            &["kube-system", "kube-public", "kube-node-lease", "default"];
         if FORBIDDEN_NAMESPACES.contains(&namespace) {
             tracing::warn!(secret = %name, namespace, "Rejecting secret targeting forbidden namespace");
             continue;
@@ -296,9 +299,7 @@ async fn apply_secrets_to_namespaces(
         api.patch(name, params, &Patch::Apply(&secret))
             .await
             .map_err(|e| {
-                PivotError::Internal(format!(
-                    "failed to apply Secret {namespace}/{name}: {e}"
-                ))
+                PivotError::Internal(format!("failed to apply Secret {namespace}/{name}: {e}"))
             })?;
 
         info!(secret = %name, namespace = %namespace, "applied distributed secret");

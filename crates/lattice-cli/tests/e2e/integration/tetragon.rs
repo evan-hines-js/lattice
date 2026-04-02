@@ -20,9 +20,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::{info, warn};
 
 use lattice_common::crd::{
-    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe, ResourceParams,
-    ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType, RuntimeSpec, SecretParams,
-    SecurityContext, ServicePortsSpec, SidecarSpec, VolumeMount, WorkloadSpec,
+    ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
+    ResourceQuantity, ResourceRequirements, RuntimeSpec, SecurityContext, ServicePortsSpec,
+    SidecarSpec, VolumeMount, WorkloadSpec,
 };
 
 use super::super::helpers::{
@@ -30,7 +30,7 @@ use super::super::helpers::{
     deploy_and_wait_for_phase, ensure_fresh_namespace, list_tracing_policies, run_kubectl,
     setup_regcreds_infrastructure, wait_for_condition, wait_for_no_cedar_policies_with_label,
     wait_for_pod_running, with_diagnostics, DiagnosticContext, TestHarness, BUSYBOX_IMAGE,
-    DEFAULT_TIMEOUT, NGINX_IMAGE, POLL_INTERVAL, REGCREDS_PROVIDER, REGCREDS_REMOTE_KEY,
+    DEFAULT_TIMEOUT, NGINX_IMAGE, POLL_INTERVAL,
 };
 
 const NS_DEFAULT: &str = "tetragon-t1";
@@ -122,21 +122,6 @@ fn wrap_service(
     containers: BTreeMap<String, ContainerSpec>,
     sidecars: BTreeMap<String, SidecarSpec>,
 ) -> LatticeService {
-    let mut resources = BTreeMap::new();
-    resources.insert(
-        "ghcr-creds".to_string(),
-        ResourceSpec {
-            type_: ResourceType::Secret,
-            id: Some(REGCREDS_REMOTE_KEY.to_string()),
-            params: ResourceParams::Secret(SecretParams {
-                provider: REGCREDS_PROVIDER.to_string(),
-                refresh_interval: Some("1h".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        },
-    );
-
     LatticeService {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
@@ -146,14 +131,14 @@ fn wrap_service(
         spec: LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers,
-                resources,
                 service: Some(ServicePortsSpec {
                     ports: default_ports(),
                 }),
+                ..Default::default()
             },
             runtime: RuntimeSpec {
                 sidecars,
-                image_pull_secrets: vec!["ghcr-creds".to_string()],
+                image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
             ..Default::default()

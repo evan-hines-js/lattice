@@ -17,9 +17,8 @@
 use tracing::info;
 
 use super::super::helpers::{
-    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl,
-    wait_for_condition, wait_for_resource_phase, with_diagnostics, DiagnosticContext,
-    DEFAULT_TIMEOUT, POLL_INTERVAL,
+    apply_yaml, delete_namespace, ensure_fresh_namespace, run_kubectl, wait_for_condition,
+    wait_for_resource_phase, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const QUOTA_NS: &str = "quota-test";

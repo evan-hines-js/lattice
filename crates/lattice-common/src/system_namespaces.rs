@@ -13,7 +13,9 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use crate::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE};
+use crate::{
+    CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE, EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE,
+};
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];

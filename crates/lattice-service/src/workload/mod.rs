@@ -801,7 +801,6 @@ mod tests {
         )
         .with_graph(&graph)
         .with_cluster_name("test-cluster")
-        .with_image_pull_secrets(&service.spec.runtime.image_pull_secrets)
         .compile()
         .await?;
 

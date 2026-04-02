@@ -34,6 +34,9 @@ pub enum ModelError {
     #[error("missing name on LatticeModel")]
     MissingName,
 
+    #[error("missing metadata.generation on LatticeModel")]
+    MissingGeneration,
+
     #[error("routing configured but inference port not specified")]
     MissingInferencePort,
 }
@@ -50,6 +53,7 @@ impl Retryable for ModelError {
             Self::MissingNamespace => false,
             Self::KthenaCrdMissing => true,
             Self::MissingName => false,
+            Self::MissingGeneration => false,
             Self::MissingInferencePort => false,
         }
     }
