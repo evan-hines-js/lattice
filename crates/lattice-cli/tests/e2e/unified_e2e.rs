@@ -330,6 +330,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // ImageProvider: ESO-backed registry credential management
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "ImageProvider",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::image_provider::run_image_provider_tests(&kc).await
+            }),
+        ));
+    }
+
     // Gateway API: ingress routing through Istio gateway
     {
         let kc = ctx.require_workload()?.to_string();

@@ -32,6 +32,7 @@ mod vm_service_scrape;
 pub use phase::{CompilationContext, CompilerPhase};
 pub use vm_service_scrape::VMServiceScrapePhase;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kube::discovery::ApiResource;
@@ -141,6 +142,10 @@ pub struct ServiceCompiler<'a> {
     extension_phases: &'a [Arc<dyn CompilerPhase>],
     eso_content_hash: String,
     quota_budget: Option<lattice_quota::QuotaBudget>,
+    /// ImageProvider credentials keyed by provider name.
+    /// The compiler injects these as synthetic secret resources so the
+    /// existing ESO pipeline creates ExternalSecrets in the service namespace.
+    image_providers: BTreeMap<String, lattice_common::crd::workload::resources::ResourceSpec>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -168,6 +173,7 @@ impl<'a> ServiceCompiler<'a> {
             extension_phases: &[],
             eso_content_hash: String::new(),
             quota_budget: None,
+            image_providers: BTreeMap::new(),
         }
     }
 
@@ -189,6 +195,19 @@ impl<'a> ServiceCompiler<'a> {
     /// Set quota budget for enforcement during compilation.
     pub fn with_quota_budget(mut self, budget: lattice_quota::QuotaBudget) -> Self {
         self.quota_budget = Some(budget);
+        self
+    }
+
+    /// Set ImageProvider credentials for imagePullSecrets resolution.
+    ///
+    /// Each entry maps an ImageProvider name to its credentials ResourceSpec.
+    /// The compiler injects these as synthetic secret resources so the ESO
+    /// pipeline creates ExternalSecrets in the service namespace.
+    pub fn with_image_providers(
+        mut self,
+        providers: BTreeMap<String, lattice_common::crd::workload::resources::ResourceSpec>,
+    ) -> Self {
+        self.image_providers = providers;
         self
     }
 
@@ -224,12 +243,29 @@ impl<'a> ServiceCompiler<'a> {
             .as_deref()
             .ok_or(CompilationError::missing_metadata("namespace"))?;
 
-        // Use lattice_workload::WorkloadCompiler for the shared pipeline
+        // Inject ImageProvider credentials as synthetic secret resources.
+        // Each imagePullSecrets entry becomes a type=secret resource so the ESO
+        // pipeline creates an ExternalSecret in the service namespace.
+        let mut workload = service.spec.workload.clone();
+        for provider_name in &service.spec.runtime.image_pull_secrets {
+            if let Some(credentials) = self.image_providers.get(provider_name) {
+                let mut resource = credentials.clone();
+                // Force dockerconfigjson type so kubelet can use it for image pulls
+                if let lattice_common::crd::ResourceParams::Secret(ref mut params) =
+                    resource.params
+                {
+                    params.secret_type =
+                        Some(lattice_common::SECRET_TYPE_DOCKERCONFIG.to_string());
+                }
+                workload.resources.insert(provider_name.clone(), resource);
+            }
+        }
+
         let mut compiler = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
             "service",
-            &service.spec.workload,
+            &workload,
             &service.spec.runtime,
             self.provider_type,
             self.cedar,

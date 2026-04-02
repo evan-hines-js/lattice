@@ -253,6 +253,10 @@ async fn resolve_workload_params(
             client.clone(),
         ))
         .watch(kube::Api::<LatticeMeshMember>::all(client.clone()))
+        .watch(kube::Api::<lattice_common::crd::ImageProvider>::namespaced(
+            client.clone(),
+            lattice_common::LATTICE_SYSTEM_NAMESPACE,
+        ))
         .watch_with(
             kube::Api::<k8s_openapi::api::core::v1::Secret>::all(client.clone()),
             kube::runtime::watcher::Config::default()

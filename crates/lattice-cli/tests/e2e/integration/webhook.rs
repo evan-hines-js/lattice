@@ -11,7 +11,7 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use std::time::Duration;
+use super::super::helpers::DEFAULT_TIMEOUT;
 
 use tracing::info;
 
@@ -84,7 +84,7 @@ where
     let kc = kubeconfig.to_string();
     let desc_owned = desc.to_string();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
     loop {
         let yaml = make_yaml().await?;
         tokio::fs::write(&tmpfile, &yaml)
@@ -547,7 +547,7 @@ async fn try_patch_expecting_rejection(
     patch_json: &str,
     desc: &str,
 ) -> Result<String, String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
     loop {
         let result = tokio::process::Command::new("kubectl")
             .args([

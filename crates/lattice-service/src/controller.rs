@@ -846,6 +846,9 @@ async fn compile_and_apply(
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, name, &ns_labels, &annotations);
 
+    // Resolve ImageProvider credentials for imagePullSecrets
+    let image_providers = resolve_image_providers(ctx, &service.spec.runtime.image_pull_secrets);
+
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -855,7 +858,8 @@ async fn compile_and_apply(
     )
     .with_phases(&ctx.extension_phases)
     .with_eso_content_hash(eso_content_hash.to_string())
-    .with_quota_budget(quota_budget);
+    .with_quota_budget(quota_budget)
+    .with_image_providers(image_providers);
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
@@ -970,6 +974,30 @@ async fn compile_and_apply(
         .apply(ctx.kube.as_ref(), service)
         .await?;
     Ok(Action::requeue(REQUEUE_READY))
+}
+
+/// Resolve ImageProvider credentials for the given provider names.
+///
+/// Reads from the reflector cache (no API calls). Missing or credential-less
+/// providers are silently skipped — the workload compiler will error if the
+/// resource is referenced but not found.
+fn resolve_image_providers(
+    ctx: &ServiceContext,
+    provider_names: &[String],
+) -> std::collections::BTreeMap<String, lattice_common::crd::workload::resources::ResourceSpec> {
+    use lattice_common::crd::ImageProvider;
+
+    let mut result = std::collections::BTreeMap::new();
+    for name in provider_names {
+        if let Some(provider) = ctx.cache.get_namespaced::<ImageProvider>(name, "lattice-system") {
+            if let Some(ref credentials) = provider.spec.credentials {
+                result.insert(name.clone(), credentials.clone());
+            }
+        } else {
+            tracing::warn!(image_provider = %name, "ImageProvider not found in cache");
+        }
+    }
+    result
 }
 
 /// Transition a service to Failed, skipping both the status write and the
