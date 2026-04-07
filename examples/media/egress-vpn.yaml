@@ -48,6 +48,7 @@ spec:
         /run: {}
       security:
         runAsUser: 0
+        readOnlyRootFilesystem: false
         capabilities: [NET_ADMIN, SYS_MODULE]
         apparmorProfile: Unconfined
         allowedBinaries: ["*"]

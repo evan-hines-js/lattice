@@ -37,7 +37,8 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     // Batch-apply all Cedar policies for media services
     let mut cedar_policies: Vec<CedarPolicySpec> = Vec::new();
 
-    // Run-as-root overrides for jellyfin, nzbget, sonarr, plex
+    // Run-as-root + writable rootfs overrides for jellyfin, nzbget, sonarr, plex
+    // All linuxserver.io images use s6-overlay which needs both root and writable /run
     for svc in ["jellyfin", "nzbget", "sonarr", "plex"] {
         cedar_policies.push(CedarPolicySpec {
             name: format!("permit-run-as-root-{}", svc),
@@ -47,8 +48,11 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
                 r#"permit(
   principal == Lattice::Service::"{namespace}/{service_name}",
   action == Lattice::Action::"OverrideSecurity",
-  resource == Lattice::SecurityOverride::"runAsRoot"
-);"#,
+  resource
+) when {{
+  resource == Lattice::SecurityOverride::"runAsRoot" ||
+  resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
+}};"#,
                 namespace = NAMESPACE,
                 service_name = svc,
             ),
@@ -68,7 +72,7 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   resource == Lattice::SecurityOverride::"capability:SETUID" ||
   resource == Lattice::SecurityOverride::"capability:SETGID"
 };"#
-        .to_string(),
+            .to_string(),
     });
 
     // nzbget: s6-overlay init caps + VPN sidecar caps (NET_ADMIN, SYS_MODULE) + writable rootfs
