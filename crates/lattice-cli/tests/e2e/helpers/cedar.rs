@@ -37,7 +37,10 @@ pub async fn apply_yaml(kubeconfig: &str, yaml: &str) -> Result<(), String> {
             let yaml = yaml_owned.clone();
             async move { apply_yaml_internal(&kubeconfig, &yaml) }
         },
-        |e| e.contains("namespaces") && e.contains("not found"),
+        |e| {
+            (e.contains("namespaces") && e.contains("not found"))
+                || (e.contains("admission webhook") && e.contains("denied"))
+        },
     )
     .await
 }

@@ -469,32 +469,57 @@ impl PolicyEngine {
 
     /// Load policies from CRDs, respecting inheritance order.
     ///
-    /// All policy texts are concatenated and parsed as one string so Cedar
-    /// assigns globally unique auto-IDs (policy0, policy1, ...) across CRDs.
+    /// Each CRD is parsed individually so one invalid policy doesn't break
+    /// the entire set. Invalid policies are logged and skipped.
     /// Inherited policies come first so parent policies take precedence.
     async fn load_policies_from_crds(client: &Client) -> Result<PolicySet> {
         let api: Api<CedarPolicy> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         let all = api.list(&Default::default()).await?;
-        let (inherited, local): (Vec<_>, Vec<_>) = all
+        let (mut inherited, mut local): (Vec<_>, Vec<_>) = all
             .items
             .into_iter()
             .partition(|p| !is_local_resource(&p.metadata));
 
-        let mut combined = String::new();
-        let inherited_count = append_sorted_policies(&mut combined, inherited);
-        let local_count = append_sorted_policies(&mut combined, local);
+        let mut policy_set = PolicySet::new();
+        let mut loaded = 0;
+        let mut skipped = 0;
 
-        let policy_set: PolicySet = combined.parse().map_err(|e: cedar_policy::ParseErrors| {
-            Error::Config(format!("Failed to parse combined Cedar policies: {}", e))
-        })?;
+        inherited.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
+        local.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
 
-        info!(
-            inherited = inherited_count,
-            local = local_count,
-            total_statements = policy_set.policies().count(),
-            "Loaded Cedar policies from CRDs"
-        );
+        for policy_crd in inherited.iter().chain(local.iter()) {
+            if !policy_crd.spec.enabled {
+                continue;
+            }
+            let name = policy_crd.metadata.name.as_deref().unwrap_or("unknown");
+            match policy_crd.spec.policies.parse::<PolicySet>() {
+                Ok(parsed) => {
+                    for p in parsed.policies() {
+                        let id = cedar_policy::PolicyId::new(format!("{}_{}", name, p.id()));
+                        match cedar_policy::Policy::parse(Some(id.clone()), p.to_string()) {
+                            Ok(new_policy) => match policy_set.add(new_policy) {
+                                Ok(()) => loaded += 1,
+                                Err(e) => {
+                                    warn!(policy = %name, id = %id, error = %e, "Duplicate Cedar policy ID");
+                                    skipped += 1;
+                                }
+                            },
+                            Err(e) => {
+                                warn!(policy = %name, error = %e, "Failed to re-parse Cedar policy");
+                                skipped += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(policy = %name, error = %e, "Skipping invalid Cedar policy");
+                    skipped += 1;
+                }
+            }
+        }
+
+        info!(loaded, skipped, "Loaded Cedar policies from CRDs");
 
         Ok(policy_set)
     }
@@ -504,21 +529,6 @@ impl Default for PolicyEngine {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Sort policies by priority (descending), append enabled ones to `out`.
-/// Returns the number of policies appended.
-fn append_sorted_policies(out: &mut String, mut policies: Vec<CedarPolicy>) -> usize {
-    policies.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
-    let mut count = 0;
-    for crd in &policies {
-        if crd.spec.enabled {
-            out.push_str(&crd.spec.policies);
-            out.push('\n');
-            count += 1;
-        }
-    }
-    count
 }
 
 // ============================================================================

@@ -966,6 +966,24 @@ async fn compile_and_apply(
     )
     .await;
 
+    let already_ready = status_check::is_status_unchanged(
+        service.status.as_ref(),
+        &ServicePhase::Ready,
+        None,
+        service.metadata.generation,
+    );
+    if !already_ready {
+        ctx.events
+            .publish(
+                &service.object_ref(&()),
+                EventType::Normal,
+                reasons::COMPILATION_SUCCESS,
+                actions::COMPILE,
+                None,
+            )
+            .await;
+    }
+
     ServiceStatusUpdate::ready(service.metadata.generation)
         .with_cost(cost)
         .with_metrics(metrics)

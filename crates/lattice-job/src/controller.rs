@@ -235,11 +235,20 @@ pub struct JobContext {
 }
 
 /// Resolve ImageProvider credentials for all tasks in a job.
+///
+/// Checks both `spec.defaults` and individual `spec.tasks` for
+/// `imagePullSecrets`, since defaults are merged into tasks during
+/// compilation but provider resolution happens before compilation.
 fn resolve_job_image_providers(
     job: &LatticeJob,
     cache: &lattice_cache::ResourceCache,
 ) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
     let mut provider_names = std::collections::BTreeSet::new();
+    if let Some(ref defaults) = job.spec.defaults {
+        for name in &defaults.runtime.image_pull_secrets {
+            provider_names.insert(name.clone());
+        }
+    }
     for task in job.spec.tasks.values() {
         for name in &task.runtime.image_pull_secrets {
             provider_names.insert(name.clone());
@@ -427,7 +436,19 @@ pub async fn reconcile(job: Arc<LatticeJob>, ctx: Arc<JobContext>) -> Result<Act
         JobPhase::Running => {
             reconcile_running(&job, &ctx, &name, namespace, generation, &cost).await
         }
-        // Terminal/unknown phases: safety net requeue — watch events can be missed during pod restarts.
+        JobPhase::Failed => {
+            // Always retry — transition back to Pending for recompilation.
+            // Matches the service controller behavior. If a VCJob already
+            // exists, reconcile_pending detects it and skips re-submission.
+            info!(job = %name, "retrying Failed job");
+            StatusUpdate::new(JobPhase::Pending)
+                .message("Retrying compilation")
+                .cost(&cost)
+                .apply(ctx.kube.as_ref(), &job, namespace)
+                .await?;
+            Ok(Action::requeue(Duration::from_secs(5)))
+        }
+        // Succeeded/unknown: safety net requeue — watch events can be missed during pod restarts.
         _ => Ok(Action::requeue(Duration::from_secs(
             lattice_common::REQUEUE_SUCCESS_SECS,
         ))),

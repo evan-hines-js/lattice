@@ -591,6 +591,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             kube_client: client,
             bootstrap_state: Mutex::new(None),
             handles: Mutex::new(None),
+            grpc_shutdown: Mutex::new(None),
             peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }

@@ -680,19 +680,15 @@ pub async fn reconcile(
             Ok(Action::requeue(REQUEUE_SERVING))
         }
         ModelServingPhase::Failed => {
-            // Periodically retry Failed models. If the spec changed, go back
-            // to Pending for a full recompile. Otherwise just requeue — the
-            // error may have been transient (CRD not installed yet, API blip).
-            let observed = model.status.as_ref().and_then(|s| s.observed_generation);
-            if observed != Some(generation) {
-                info!(model = %name, observed = ?observed, current = generation, "spec changed while Failed, retrying");
-                StatusUpdate::new(ModelServingPhase::Pending, &cost)
-                    .message("Retrying after spec change")
-                    .apply(ctx.kube.as_ref(), &model, namespace)
-                    .await?;
-                return Ok(Action::requeue(REQUEUE_RETRY));
-            }
-            Ok(Action::requeue(Duration::from_secs(30)))
+            // Always retry — transition back to Pending for full recompilation.
+            // Matches the service controller behavior where Failed services
+            // fall through to compile_and_apply on every reconcile.
+            info!(model = %name, "retrying Failed model");
+            StatusUpdate::new(ModelServingPhase::Pending, &cost)
+                .message("Retrying compilation")
+                .apply(ctx.kube.as_ref(), &model, namespace)
+                .await?;
+            Ok(Action::requeue(REQUEUE_RETRY))
         }
         // Safety net requeue for any unmatched phase — watch events can be missed during pod restarts.
         _ => Ok(Action::requeue(Duration::from_secs(
