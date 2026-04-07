@@ -118,8 +118,17 @@ impl PodTemplateCompiler {
             );
         }
 
-        // Compile pod-level security context (always returns secure defaults)
-        let security_context = Some(Self::compile_pod_security_context(runtime));
+        // Check if any container runs as root (UID 0) — this affects pod-level defaults
+        let any_root = workload
+            .containers
+            .values()
+            .any(|c| c.security.as_ref().is_some_and(|s| s.run_as_user == Some(0)))
+            || runtime
+                .sidecars
+                .values()
+                .any(|s| s.security.as_ref().is_some_and(|s| s.run_as_user == Some(0)));
+
+        let security_context = Some(Self::compile_pod_security_context(runtime, any_root));
 
         // imagePullSecrets are injected by WorkloadCompiler after Cedar authorization
         let image_pull_secrets = vec![];
@@ -461,7 +470,14 @@ impl PodTemplateCompiler {
     }
 
     /// Compile pod-level security context with secure defaults.
-    pub(crate) fn compile_pod_security_context(runtime: &RuntimeSpec) -> PodSecurityContext {
+    ///
+    /// When `any_root` is true (a container specifies `runAsUser: 0`), the
+    /// pod-level `runAsNonRoot` is set to `false` and `fsGroup` to `0` so
+    /// volumes are writable by root. Otherwise secure defaults apply.
+    pub(crate) fn compile_pod_security_context(
+        runtime: &RuntimeSpec,
+        any_root: bool,
+    ) -> PodSecurityContext {
         let sysctls = if runtime.sysctls.is_empty() {
             None
         } else {
@@ -478,8 +494,8 @@ impl PodTemplateCompiler {
         };
 
         PodSecurityContext {
-            run_as_non_root: Some(true),
-            fs_group: Some(65534),
+            run_as_non_root: Some(!any_root),
+            fs_group: Some(if any_root { 0 } else { 65534 }),
             fs_group_change_policy: Some("OnRootMismatch".to_string()),
             seccomp_profile: Some(SeccompProfile {
                 type_: "RuntimeDefault".to_string(),
@@ -1079,7 +1095,7 @@ mod tests {
     #[test]
     fn pod_security_context_secure_defaults() {
         let runtime = RuntimeSpec::default();
-        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime);
+        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime, false);
 
         assert_eq!(ctx.run_as_non_root, Some(true));
         assert_eq!(ctx.fs_group, Some(65534));
@@ -1103,7 +1119,7 @@ mod tests {
             sysctls,
             ..Default::default()
         };
-        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime);
+        let ctx = PodTemplateCompiler::compile_pod_security_context(&runtime, false);
 
         let sc = ctx.sysctls.expect("should have sysctls");
         assert_eq!(sc.len(), 1);

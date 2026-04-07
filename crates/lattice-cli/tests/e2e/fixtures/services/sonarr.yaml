@@ -12,7 +12,7 @@ spec:
           runAsUser: 0
           readOnlyRootFilesystem: false
           apparmorProfile: Unconfined
-          capabilities: [SETUID, SETGID]
+          capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
           allowedBinaries: ["*"]
         variables:
           PUID: "1000"

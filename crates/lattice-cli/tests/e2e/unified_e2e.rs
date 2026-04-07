@@ -119,7 +119,7 @@ async fn run_full_e2e() -> Result<(), String> {
     info!("[Phase 7] Regcreds infrastructure ready on both clusters");
 
     // Each task uses its own namespace, so concurrency is safe.
-    let pool = Arc::new(Semaphore::new(20));
+    let pool = Arc::new(Semaphore::new(50));
     let mut handles: Vec<(&str, tokio::task::JoinHandle<Result<(), String>>)> = Vec::new();
 
     // Mesh: fixed test

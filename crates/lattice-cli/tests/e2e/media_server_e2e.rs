@@ -37,11 +37,12 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
     // Batch-apply all Cedar policies for media services
     let mut cedar_policies: Vec<CedarPolicySpec> = Vec::new();
 
-    // Run-as-root + writable rootfs overrides for jellyfin, nzbget, sonarr, plex
-    // All linuxserver.io images use s6-overlay which needs both root and writable /run
+    // s6-overlay overrides for all linuxserver.io images.
+    // s6 starts as root, chowns volumes to internal UID, then drops privileges.
+    // Needs: root, writable rootfs, CHOWN/DAC_OVERRIDE/FOWNER for chown, SETUID/SETGID for drop.
     for svc in ["jellyfin", "nzbget", "sonarr", "plex"] {
         cedar_policies.push(CedarPolicySpec {
-            name: format!("permit-run-as-root-{}", svc),
+            name: format!("permit-s6-overlay-{}", svc),
             test_label: "e2e".to_string(),
             priority: 50,
             cedar_text: format!(
@@ -51,29 +52,18 @@ async fn deploy_media_services(kubeconfig_path: &str) -> Result<(), String> {
   resource
 ) when {{
   resource == Lattice::SecurityOverride::"runAsRoot" ||
-  resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
+  resource == Lattice::SecurityOverride::"readWriteRootFilesystem" ||
+  resource == Lattice::SecurityOverride::"capability:CHOWN" ||
+  resource == Lattice::SecurityOverride::"capability:DAC_OVERRIDE" ||
+  resource == Lattice::SecurityOverride::"capability:FOWNER" ||
+  resource == Lattice::SecurityOverride::"capability:SETUID" ||
+  resource == Lattice::SecurityOverride::"capability:SETGID"
 }};"#,
                 namespace = NAMESPACE,
                 service_name = svc,
             ),
         });
     }
-
-    // sonarr: SETUID + SETGID for s6-overlay
-    cedar_policies.push(CedarPolicySpec {
-        name: "permit-sonarr-caps".to_string(),
-        test_label: "e2e".to_string(),
-        priority: 50,
-        cedar_text: r#"permit(
-  principal == Lattice::Service::"media/sonarr",
-  action == Lattice::Action::"OverrideSecurity",
-  resource
-) when {
-  resource == Lattice::SecurityOverride::"capability:SETUID" ||
-  resource == Lattice::SecurityOverride::"capability:SETGID"
-};"#
-            .to_string(),
-    });
 
     // nzbget: s6-overlay init caps + VPN sidecar caps (NET_ADMIN, SYS_MODULE) + writable rootfs
     cedar_policies.push(CedarPolicySpec {
