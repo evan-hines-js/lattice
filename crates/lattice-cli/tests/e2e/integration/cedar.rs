@@ -28,9 +28,9 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::{InfraContext, TestSession};
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml, cedar_policy_exists, delete_cedar_policies_by_label,
-    delete_namespace, get_child_cluster_name, get_or_create_proxy, get_sa_token,
-    http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition, with_diagnostics,
-    DiagnosticContext, TestHarness,
+    delete_namespace, ensure_fresh_namespace, get_child_cluster_name, get_or_create_proxy,
+    get_sa_token, http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition,
+    with_diagnostics, DiagnosticContext, TestHarness,
 };
 
 // =============================================================================
@@ -62,15 +62,8 @@ async fn setup_cedar_test_resources(kubeconfig: &str, namespace: &str) -> Result
         namespace
     );
 
-    // Create namespace
-    let namespace_yaml = format!(
-        r#"apiVersion: v1
-kind: Namespace
-metadata:
-  name: {}"#,
-        namespace
-    );
-    apply_yaml(kubeconfig, &namespace_yaml).await?;
+    // Delete namespace if it exists (may be terminating from a previous run) and recreate
+    ensure_fresh_namespace(kubeconfig, namespace).await?;
 
     // Create allowed ServiceAccount
     let allowed_sa_yaml = format!(
@@ -423,57 +416,7 @@ pub async fn run_cedar_hierarchy_tests(
 // Standalone Tests
 // =============================================================================
 
-/// Standalone test - test SA token authentication with Cedar policies
-#[tokio::test]
-#[ignore]
-async fn test_cedar_sa_auth_standalone() {
-    let Ok(session) =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").await
-    else {
-        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
-        return;
-    };
-    let child_cluster_name = get_child_cluster_name();
-
-    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
-        .await
-        .unwrap();
-
-    run_cedar_proxy_test(
-        &session.ctx.mgmt_kubeconfig,
-        &child_cluster_name,
-        session.ctx.mgmt_proxy_url.as_deref(),
-    )
-    .await
-    .unwrap();
-}
-
-/// Standalone test - test group-based Cedar policies
-#[tokio::test]
-#[ignore]
-async fn test_cedar_group_policy_standalone() {
-    let Ok(session) =
-        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone Cedar tests").await
-    else {
-        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
-        return;
-    };
-    let child_cluster_name = get_child_cluster_name();
-
-    remove_e2e_default_policy(&session.ctx.mgmt_kubeconfig)
-        .await
-        .unwrap();
-
-    run_cedar_group_test(
-        &session.ctx.mgmt_kubeconfig,
-        &child_cluster_name,
-        session.ctx.mgmt_proxy_url.as_deref(),
-    )
-    .await
-    .unwrap();
-}
-
-/// Standalone test - run all Cedar tests
+/// Standalone test - run all Cedar tests (proxy + group)
 #[tokio::test]
 #[ignore]
 async fn test_cedar_all_standalone() {

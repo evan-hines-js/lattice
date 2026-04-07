@@ -777,11 +777,19 @@ pub async fn get_or_create_proxy(
     use lattice_cli::commands::port_forward::check_health;
 
     if let Some(url) = existing_url {
-        if check_health(url, Duration::from_secs(5), None).await {
-            info!("[Helpers] Using existing proxy URL: {}", url);
-            return Ok((url.to_string(), None));
+        // Retry health check — the proxy may be briefly unreachable during
+        // mesh recompilation (e.g., OIDC provider creating ServiceEntry).
+        for attempt in 1..=3 {
+            if check_health(url, Duration::from_secs(5), None).await {
+                info!("[Helpers] Using existing proxy URL: {}", url);
+                return Ok((url.to_string(), None));
+            }
+            if attempt < 3 {
+                info!("[Helpers] Proxy health check attempt {}/3 failed, retrying...", attempt);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
         }
-        info!("[Helpers] Existing proxy URL unhealthy, creating fresh port-forward...");
+        info!("[Helpers] Existing proxy URL unhealthy after 3 attempts, creating fresh port-forward...");
     }
 
     let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT)

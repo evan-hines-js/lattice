@@ -26,8 +26,8 @@ use lattice_common::LATTICE_SYSTEM_NAMESPACE;
 use super::super::context::InfraContext;
 use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml, dev_service_reachable, dev_service_url,
-    get_or_create_proxy, http_get_with_retry, proxy_service_exists, run_kubectl,
-    wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
+    get_child_cluster_name, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
+    run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
 use super::cedar::apply_cedar_policy_allow_group;
 
@@ -384,7 +384,7 @@ pub async fn run_oidc_hierarchy_tests(
 #[tokio::test]
 #[ignore]
 async fn test_oidc_standalone() {
-    use super::super::context::{init_e2e_test, StandaloneKubeconfig};
+    use super::super::context::{init_e2e_test, TestSession};
 
     init_e2e_test();
 
@@ -393,28 +393,19 @@ async fn test_oidc_standalone() {
         return;
     }
 
-    let resolved = StandaloneKubeconfig::resolve().await.unwrap();
+    let Ok(session) =
+        TestSession::from_env("Set LATTICE_MGMT_KUBECONFIG to run standalone OIDC tests").await
+    else {
+        eprintln!("Skipping: requires LATTICE_MGMT_KUBECONFIG (multi-cluster test)");
+        return;
+    };
+    let child_cluster_name = get_child_cluster_name();
 
-    // Discover the cluster's own name from the LatticeCluster CRD
-    let cluster_name = run_kubectl(&[
-        "--kubeconfig",
-        &resolved.kubeconfig,
-        "get",
-        "latticecluster",
-        "-n",
-        LATTICE_SYSTEM_NAMESPACE,
-        "-o",
-        "jsonpath={.items[0].metadata.name}",
-    ])
+    run_oidc_auth_test(
+        &session.ctx.mgmt_kubeconfig,
+        &child_cluster_name,
+        session.ctx.mgmt_proxy_url.as_deref(),
+    )
     .await
-    .expect("Failed to get LatticeCluster name");
-    let cluster_name = cluster_name.trim();
-    assert!(
-        !cluster_name.is_empty(),
-        "No LatticeCluster found in {LATTICE_SYSTEM_NAMESPACE}"
-    );
-
-    run_oidc_auth_test(&resolved.kubeconfig, cluster_name, None)
-        .await
-        .unwrap();
+    .unwrap();
 }
