@@ -25,7 +25,8 @@ impl From<ProviderType> for InfraProvider {
             ProviderType::Aws => Self::Aws,
             ProviderType::OpenStack => Self::OpenStack,
             ProviderType::Proxmox => Self::Proxmox,
-            ProviderType::Gcp | ProviderType::Azure => Self::Aws, // Treat as cloud provider
+            ProviderType::Gcp | ProviderType::Azure => Self::Aws,
+            _ => Self::Aws, // Unknown providers default to cloud
         }
     }
 }

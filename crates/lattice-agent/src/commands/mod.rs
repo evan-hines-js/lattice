@@ -150,7 +150,8 @@ impl CommandContext {
 /// Handle an incoming command from the cell.
 ///
 /// Dispatches the command to the appropriate handler based on its type.
-pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
+/// Returns `false` if the agent should disconnect and reconnect.
+pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) -> bool {
     debug!(command_id = %command.command_id, "Received command");
 
     match &command.command {
@@ -203,8 +204,16 @@ pub async fn handle_command(command: &CellCommand, ctx: &CommandContext) {
                 let _ = sender.send(resp.clone());
             }
         }
+        Some(Command::Reconnect(cmd)) => {
+            warn!(
+                reason = %cmd.reason,
+                "Parent requested reconnect — proxy path broken, disconnecting"
+            );
+            return false;
+        }
         None => {
             warn!(command_id = %command.command_id, "Received command with no payload");
         }
     }
+    true
 }

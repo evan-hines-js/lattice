@@ -233,6 +233,7 @@ fn get_kubeconfig_path_for_bootstrap(bootstrap: &BootstrapProvider) -> &'static 
     match bootstrap {
         BootstrapProvider::Kubeadm => "/etc/kubernetes/admin.conf",
         BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
+        _ => "/etc/kubernetes/admin.conf",
     }
 }
 

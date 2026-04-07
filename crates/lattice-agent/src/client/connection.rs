@@ -378,7 +378,10 @@ impl AgentClient {
                     Some(result) = inbound.next() => {
                         match result {
                             Ok(command) => {
-                                commands::handle_command(&command, &command_ctx).await;
+                                if !commands::handle_command(&command, &command_ctx).await {
+                                    info!("Reconnect requested, closing connection");
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 error!(error = %e, "Error receiving command");

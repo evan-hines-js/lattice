@@ -30,7 +30,7 @@ pub fn build_busybox_service(
     name: &str,
     namespace: &str,
     containers: BTreeMap<String, lattice_common::crd::ContainerSpec>,
-    mut resources: BTreeMap<String, lattice_common::crd::ResourceSpec>,
+    resources: BTreeMap<String, lattice_common::crd::ResourceSpec>,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_common::crd::{

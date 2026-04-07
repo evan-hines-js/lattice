@@ -296,6 +296,8 @@ message CellCommand {
     PeerRouteSync peer_route_sync = 14;
     // Instruct child to delete itself (parent-initiated deletion)
     DeleteCluster delete_cluster = 15;
+    // Tell agent to reconnect (proxy path validation failed)
+    ReconnectCommand reconnect = 16;
   }
 }
 
@@ -352,6 +354,14 @@ message StatusRequest {
 message DeleteCluster {
   // Name of the cluster to delete
   string cluster_name = 1;
+}
+
+// Reconnect command — sent when the parent detects the proxy path to this
+// agent is broken (e.g., agent connected to non-leader pod). The agent should
+// drop its connection and reconnect, which will route to the correct pod.
+message ReconnectCommand {
+  // Human-readable reason for the reconnect request
+  string reason = 1;
 }
 
 // =============================================================================

@@ -2726,6 +2726,7 @@ dependencies = [
  "mockall",
  "parking_lot",
  "pem",
+ "reqwest",
  "rstest",
  "rustls",
  "serde",

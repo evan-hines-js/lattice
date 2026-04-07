@@ -83,6 +83,18 @@ pub trait K8sResponseRegistry: Send + Sync {
     fn has_pending_k8s_response(&self, request_id: &str) -> bool;
 }
 
+/// Result of checking whether a stream should continue processing.
+/// Used by heartbeat self-healing to detect and recover from dead channels.
+#[derive(Debug)]
+pub enum StreamAction {
+    /// This stream owns the current connection — keep processing
+    Continue,
+    /// This stream reclaimed a dead connection — update generation
+    Reclaimed(u64),
+    /// A newer live stream superseded this one — close the stream
+    Terminate,
+}
+
 /// Represents an agent (connected or disconnected)
 ///
 /// Agents stay in the registry after disconnection to:
@@ -375,7 +387,15 @@ impl AgentRegistry {
         // stale. The agent will send PivotComplete again after a real pivot.
         let (is_reconnect, generation) = match self.agents.entry(cluster_name.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                connection.generation = entry.get().generation + 1;
+                let old = entry.get();
+                if old.connected && !old.command_tx.is_closed() {
+                    warn!(
+                        cluster = %cluster_name,
+                        old_gen = old.generation,
+                        "Superseding active agent connection — old stream should self-terminate via generation check"
+                    );
+                }
+                connection.generation = old.generation + 1;
                 let gen = connection.generation;
                 entry.insert(connection);
                 (true, gen)
@@ -388,7 +408,7 @@ impl AgentRegistry {
         };
 
         if is_reconnect {
-            info!(cluster = %cluster_name, "Agent reconnected");
+            info!(cluster = %cluster_name, generation, "Agent reconnected");
         } else {
             info!(cluster = %cluster_name, "Agent connected (first time)");
         }
@@ -886,6 +906,46 @@ impl AgentRegistry {
                     .unwrap_or(true)
             })
             .unwrap_or(false)
+    }
+
+    /// Check whether a stream should continue, reclaim the connection, or terminate.
+    ///
+    /// Called on heartbeat to detect and heal the "dead channel" scenario:
+    /// two streams registered for the same cluster, the newer one died, and the
+    /// older (still alive) stream's command_tx is no longer in the registry.
+    pub fn check_connection_health(
+        &self,
+        cluster_name: &str,
+        stream_generation: u64,
+        stream_command_tx: &mpsc::Sender<CellCommand>,
+    ) -> StreamAction {
+        let Some(mut agent) = self.agents.get_mut(cluster_name) else {
+            return StreamAction::Terminate;
+        };
+
+        if agent.generation == stream_generation {
+            return StreamAction::Continue;
+        }
+
+        // A newer generation exists. Check if it's still alive.
+        if agent.command_tx.is_closed() {
+            // The newer stream is dead — reclaim the connection with our live channel
+            agent.command_tx = stream_command_tx.clone();
+            agent.connected = true;
+            agent.generation += 1;
+            agent.disconnected_at = None;
+            let gen = agent.generation;
+            warn!(
+                cluster = %cluster_name,
+                old_gen = stream_generation,
+                new_gen = gen,
+                "Live stream reclaimed connection from dead channel"
+            );
+            StreamAction::Reclaimed(gen)
+        } else {
+            // The newer stream is alive — we're the zombie
+            StreamAction::Terminate
+        }
     }
 
     /// Record that a PeerRouteSync was sent to a child.

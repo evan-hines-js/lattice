@@ -126,6 +126,8 @@ pub struct ParentServers<G: ManifestGenerator + Send + Sync + 'static = DefaultM
     agent_registry: SharedAgentRegistry,
     /// Server handles (set once during ensure_running, taken on shutdown)
     handles: Mutex<Option<ServerHandles>>,
+    /// gRPC shutdown token — cancels serve_with_shutdown so existing streams close
+    grpc_shutdown: Mutex<Option<tokio_util::sync::CancellationToken>>,
     /// Shared peer route config, populated after auth proxy starts
     peer_config: crate::server::SharedPeerRouteConfig,
 }
@@ -573,6 +575,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             kube_client: client.clone(),
             bootstrap_state: Mutex::new(None),
             handles: Mutex::new(None),
+            grpc_shutdown: Mutex::new(None),
             peer_config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
@@ -813,6 +816,8 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 
         info!(addr = %grpc_addr, "Starting gRPC server");
         let peer_config = self.peer_config.clone();
+        let grpc_shutdown = tokio_util::sync::CancellationToken::new();
+        *self.grpc_shutdown.lock() = Some(grpc_shutdown.clone());
         let grpc_handle = tokio::spawn(async move {
             if let Err(e) = AgentServer::serve_with_mtls(crate::server::GrpcServerConfig {
                 registry,
@@ -822,6 +827,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
                 blocklist,
                 route_update_tx,
                 peer_config,
+                shutdown: grpc_shutdown,
             })
             .await
             {
@@ -901,6 +907,15 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
         }
 
         info!("Shutting down cell servers...");
+
+        // Cancel the gRPC shutdown token first — this triggers serve_with_shutdown
+        // to gracefully close all active agent streams. Without this, aborting
+        // the handle only stops the accept loop; existing bidirectional streams
+        // (spawned as independent tokio tasks by hyper) survive indefinitely,
+        // leaving agents connected to a non-leader pod after leadership transitions.
+        if let Some(token) = self.grpc_shutdown.lock().take() {
+            token.cancel();
+        }
 
         if let Some(handles) = self.handles.lock().take() {
             handles.bootstrap_handle.abort();

@@ -496,6 +496,11 @@ pub struct GrpcServerConfig {
     pub route_update_tx: crate::route_reconciler::RouteUpdateSender,
     /// Shared peer route config, populated after auth proxy starts
     pub peer_config: SharedPeerRouteConfig,
+    /// Shutdown signal — when cancelled, the server closes all active connections.
+    /// Without this, aborting the server handle only stops the accept loop;
+    /// existing gRPC streams (spawned as independent tokio tasks) survive,
+    /// leaving agents connected to a non-leader pod after leadership transitions.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }
 
 /// gRPC server for agent communication
@@ -530,9 +535,43 @@ struct MessageContext {
     kube_client: Client,
     route_update_tx: crate::route_reconciler::RouteUpdateSender,
     connection_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Auth proxy base URL + HTTP client for proxy-path validation.
+    proxy_health: Option<ProxyHealthCheck>,
 }
 
-/// Process an agent message
+struct ProxyHealthCheck {
+    base_url: String,
+    client: reqwest::Client,
+    /// Consecutive failures — only send Reconnect after 2+ failures
+    /// to avoid reconnect storms when the proxy is briefly restarting.
+    consecutive_failures: std::sync::atomic::AtomicU32,
+}
+
+/// Result of a proxy path check.
+enum ProxyCheckResult {
+    /// Proxy can route to this cluster (any status except 503).
+    Ok,
+    /// Proxy returned 503 — agent is on the wrong pod, reconnect immediately.
+    WrongPod,
+    /// Proxy unreachable (connection refused, timeout) — could be restarting.
+    Unreachable,
+}
+
+/// Validate the auth proxy can route to a cluster.
+///
+/// Uses the proxy's CA cert for TLS verification (from PeerRouteConfig).
+async fn check_proxy_path(health: &ProxyHealthCheck, cluster_name: &str) -> ProxyCheckResult {
+    let url = format!(
+        "{}/clusters/{}/api/v1/namespaces",
+        health.base_url, cluster_name
+    );
+    match health.client.get(&url).send().await {
+        Ok(resp) if resp.status().as_u16() == 503 => ProxyCheckResult::WrongPod,
+        Ok(_) => ProxyCheckResult::Ok,
+        Err(_) => ProxyCheckResult::Unreachable,
+    }
+}
+
 /// Process an inbound agent message. Returns `false` if the stream should be
 /// closed (e.g. the command channel is dead after a reconnect on a new stream).
 async fn process_agent_message(
@@ -645,15 +684,70 @@ async fn process_agent_message(
                 .await;
             }
 
-            // If the command channel is dead (receiver dropped because a newer
-            // stream replaced us), this stream is a zombie. Close it so the
-            // agent's outbound half sees EOF and reconnects cleanly.
-            if command_tx.is_closed() {
-                warn!(
-                    cluster = %cluster_name,
-                    "Command channel closed (superseded by newer connection), closing stream"
-                );
-                return false;
+            // Validate the proxy path: can the auth proxy on THIS pod reach
+            // this agent's cluster? If not, the agent connected to the wrong pod.
+            if let Some(ref health) = ctx.proxy_health {
+                match check_proxy_path(health, cluster_name).await {
+                    ProxyCheckResult::Ok => {
+                        health
+                            .consecutive_failures
+                            .store(0, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    ProxyCheckResult::WrongPod => {
+                        warn!(cluster = %cluster_name, "Proxy returned 503 — agent on wrong pod, sending Reconnect");
+                        let reconnect = CellCommand {
+                            command_id: format!("reconnect-{}", cluster_name),
+                            command: Some(lattice_proto::cell_command::Command::Reconnect(
+                                lattice_proto::ReconnectCommand {
+                                    reason: "proxy returned 503: cluster not available on this pod"
+                                        .to_string(),
+                                },
+                            )),
+                        };
+                        let _ = command_tx.send(reconnect).await;
+                        return false;
+                    }
+                    ProxyCheckResult::Unreachable => {
+                        let failures = health
+                            .consecutive_failures
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        if failures >= 2 {
+                            warn!(cluster = %cluster_name, failures, "Proxy unreachable for 2 heartbeats, sending Reconnect");
+                            let reconnect = CellCommand {
+                                command_id: format!("reconnect-{}", cluster_name),
+                                command: Some(lattice_proto::cell_command::Command::Reconnect(
+                                    lattice_proto::ReconnectCommand {
+                                        reason: format!(
+                                            "proxy unreachable for {} consecutive heartbeats",
+                                            failures
+                                        ),
+                                    },
+                                )),
+                            };
+                            let _ = command_tx.send(reconnect).await;
+                            return false;
+                        }
+                        debug!(cluster = %cluster_name, failures, "Proxy unreachable, waiting before reconnect");
+                    }
+                }
+            }
+
+            // Check if this stream is still the active connection, or if a newer
+            // stream superseded us (and possibly died, leaving a dead channel).
+            let my_gen = connection_generation.load(std::sync::atomic::Ordering::Relaxed);
+            match registry.check_connection_health(cluster_name, my_gen, command_tx) {
+                crate::connection::StreamAction::Continue => {}
+                crate::connection::StreamAction::Reclaimed(new_gen) => {
+                    connection_generation.store(new_gen, std::sync::atomic::Ordering::Relaxed);
+                }
+                crate::connection::StreamAction::Terminate => {
+                    warn!(
+                        cluster = %cluster_name,
+                        "Superseded by newer live connection, closing stream"
+                    );
+                    return false;
+                }
             }
         }
         Some(Payload::ClusterHealth(health)) => {
@@ -1039,6 +1133,7 @@ impl AgentServer {
         );
         let tls_config = config.mtls_config.to_tonic_config()?;
         let addr = config.addr;
+        let shutdown = config.shutdown;
 
         info!(%addr, "Starting gRPC server with mTLS");
 
@@ -1049,9 +1144,10 @@ impl AgentServer {
                 MAX_GLOBAL_CONCURRENT_STREAMS,
             ))
             .add_service(server.into_service())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown.cancelled())
             .await?;
 
+        info!("gRPC server shut down (leadership lost or shutdown signal)");
         Ok(())
     }
 }
@@ -1154,12 +1250,27 @@ impl LatticeAgent for AgentServer {
         let connection_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let cleanup_generation = connection_generation.clone();
 
+        let proxy_health = peer_config_lock.read().await.as_ref().and_then(|pc| {
+            let ca_cert = reqwest::Certificate::from_pem(pc.ca_cert_pem.as_bytes()).ok()?;
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .add_root_certificate(ca_cert)
+                .build()
+                .ok()
+                .map(|client| ProxyHealthCheck {
+                    base_url: pc.proxy_url.clone(),
+                    client,
+                    consecutive_failures: std::sync::atomic::AtomicU32::new(0),
+                })
+        });
+
         let msg_ctx = MessageContext {
             registry,
             command_tx: command_tx_clone,
             kube_client,
             route_update_tx,
             connection_generation,
+            proxy_health,
         };
 
         // Spawn task to handle incoming messages
