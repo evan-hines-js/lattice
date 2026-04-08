@@ -77,8 +77,8 @@ pub struct ProxyHandle {
 impl ProxyHandle {
     /// Wait for the server task to exit (crash or shutdown).
     /// Does NOT trigger shutdown — use this in the supervisor loop.
-    pub async fn wait(self) {
-        let _ = self.task.await;
+    pub async fn wait(&mut self) {
+        let _ = (&mut self.task).await;
     }
 
     /// Send GOAWAY to all connections and wait for drain (up to timeout).
@@ -254,9 +254,22 @@ fn build_tls_config(cert_pem: &str, key_pem: &str) -> Result<Arc<rustls::ServerC
 }
 
 fn bind_with_keepalive(addr: SocketAddr) -> Result<TcpListener, Error> {
-    let listener = std::net::TcpListener::bind(addr)
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .map_err(|e| Error::Internal(format!("Failed to create socket: {}", e)))?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|e| Error::Internal(format!("Failed to set SO_REUSEADDR: {}", e)))?;
+    socket
+        .bind(&addr.into())
         .map_err(|e| Error::Internal(format!("Failed to bind: {}", e)))?;
-    let socket = socket2::Socket::from(listener);
+    socket
+        .listen(1024)
+        .map_err(|e| Error::Internal(format!("Failed to listen: {}", e)))?;
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(std::time::Duration::from_secs(30))
         .with_interval(std::time::Duration::from_secs(10));

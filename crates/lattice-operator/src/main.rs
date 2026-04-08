@@ -286,6 +286,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 Box::pin(async move {
                     wait_for_api_ready_for::<LatticeCluster>(&client).await;
                     let self_cluster_name = config.cluster_name.clone();
+                    let cell_token = CancellationToken::new();
                     let cell = CellInfraConfig {
                         client: client.clone(),
                         self_cluster_name: self_cluster_name.clone(),
@@ -293,11 +294,13 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         servers: servers.clone(),
                         route_update_tx,
                         all_routes_rx,
+                        cell_token: cell_token.clone(),
                     };
                     match setup_cell_infra(&config, cell).await {
                         Ok(agent_token) => {
                             let _guard = CellInfraGuard {
                                 agent_token,
+                                cell_token,
                                 servers: servers.clone(),
                             };
                             // Run the cluster controller under the same lease.
@@ -620,6 +623,7 @@ async fn has_parent_connection(client: &kube::Client) -> bool {
 /// ParentServers instance to restart.
 struct CellInfraGuard {
     agent_token: CancellationToken,
+    cell_token: CancellationToken,
     servers: Arc<ParentServers<DefaultManifestGenerator>>,
 }
 
@@ -627,6 +631,7 @@ impl Drop for CellInfraGuard {
     fn drop(&mut self) {
         tracing::info!("Cluster leadership lost, shutting down cell infrastructure");
         self.agent_token.cancel();
+        self.cell_token.cancel();
         let servers = self.servers.clone();
         tokio::spawn(async move {
             servers.shutdown().await;
@@ -642,6 +647,7 @@ struct CellInfraConfig {
     servers: Arc<ParentServers<DefaultManifestGenerator>>,
     route_update_tx: Option<lattice_cell::route_reconciler::RouteUpdateSender>,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+    cell_token: CancellationToken,
 }
 
 /// Set up cell infrastructure (gRPC servers, agent connection, auth proxy)
@@ -668,6 +674,7 @@ async fn setup_cell_infra(
         servers,
         route_update_tx,
         all_routes_rx,
+        cell_token,
     } = cell;
 
     // Start agent connection to parent (if we have one)
@@ -702,6 +709,7 @@ async fn setup_cell_infra(
                 cedar,
                 route_update_tx: tx,
                 all_routes_rx,
+                cell_token: cell_token.clone(),
             },
         )
         .await?;
@@ -715,9 +723,14 @@ async fn setup_cell_infra(
             servers,
             route_update_tx: Some(route_update_tx),
             all_routes_rx,
+            cell_token: cell_token.clone(),
         };
+        let ct = cell_token.clone();
         tokio::spawn(async move {
-            cell_activation_watcher(watcher_config).await;
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                _ = cell_activation_watcher(watcher_config) => {}
+            }
         });
     };
 
@@ -730,6 +743,7 @@ struct CellActivationParams {
     cedar: Arc<PolicyEngine>,
     route_update_tx: lattice_cell::route_reconciler::RouteUpdateSender,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+    cell_token: CancellationToken,
 }
 
 /// Activate cell infrastructure: start servers, auth proxy, CA rotation, and crash recovery.
@@ -744,6 +758,7 @@ async fn activate_cell_services(
         cedar,
         route_update_tx,
         all_routes_rx,
+        cell_token,
     } = params;
     servers
         .ensure_running(
@@ -762,6 +777,7 @@ async fn activate_cell_services(
         &extra_sans,
         cedar,
         all_routes_rx,
+        cell_token.clone(),
     )
     .await;
     start_ca_rotation(servers.clone());
@@ -782,6 +798,7 @@ async fn cell_activation_watcher(cell: CellInfraConfig) {
         servers,
         route_update_tx,
         all_routes_rx,
+        cell_token,
     } = cell;
     let self_cluster_name =
         self_cluster_name.expect("self_cluster_name required for cell_activation_watcher");
@@ -855,6 +872,7 @@ async fn cell_activation_watcher(cell: CellInfraConfig) {
                 cedar: cedar.clone(),
                 route_update_tx: route_update_tx.clone(),
                 all_routes_rx: all_routes_rx.clone(),
+                cell_token: cell_token.clone(),
             },
         )
         .await
@@ -1013,6 +1031,7 @@ async fn start_auth_proxy(
     extra_sans: &[String],
     cedar: Arc<PolicyEngine>,
     all_routes_rx: Option<lattice_cell::route_reconciler::AllRoutesReceiver>,
+    cell_token: CancellationToken,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let cluster_name = cluster_name
         .clone()
@@ -1110,12 +1129,26 @@ async fn start_auth_proxy(
     let supervisor = tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         let max_backoff = Duration::from_secs(30);
+        let mut proxy_handle = proxy_handle;
 
-        proxy_handle.wait().await;
+        tokio::select! {
+            _ = cell_token.cancelled() => {
+                tracing::info!("Auth proxy supervisor cancelled (leadership lost)");
+                proxy_handle.graceful_shutdown(Duration::from_secs(5)).await;
+                return;
+            }
+            _ = proxy_handle.wait() => {}
+        }
 
         loop {
             tracing::warn!(restart_in = ?backoff, "Auth proxy exited, restarting...");
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = cell_token.cancelled() => {
+                    tracing::info!("Auth proxy supervisor cancelled (leadership lost)");
+                    return;
+                }
+                _ = tokio::time::sleep(backoff) => {}
+            }
 
             match lattice_api::start_server(
                 config.clone(),
@@ -1125,10 +1158,17 @@ async fn start_auth_proxy(
             )
             .await
             {
-                Ok(handle) => {
+                Ok(mut handle) => {
                     tracing::info!("Auth proxy restarted");
                     backoff = Duration::from_secs(1);
-                    handle.wait().await;
+                    tokio::select! {
+                        _ = cell_token.cancelled() => {
+                            tracing::info!("Auth proxy supervisor cancelled (leadership lost)");
+                            handle.graceful_shutdown(Duration::from_secs(5)).await;
+                            return;
+                        }
+                        _ = handle.wait() => {}
+                    }
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Auth proxy restart failed");
