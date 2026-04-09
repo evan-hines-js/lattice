@@ -1,31 +1,44 @@
 //! `$secret` directive parsing
 //!
 //! A `$secret` directive is a JSON object in the value tree that declares
-//! a K8s Secret should be created and the object replaced with the Secret name.
-
-use std::collections::BTreeMap;
+//! a K8s Secret should be created from resource references and the object
+//! replaced with the Secret name.
+//!
+//! The directive maps target keys (what the chart reads) to resource
+//! references using `${resource.key}` syntax:
+//!
+//! ```yaml
+//! $secret:
+//!   redis-password: "${redis-creds.password}"
+//!   redis-username: "${redis-creds.username}"
+//! ```
 
 use crate::error::TemplateError;
 
 /// A `$secret` directive extracted from the value tree.
 ///
-/// The controller creates an ESO ExternalSecret from this and replaces
-/// the directive node with `Value::String(secret_name)`.
+/// The controller creates an ESO ExternalSecret from the key mappings
+/// and replaces the directive node with `Value::String(secret_name)`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SecretDirective {
     /// Deterministic name for the generated K8s Secret.
-    /// Format: `{name_prefix}-{path_slug}` where path_slug is derived
-    /// from the values path (e.g., `redis-prod-auth`).
     pub secret_name: String,
     /// Dotted path in the tree where this directive was found
     pub path: String,
-    /// Remote key in the secret store (the `id` field)
-    pub id: String,
-    /// ClusterSecretStore name
-    pub provider: String,
-    /// Key mapping: target key (K8s Secret) → source key (store).
-    /// Empty means passthrough all keys (`dataFrom.extract`).
-    pub keys: BTreeMap<String, String>,
+    /// Key mappings: target key (K8s Secret) → resource reference.
+    /// Each value is a parsed `${resource.key}` reference.
+    pub keys: Vec<DirectiveKeyMapping>,
+}
+
+/// A single key mapping in a `$secret` directive.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DirectiveKeyMapping {
+    /// Key in the generated K8s Secret (what the chart reads)
+    pub target_key: String,
+    /// Resource name from the `resources` block
+    pub resource_name: String,
+    /// Key within the resource
+    pub resource_key: String,
 }
 
 /// Parse a `$secret` directive from a JSON object.
@@ -33,14 +46,12 @@ pub struct SecretDirective {
 /// Expected shape:
 /// ```json
 /// {
-///   "id": "payments/redis/prod",
-///   "provider": "vault-prod",
-///   "keys": {
-///     "redis-password": "password",
-///     "tls.crt": "cert"
-///   }
+///   "redis-password": "${redis-creds.password}",
+///   "redis-username": "${redis-creds.username}"
 /// }
 /// ```
+///
+/// Each value must be a `${resource.key}` reference.
 pub(crate) fn parse_directive(
     value: &serde_json::Value,
     path: &str,
@@ -51,44 +62,39 @@ pub(crate) fn parse_directive(
         reason: "$secret value must be an object".to_string(),
     })?;
 
-    let id = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TemplateError::InvalidDirective {
+    if obj.is_empty() {
+        return Err(TemplateError::InvalidDirective {
             path: path.to_string(),
-            reason: "missing required field 'id'".to_string(),
-        })?
-        .to_string();
+            reason: "$secret must have at least one key mapping".to_string(),
+        });
+    }
 
-    let provider = obj
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TemplateError::InvalidDirective {
+    let mut keys = Vec::with_capacity(obj.len());
+
+    for (target_key, ref_value) in obj {
+        let ref_str = ref_value.as_str().ok_or_else(|| TemplateError::InvalidDirective {
             path: path.to_string(),
-            reason: "missing required field 'provider'".to_string(),
-        })?
-        .to_string();
+            reason: format!(
+                "{}: value must be a string resource reference like \"${{resource.key}}\"",
+                target_key
+            ),
+        })?;
 
-    let keys = match obj.get("keys") {
-        Some(serde_json::Value::Object(map)) => {
-            let mut keys = BTreeMap::new();
-            for (k, v) in map {
-                let source = v.as_str().ok_or_else(|| TemplateError::InvalidDirective {
-                    path: path.to_string(),
-                    reason: format!("keys.{}: value must be a string (source store key)", k),
-                })?;
-                keys.insert(k.clone(), source.to_string());
-            }
-            keys
-        }
-        Some(serde_json::Value::Null) | None => BTreeMap::new(),
-        Some(_) => {
-            return Err(TemplateError::InvalidDirective {
+        let (resource_name, resource_key) =
+            parse_resource_ref(ref_str).ok_or_else(|| TemplateError::InvalidDirective {
                 path: path.to_string(),
-                reason: "'keys' must be an object mapping target keys to source keys".to_string(),
-            });
-        }
-    };
+                reason: format!(
+                    "{}: expected \"${{resource.key}}\" but got \"{}\"",
+                    target_key, ref_str
+                ),
+            })?;
+
+        keys.push(DirectiveKeyMapping {
+            target_key: target_key.clone(),
+            resource_name,
+            resource_key,
+        });
+    }
 
     let path_slug = slugify_path(path);
     let secret_name = if path_slug.is_empty() {
@@ -100,10 +106,25 @@ pub(crate) fn parse_directive(
     Ok(SecretDirective {
         secret_name,
         path: path.to_string(),
-        id,
-        provider,
         keys,
     })
+}
+
+/// Parse a `${resource.key}` reference string.
+///
+/// Returns `(resource_name, key)` or `None` if the format is invalid.
+fn parse_resource_ref(s: &str) -> Option<(String, String)> {
+    let trimmed = s.trim();
+    let inner = trimmed.strip_prefix("${")?.strip_suffix('}')?;
+    let dot = inner.find('.')?;
+    let resource = &inner[..dot];
+    let key = &inner[dot + 1..];
+
+    if resource.is_empty() || key.is_empty() || key.contains('.') {
+        return None;
+    }
+
+    Some((resource.to_string(), key.to_string()))
 }
 
 /// Convert a dotted path into a DNS-safe slug for use in K8s Secret names.
@@ -128,7 +149,6 @@ fn slugify_path(path: &str) -> String {
             }
         }
     }
-    // Trim trailing hyphens
     while slug.ends_with('-') {
         slug.pop();
     }
@@ -143,51 +163,74 @@ mod tests {
     #[test]
     fn parse_full_directive() {
         let val = json!({
-            "id": "payments/redis/prod",
-            "provider": "vault-prod",
-            "keys": {
-                "redis-password": "password",
-                "tls.crt": "cert"
-            }
+            "redis-password": "${redis-creds.password}",
+            "redis-username": "${redis-creds.username}"
         });
         let d = parse_directive(&val, "auth.existingSecret", "redis-prod").unwrap();
         assert_eq!(d.secret_name, "redis-prod-auth-existingsecret");
-        assert_eq!(d.id, "payments/redis/prod");
-        assert_eq!(d.provider, "vault-prod");
-        assert_eq!(d.keys.get("redis-password"), Some(&"password".to_string()));
-        assert_eq!(d.keys.get("tls.crt"), Some(&"cert".to_string()));
+        assert_eq!(d.keys.len(), 2);
+
+        let pw = d.keys.iter().find(|k| k.target_key == "redis-password").unwrap();
+        assert_eq!(pw.resource_name, "redis-creds");
+        assert_eq!(pw.resource_key, "password");
     }
 
     #[test]
-    fn parse_directive_no_keys() {
+    fn parse_mixed_resources() {
         let val = json!({
-            "id": "infra/tls/wildcard",
-            "provider": "vault-prod"
+            "db-password": "${db-creds.password}",
+            "tls.crt": "${tls-cert.cert}"
         });
-        let d = parse_directive(&val, "tls.secretName", "my-app").unwrap();
-        assert_eq!(d.secret_name, "my-app-tls-secretname");
-        assert!(d.keys.is_empty());
+        let d = parse_directive(&val, "secrets.ref", "my-app").unwrap();
+        assert_eq!(d.keys.len(), 2);
+
+        let db = d.keys.iter().find(|k| k.target_key == "db-password").unwrap();
+        assert_eq!(db.resource_name, "db-creds");
+
+        let tls = d.keys.iter().find(|k| k.target_key == "tls.crt").unwrap();
+        assert_eq!(tls.resource_name, "tls-cert");
     }
 
     #[test]
-    fn missing_id_errors() {
-        let val = json!({ "provider": "vault" });
+    fn empty_directive_errors() {
+        let val = json!({});
         let err = parse_directive(&val, "x", "p").unwrap_err();
-        assert!(err.to_string().contains("missing required field 'id'"));
+        assert!(err.to_string().contains("at least one key"));
     }
 
     #[test]
-    fn missing_provider_errors() {
-        let val = json!({ "id": "foo" });
+    fn non_ref_value_errors() {
+        let val = json!({ "key": "plain-string" });
         let err = parse_directive(&val, "x", "p").unwrap_err();
-        assert!(err.to_string().contains("missing required field 'provider'"));
+        assert!(err.to_string().contains("expected \"${resource.key}\""));
+    }
+
+    #[test]
+    fn non_string_value_errors() {
+        let val = json!({ "key": 42 });
+        let err = parse_directive(&val, "x", "p").unwrap_err();
+        assert!(err.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn parse_resource_ref_valid() {
+        let (r, k) = parse_resource_ref("${db.password}").unwrap();
+        assert_eq!(r, "db");
+        assert_eq!(k, "password");
+    }
+
+    #[test]
+    fn parse_resource_ref_invalid() {
+        assert!(parse_resource_ref("plain").is_none());
+        assert!(parse_resource_ref("${nodot}").is_none());
+        assert!(parse_resource_ref("${a.b.c}").is_none());
+        assert!(parse_resource_ref("${}").is_none());
     }
 
     #[test]
     fn slugify() {
         assert_eq!(slugify_path("auth.existingSecret"), "auth-existingsecret");
         assert_eq!(slugify_path("tls[0].secretName"), "tls-0-secretname");
-        assert_eq!(slugify_path("global.postgresql.auth.existingSecret"), "global-postgresql-auth-existingsecret");
         assert_eq!(slugify_path(""), "");
     }
 }

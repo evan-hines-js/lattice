@@ -17,7 +17,7 @@ mod inline;
 mod types;
 
 pub use context::{TemplateContext, TemplateContextBuilder};
-pub use directive::SecretDirective;
+pub use directive::{DirectiveKeyMapping, SecretDirective};
 pub use error::TemplateError;
 pub use expand::{expand, ExpandOptions, Expansion, SecretMode};
 pub use inline::InlineSecretRef;

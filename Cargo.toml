@@ -34,6 +34,7 @@ members = [
     "crates/lattice-quota",
     "crates/lattice-cache",
     "crates/lattice-template",
+    "crates/lattice-package",
 ]
 
 [workspace.package]
@@ -74,6 +75,7 @@ lattice-auth = { path = "crates/lattice-auth" }
 lattice-quota = { path = "crates/lattice-quota" }
 lattice-cache = { path = "crates/lattice-cache" }
 lattice-template = { path = "crates/lattice-template" }
+lattice-package = { path = "crates/lattice-package" }
 
 # Optimization
 good_lp = { version = "1.15", default-features = false, features = ["microlp"] }

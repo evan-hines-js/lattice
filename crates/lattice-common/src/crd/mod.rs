@@ -17,6 +17,7 @@ mod mesh_member;
 mod model_serving;
 mod observability;
 mod oidc_provider;
+mod package;
 mod providers;
 mod quota;
 mod restore;
@@ -91,6 +92,10 @@ pub use oidc_provider::{
 pub use providers::{
     AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
     ProxmoxConfig,
+};
+pub use package::{
+    ChartRef, LatticePackage, LatticePackageSpec, LatticePackageStatus, PackageMeshConfig,
+    PackageMeshPort, PackagePhase,
 };
 pub use quota::{
     LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,

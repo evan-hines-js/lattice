@@ -39,20 +39,32 @@ spec:
     name: redis
     version: 18.6.1
 
+  # Secret resources — same as LatticeService. Both modes use this.
+  resources:
+    redis-creds:
+      type: secret
+      id: payments/redis/prod
+      params:
+        provider: vault-prod
+        keys: [password, username]
+    redis-tls:
+      type: secret
+      id: payments/redis/tls
+      params:
+        provider: vault-prod
+        keys: [cert, private_key]
+
   # Helm values with secret injection support.
   values:
     architecture: replication
     auth:
-      # Mode 1 — $secret directive: the controller creates an ESO
-      # ExternalSecret with the given key mapping and replaces this
-      # entire object with the K8s Secret name at render time.
-      # The chart sees: existingSecret: "redis-prod-redis-creds"
+      # Mode 1 — $secret directive: maps resource keys to chart-expected
+      # keys, creates a K8s Secret, replaces this object with the name.
+      # The chart sees: existingSecret: "redis-prod-auth-existingsecret"
       existingSecret:
         $secret:
-          id: payments/redis/prod
-          provider: vault-prod
-          keys:
-            redis-password: password     # K8s Secret key: source store key
+          redis-password: "${redis-creds.password}"
+          redis-username: "${redis-creds.username}"
     master:
       resources:
         requests:
@@ -62,24 +74,8 @@ spec:
       enabled: true
       existingSecret:
         $secret:
-          id: payments/redis/tls
-          provider: vault-prod
-          keys:
-            tls.crt: cert
-            tls.key: private_key
-
-  # Mode 2 — inline ${secret.X.Y}: for charts that accept values
-  # directly instead of existingSecret. Requires a resources block
-  # to declare where the secret lives (same as LatticeService).
-  # See "Secret Injection: Two Modes" section below.
-  #
-  # resources:
-  #   redis-creds:
-  #     type: secret
-  #     id: payments/redis/prod
-  #     params:
-  #       provider: vault-prod
-  #       keys: [password]
+          tls.crt: "${redis-tls.cert}"
+          tls.key: "${redis-tls.private_key}"
 
   # Optional: mesh integration for chart workloads.
   # Generates LatticeMeshMember so chart pods participate in

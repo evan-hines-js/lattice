@@ -3179,6 +3179,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-package"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-cache",
+ "lattice-cedar",
+ "lattice-common",
+ "lattice-secret-provider",
+ "lattice-template",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-proto"
 version = "0.1.0"
 dependencies = [

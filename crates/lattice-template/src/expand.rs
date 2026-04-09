@@ -474,9 +474,8 @@ mod tests {
             "auth": {
                 "existingSecret": {
                     "$secret": {
-                        "id": "payments/redis/prod",
-                        "provider": "vault-prod",
-                        "keys": { "redis-password": "password" }
+                        "redis-password": "${redis-creds.password}",
+                        "redis-username": "${redis-creds.username}"
                     }
                 }
             }
@@ -487,11 +486,10 @@ mod tests {
             json!("test-auth-existingsecret")
         );
         assert_eq!(exp.directives.len(), 1);
-        assert_eq!(exp.directives[0].id, "payments/redis/prod");
-        assert_eq!(
-            exp.directives[0].keys.get("redis-password"),
-            Some(&"password".to_string())
-        );
+        assert_eq!(exp.directives[0].keys.len(), 2);
+        let pw = exp.directives[0].keys.iter().find(|k| k.target_key == "redis-password").unwrap();
+        assert_eq!(pw.resource_name, "redis-creds");
+        assert_eq!(pw.resource_key, "password");
     }
 
     #[test]
@@ -503,8 +501,7 @@ mod tests {
                     "auth": {
                         "existingSecret": {
                             "$secret": {
-                                "id": "db/prod",
-                                "provider": "vault"
+                                "postgres-password": "${db-creds.password}"
                             }
                         }
                     }
@@ -527,8 +524,8 @@ mod tests {
                 "hosts": ["app.example.com"],
                 "secretName": {
                     "$secret": {
-                        "id": "tls/wildcard",
-                        "provider": "vault"
+                        "tls.crt": "${tls-cert.cert}",
+                        "tls.key": "${tls-cert.key}"
                     }
                 }
             }]
@@ -554,8 +551,7 @@ mod tests {
             "auth": {
                 "existingSecret": {
                     "$secret": {
-                        "id": "redis/prod",
-                        "provider": "vault"
+                        "redis-password": "${redis-creds.password}"
                     }
                 }
             },
