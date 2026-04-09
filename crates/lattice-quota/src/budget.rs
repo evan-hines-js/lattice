@@ -6,8 +6,20 @@
 
 use std::collections::BTreeMap;
 
+use kube::ResourceExt;
 use lattice_common::crd::LatticeQuota;
 use lattice_common::resources::{parse_resource_by_key, WorkloadResourceDemand};
+
+/// Snapshot of a quota's identity at read time, for optimistic concurrency.
+#[derive(Clone, Debug)]
+pub struct QuotaSnapshot {
+    /// Quota name
+    pub name: String,
+    /// Quota namespace
+    pub namespace: String,
+    /// resourceVersion at the time the budget was resolved
+    pub resource_version: String,
+}
 
 /// Pre-resolved quota budget for a workload's namespace/principal.
 ///
@@ -21,6 +33,12 @@ pub struct QuotaBudget {
 
     /// Per-workload caps (max any single workload can request).
     pub max_per_workload: BTreeMap<String, i64>,
+
+    /// Snapshots of the quota objects that contributed to this budget.
+    /// Used for optimistic concurrency: before applying a workload that passed
+    /// quota checks, verify these versions haven't changed (another compilation
+    /// may have consumed quota in the meantime).
+    pub snapshots: Vec<QuotaSnapshot>,
 }
 
 impl QuotaBudget {
@@ -56,6 +74,15 @@ impl QuotaBudget {
             }
 
             has_match = true;
+            if let Some(rv) = quota.metadata.resource_version.as_deref() {
+                budget.snapshots.push(QuotaSnapshot {
+                    name: quota.name_any(),
+                    namespace: quota
+                        .namespace()
+                        .unwrap_or_default(),
+                    resource_version: rv.to_string(),
+                });
+            }
             let used = quota
                 .status
                 .as_ref()
@@ -96,6 +123,11 @@ impl QuotaBudget {
         }
 
         budget
+    }
+
+    /// Returns true if this budget has no constraints (no quotas matched).
+    pub fn is_unconstrained(&self) -> bool {
+        self.remaining.is_empty() && self.max_per_workload.is_empty()
     }
 
     /// Check if a workload demand fits within this budget.
@@ -145,6 +177,34 @@ impl QuotaBudget {
         }
 
         Ok(())
+    }
+
+    /// Verify that the quotas used to compute this budget haven't changed.
+    ///
+    /// Re-reads each snapshotted quota from the API and compares resourceVersion.
+    /// Returns `true` if all match (safe to apply), `false` if any changed
+    /// (another compilation may have consumed budget — caller should requeue).
+    pub async fn verify_freshness(&self, client: &kube::Client) -> Result<bool, kube::Error> {
+        use kube::api::Api;
+        use lattice_common::crd::LatticeQuota;
+
+        for snap in &self.snapshots {
+            let api: Api<LatticeQuota> = Api::namespaced(client.clone(), &snap.namespace);
+            match api.get_opt(&snap.name).await? {
+                Some(quota) => {
+                    let current_rv = quota
+                        .metadata
+                        .resource_version
+                        .as_deref()
+                        .unwrap_or("");
+                    if current_rv != snap.resource_version {
+                        return Ok(false);
+                    }
+                }
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 }
 

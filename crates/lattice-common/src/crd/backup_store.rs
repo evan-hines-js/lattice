@@ -233,10 +233,8 @@ storage:
     endpoint: "http://minio.minio-system.svc:9000"
     forcePathStyle: true
   credentials:
-    type: secret
     id: backup/minio-creds
-    params:
-      provider: lattice-local
+    provider: lattice-local
 "#,
         );
 

@@ -82,25 +82,14 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     // Check if we're reconciling our own cluster (the one we're running on)
     let is_self = is_self_cluster(&name, ctx.self_cluster_name.as_deref());
 
-    // Handle deletion via finalizer
-    // Root/management clusters cannot be unpivoted (they have nowhere to unpivot to)
-    // Only self-managed workload clusters need unpivot handling
-    if cluster.metadata.deletion_timestamp.is_some() {
-        let result = handle_deletion(&cluster, &ctx, is_self).await;
-        match &result {
-            Ok(_) => timer.success(),
-            Err(_) => timer.error("transient"),
-        }
-        return result;
-    }
-
-    // Ensure finalizer is present for clusters that need cleanup on deletion
-    // Two cases:
+    // Ensure finalizer is present BEFORE checking deletion. This prevents a race
+    // where delete arrives between the deletion check and finalizer add, causing
+    // the cluster to be deleted without proper cleanup (unpivot or CAPI teardown).
+    // Two cases need a finalizer:
     // - Self cluster with parent — needs unpivot (export CAPI to parent)
     // - Non-self cluster (child) — needs CAPI cleanup (delete infrastructure)
     if !has_finalizer(&cluster) {
         if is_self {
-            // Check if parent config secret exists (indicates we have a parent)
             let has_parent = ctx
                 .kube
                 .get_secret(PARENT_CONFIG_SECRET, LATTICE_SYSTEM_NAMESPACE)
@@ -114,12 +103,21 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                 return Ok(Action::requeue(Duration::from_secs(1)));
             }
         } else {
-            // Non-self cluster (we're the parent) - add finalizer for CAPI cleanup
             info!("Adding finalizer (child cluster - needs CAPI cleanup on deletion)");
             add_finalizer(&cluster, &ctx).await?;
             timer.success();
             return Ok(Action::requeue(Duration::from_secs(1)));
         }
+    }
+
+    // Handle deletion via finalizer (checked after finalizer is ensured above)
+    if cluster.metadata.deletion_timestamp.is_some() {
+        let result = handle_deletion(&cluster, &ctx, is_self).await;
+        match &result {
+            Ok(_) => timer.success(),
+            Err(_) => timer.error("transient"),
+        }
+        return result;
     }
 
     // Validate the cluster spec

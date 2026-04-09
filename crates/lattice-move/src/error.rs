@@ -60,6 +60,10 @@ pub enum MoveError {
     #[error("pause operation failed: {0}")]
     PauseFailed(String),
 
+    /// Failed to unpause after error — cluster stuck in paused state
+    #[error("pause recovery failed: {0}")]
+    PauseRecovery(String),
+
     /// Source deletion failed
     #[error("source deletion failed: {0}")]
     DeletionFailed(String),
@@ -99,6 +103,7 @@ impl MoveError {
                 | MoveError::BatchFailed { .. }
                 | MoveError::DeletionFailed(_)
                 | MoveError::PauseFailed(_)
+                | MoveError::PauseRecovery(_)
                 | MoveError::NamespaceCreation { .. }
         )
     }

@@ -96,6 +96,12 @@ pub trait JobKubeClient: Send + Sync {
         namespace: &str,
         cron_api: &ApiResource,
     ) -> Option<(usize, String)>;
+
+    /// Verify that quota objects haven't been modified since the budget was resolved.
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, JobError>;
 }
 
 /// Real Kubernetes client implementation
@@ -195,6 +201,17 @@ impl JobKubeClient for JobKubeClientImpl {
                 None
             }
         }
+    }
+
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, JobError> {
+        let budget = lattice_quota::QuotaBudget {
+            snapshots: snapshots.to_vec(),
+            ..Default::default()
+        };
+        Ok(budget.verify_freshness(&self.client).await?)
     }
 }
 
@@ -580,6 +597,14 @@ async fn submit_job(
         .collect();
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, job_name, &ns_labels, &annotations);
+    if !quotas.is_empty() && quota_budget.is_unconstrained() {
+        tracing::warn!(
+            job = %job_name,
+            namespace = %namespace,
+            "no quota matched this job — running without resource limits"
+        );
+    }
+    let quota_snapshots = quota_budget.snapshots.clone();
 
     let image_providers = resolve_job_image_providers(job, &ctx.cache);
 
@@ -623,6 +648,23 @@ async fn submit_job(
             return Err(e);
         }
     };
+
+    // Optimistic concurrency: verify quotas haven't changed since we resolved the budget.
+    // If stale, return a retryable Kube error so the caller requeues.
+    if !quota_snapshots.is_empty() {
+        match ctx.kube.verify_quota_freshness(&quota_snapshots).await {
+            Ok(false) => {
+                tracing::info!("quota state changed during job compilation, requeueing");
+                return Err(JobError::Common(lattice_common::Error::internal(
+                    "quota state changed during compilation, requeue",
+                )));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to verify quota freshness for job, proceeding");
+            }
+            _ => {}
+        }
+    }
 
     let name = job.name_any();
     if let Err(e) = ctx
@@ -1063,6 +1105,7 @@ mod tests {
         let job = Arc::new(make_minimal_job("my-job"));
 
         let mut mock = MockJobKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&()); // dummy
         let va = volcano_api.clone();
         mock.expect_resolve_volcano_crd()
@@ -1090,6 +1133,7 @@ mod tests {
         let job = Arc::new(job);
 
         let mut mock = MockJobKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
         let va = volcano_api.clone();
         mock.expect_resolve_volcano_crd()
@@ -1121,6 +1165,7 @@ mod tests {
         let job = Arc::new(job);
 
         let mut mock = MockJobKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         let volcano_api = ApiResource::erase::<k8s_openapi::api::batch::v1::Job>(&());
         let va = volcano_api.clone();
         mock.expect_resolve_volcano_crd()
@@ -1150,7 +1195,8 @@ mod tests {
         });
         let job = Arc::new(job);
 
-        let mock = MockJobKubeClient::new();
+        let mut mock = MockJobKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         let ctx = Arc::new(JobContext::for_testing(Arc::new(mock)));
 
         let action = reconcile(job, ctx).await.expect("reconcile should succeed");

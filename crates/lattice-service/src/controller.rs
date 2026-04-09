@@ -113,6 +113,16 @@ pub trait ServiceKubeClient: Send + Sync {
         namespace: &str,
         compiled: &CompiledService,
     ) -> Result<(), Error>;
+
+    /// Verify that quota objects haven't been modified since the budget was resolved.
+    ///
+    /// Returns `true` if all snapshots match their current resourceVersion (safe to apply).
+    /// Returns `false` if any quota was updated (another compilation may have consumed
+    /// budget — caller should requeue to re-read fresh quota state).
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -437,6 +447,17 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
 
         Ok(())
     }
+
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, Error> {
+        let budget = lattice_quota::QuotaBudget {
+            snapshots: snapshots.to_vec(),
+            ..Default::default()
+        };
+        Ok(budget.verify_freshness(&self.client).await?)
+    }
 }
 
 /// Extension trait for `ApplyBatch` to support service-specific `DynamicResource`.
@@ -541,18 +562,39 @@ impl ServiceKubeClientImpl {
 // Cache-based read helpers (no API calls — reads from reflector cache)
 // =============================================================================
 
-/// Check if a `LatticeMeshMember` is in the Ready phase via the resource cache.
-fn is_mesh_member_ready(cache: &lattice_cache::ResourceCache, name: &str, namespace: &str) -> bool {
+/// Check the mesh member's reconciliation state via the resource cache.
+///
+/// Returns:
+/// - `MeshMemberGate::Ready` — mesh member fully reconciled, service can go Ready
+/// - `MeshMemberGate::Pending` — still reconciling, service should stay Compiling
+/// - `MeshMemberGate::Failed(msg)` — mesh member failed, service should fail too
+fn check_mesh_member_gate(
+    cache: &lattice_cache::ResourceCache,
+    name: &str,
+    namespace: &str,
+) -> MeshMemberGate {
     use lattice_common::crd::{LatticeMeshMember, MeshMemberPhase};
-    cache
-        .get_namespaced::<LatticeMeshMember>(name, namespace)
-        .map(|mm| {
-            mm.status
-                .as_ref()
-                .map(|s| s.phase == MeshMemberPhase::Ready)
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
+    match cache.get_namespaced::<LatticeMeshMember>(name, namespace) {
+        Some(mm) => match mm.status.as_ref().map(|s| &s.phase) {
+            Some(MeshMemberPhase::Ready) => MeshMemberGate::Ready,
+            Some(MeshMemberPhase::Failed) => {
+                let msg = mm
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.message.clone())
+                    .unwrap_or_else(|| "MeshMember reconciliation failed".to_string());
+                MeshMemberGate::Failed(msg)
+            }
+            _ => MeshMemberGate::Pending,
+        },
+        None => MeshMemberGate::Pending,
+    }
+}
+
+enum MeshMemberGate {
+    Ready,
+    Pending,
+    Failed(String),
 }
 
 /// Hash the `.data` field of all cached K8s Secrets owned by a service.
@@ -865,6 +907,14 @@ async fn compile_and_apply(
         .collect();
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, name, &ns_labels, &annotations);
+    if !quotas.is_empty() && quota_budget.is_unconstrained() {
+        warn!(
+            service = %name,
+            namespace = %namespace,
+            "no quota matched this workload — running without resource limits"
+        );
+    }
+    let quota_snapshots = quota_budget.snapshots.clone();
 
     // Resolve ImageProvider credentials for imagePullSecrets
     let image_providers = ctx
@@ -926,6 +976,22 @@ async fn compile_and_apply(
         }
     };
 
+    // Optimistic concurrency: verify quotas haven't changed since we resolved
+    // the budget. If another compilation consumed quota in the meantime, the
+    // budget we checked against is stale — requeue to re-read fresh state.
+    if !quota_snapshots.is_empty() {
+        match ctx.kube.verify_quota_freshness(&quota_snapshots).await {
+            Ok(true) => {}
+            Ok(false) => {
+                info!("quota state changed during compilation, requeueing");
+                return Ok(Action::requeue(Duration::from_secs(1)));
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to verify quota freshness, proceeding with apply");
+            }
+        }
+    }
+
     let has_mesh_member = compiled.mesh_member.is_some();
 
     debug!(
@@ -953,25 +1019,46 @@ async fn compile_and_apply(
         .await
     {
         // Orphan cleanup failures are non-fatal — the service is functional,
-        // just has stale resources. Log and continue.
+        // just has stale resources. Log and emit a warning event so monitoring
+        // can alert on persistent stale resource accumulation.
         warn!(error = %e, "orphan cleanup failed (non-fatal)");
+        ctx.events
+            .publish(
+                &service.object_ref(&()),
+                EventType::Warning,
+                reasons::COMPILATION_FAILED,
+                actions::RECONCILE,
+                Some(format!("orphan cleanup failed: {e}")),
+            )
+            .await;
     }
 
-    // Don't mark Ready until the MeshMember controller has fully reconciled
-    if has_mesh_member && !is_mesh_member_ready(&ctx.cache, name, namespace) {
-        debug!("mesh member not yet ready, staying in Compiling");
-        // Only write status if not already Compiling — avoids watch-event loop
-        let already_compiling = service
-            .status
-            .as_ref()
-            .map(|s| s.phase == ServicePhase::Compiling)
-            .unwrap_or(false);
-        if !already_compiling {
-            ServiceStatusUpdate::compiling()
-                .apply(ctx.kube.as_ref(), service)
-                .await?;
+    // Don't mark Ready until the MeshMember controller has fully reconciled.
+    // Handle Failed state to avoid deadlock where service stays Compiling forever.
+    if has_mesh_member {
+        match check_mesh_member_gate(&ctx.cache, name, namespace) {
+            MeshMemberGate::Ready => {}
+            MeshMemberGate::Failed(msg) => {
+                let reason = format!("MeshMember failed: {}", msg);
+                transition_to_failed(service, ctx, &reason, reasons::COMPILATION_FAILED).await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            MeshMemberGate::Pending => {
+                debug!("mesh member not yet ready, staying in Compiling");
+                // Only write status if not already Compiling — avoids watch-event loop
+                let already_compiling = service
+                    .status
+                    .as_ref()
+                    .map(|s| s.phase == ServicePhase::Compiling)
+                    .unwrap_or(false);
+                if !already_compiling {
+                    ServiceStatusUpdate::compiling()
+                        .apply(ctx.kube.as_ref(), service)
+                        .await?;
+                }
+                return Ok(Action::requeue(REQUEUE_PENDING));
+            }
         }
-        return Ok(Action::requeue(REQUEUE_PENDING));
     }
 
     let spec = &service.spec;
@@ -1325,6 +1412,8 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         mock.expect_delete_revoked_external_secrets()
             .returning(|_, _| Ok(()));
+        mock.expect_verify_quota_freshness()
+            .returning(|_| Ok(true));
         mock
     }
 

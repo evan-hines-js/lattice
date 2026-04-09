@@ -106,6 +106,12 @@ pub trait ModelKubeClient: Send + Sync {
         new_keys: &BTreeSet<String>,
         graph: &ServiceGraph,
     );
+
+    /// Verify that quota objects haven't been modified since the budget was resolved.
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, ModelError>;
 }
 
 /// Real Kubernetes client implementation
@@ -217,6 +223,17 @@ impl ModelKubeClient for ModelKubeClientImpl {
             new_keys,
         )
         .await;
+    }
+
+    async fn verify_quota_freshness(
+        &self,
+        snapshots: &[lattice_quota::QuotaSnapshot],
+    ) -> Result<bool, ModelError> {
+        let budget = lattice_quota::QuotaBudget {
+            snapshots: snapshots.to_vec(),
+            ..Default::default()
+        };
+        Ok(budget.verify_freshness(&self.client).await?)
     }
 }
 
@@ -371,6 +388,14 @@ pub async fn reconcile(
         .collect();
     let quota_budget =
         lattice_quota::resolve_budget(&quotas, namespace, &name, &ns_labels, &annotations);
+    if !quotas.is_empty() && quota_budget.is_unconstrained() {
+        tracing::warn!(
+            model = %name,
+            namespace = %namespace,
+            "no quota matched this model — running without resource limits"
+        );
+    }
+    let quota_snapshots = quota_budget.snapshots.clone();
 
     let image_providers = resolve_model_image_providers(&model, &ctx.cache);
 
@@ -420,6 +445,22 @@ pub async fn reconcile(
             };
 
             register_graph(&model, &ctx.graph, namespace);
+
+            // Optimistic concurrency: verify quotas haven't changed since budget was resolved
+            if !quota_snapshots.is_empty() {
+                match ctx.kube.verify_quota_freshness(&quota_snapshots).await {
+                    Ok(false) => {
+                        tracing::info!("quota state changed during model compilation, requeueing");
+                        return Err(ModelError::Common(lattice_common::Error::internal(
+                            "quota state changed during compilation, requeue",
+                        )));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to verify quota freshness for model, proceeding");
+                    }
+                    _ => {}
+                }
+            }
 
             if let Err(e) = ctx
                 .kube
@@ -1214,6 +1255,7 @@ mod tests {
         let model = Arc::new(make_minimal_model("my-model"));
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
         mock.expect_apply_compiled_model()
             .returning(|_, _, _| Ok(()));
@@ -1239,6 +1281,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_check_model_serving_status()
             .returning(|_, _| (ModelServingState::Available, None));
         mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
@@ -1264,6 +1307,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_check_model_serving_status()
             .returning(|_, _| (ModelServingState::Failed, None));
         mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
@@ -1292,6 +1336,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_read_model_serving_conditions()
             .returning(|_, _| None);
         mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
@@ -1318,6 +1363,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_apply_compiled_model()
             .returning(|_, _, _| Ok(()));
         mock.expect_cleanup_removed_roles()
@@ -1345,6 +1391,7 @@ mod tests {
         let model = Arc::new(model);
 
         let mut mock = MockModelKubeClient::new();
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock.expect_patch_model_status().returning(|_, _, _| Ok(()));
 
         let ctx = Arc::new(ModelContext::for_testing(Arc::new(mock)));

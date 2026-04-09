@@ -15,7 +15,7 @@ mod budget;
 mod controller;
 mod store;
 
-pub use budget::QuotaBudget;
+pub use budget::{QuotaBudget, QuotaSnapshot};
 pub use controller::{reconcile, QuotaContext};
 pub use store::resolve_budget;
 

@@ -195,7 +195,7 @@ async fn proxy_handler(
                 .to_string(),
             target_path: cluster_name.to_string(),
             source_user: "system:capi-proxy".to_string(),
-            source_groups: vec!["system:masters".to_string()],
+            source_groups: vec!["lattice:capi-proxy".to_string()],
         },
     )
     .await?;

@@ -54,7 +54,7 @@ pub async fn prepare_move_objects(
 
     if graph.is_empty() {
         // Unpause with retries — a paused cluster that stays paused is a silent deadlock
-        retry_unpause(client, namespace).await;
+        retry_unpause(client, namespace).await?;
         return Err(MoveError::Discovery("no objects to move".to_string()));
     }
 
@@ -84,8 +84,9 @@ pub async fn prepare_move_objects(
 /// Unpause with retries to avoid leaving a cluster in a permanently paused state.
 ///
 /// A paused CAPI Cluster that isn't being reconciled is a silent deadlock requiring
-/// manual intervention. We retry aggressively to prevent this.
-async fn retry_unpause(client: &Client, namespace: &str) {
+/// manual intervention. We retry aggressively and return an error if all attempts fail,
+/// so callers can surface the stuck-paused state rather than silently continuing.
+async fn retry_unpause(client: &Client, namespace: &str) -> Result<(), MoveError> {
     let retry_config = RetryConfig {
         max_attempts: 5,
         initial_delay: Duration::from_secs(2),
@@ -93,17 +94,20 @@ async fn retry_unpause(client: &Client, namespace: &str) {
         backoff_multiplier: 2.0,
     };
 
-    if let Err(e) = retry_with_backoff(&retry_config, "unpause cluster after error", || async {
+    retry_with_backoff(&retry_config, "unpause cluster after error", || async {
         unpause_cluster(client, namespace).await
     })
     .await
-    {
+    .map_err(|e| {
         error!(
             namespace = %namespace,
             error = %e,
-            "CRITICAL: Failed to unpause cluster after 5 retries — cluster may be stuck in paused state, manual intervention required"
+            "CRITICAL: Failed to unpause cluster after 5 retries — cluster stuck in paused state"
         );
-    }
+        MoveError::PauseRecovery(format!(
+            "failed to unpause cluster in {namespace} after 5 retries: {e}"
+        ))
+    })
 }
 
 /// Pause Cluster and ClusterClass resources in a namespace
@@ -512,7 +516,7 @@ impl<S: MoveCommandSender> CellMover<S> {
             .ok_or_else(|| MoveError::Discovery("graph not built".to_string()))?;
 
         if graph.is_empty() {
-            retry_unpause(&self.client, &self.config.source_namespace).await;
+            retry_unpause(&self.client, &self.config.source_namespace).await?;
             return Err(MoveError::Discovery("no objects to move".to_string()));
         }
 
@@ -525,7 +529,7 @@ impl<S: MoveCommandSender> CellMover<S> {
         // If streaming failed, unpause source and return error
         if let Err(e) = stream_result {
             warn!(error = %e, "Batch streaming failed, unpausing source");
-            retry_unpause(&self.client, &self.config.source_namespace).await;
+            retry_unpause(&self.client, &self.config.source_namespace).await?;
             return Err(e);
         }
 
@@ -534,7 +538,7 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         if !complete_result.success {
             warn!(error = %complete_result.error, "Agent finalization failed, unpausing source");
-            retry_unpause(&self.client, &self.config.source_namespace).await;
+            retry_unpause(&self.client, &self.config.source_namespace).await?;
             return Err(MoveError::AgentCommunication(complete_result.error));
         }
 
@@ -760,8 +764,10 @@ impl<S: MoveCommandSender> CellMover<S> {
 
         if !errors.is_empty() {
             return Err(MoveError::DeletionFailed(format!(
-                "{} resource(s) failed: {}",
+                "{} of {} resource(s) failed to delete ({} succeeded): {}",
                 errors.len(),
+                uids.len(),
+                deleted,
                 errors.join("; ")
             )));
         }
