@@ -29,7 +29,7 @@ impl TemplateString {
 
     /// Check if this string contains any template placeholders
     pub fn has_placeholders(&self) -> bool {
-        self.0.contains("${") || self.0.contains("{%")
+        self.0.contains("${")
     }
 
     /// Consume and return the inner string
@@ -115,12 +115,6 @@ impl TryFrom<String> for StaticString {
                 reason: "contains ${...} placeholder",
             });
         }
-        if s.contains("{%") {
-            return Err(StaticStringError {
-                value: s,
-                reason: "contains {%...%} block",
-            });
-        }
         Ok(Self(s))
     }
 }
@@ -148,7 +142,6 @@ mod tests {
     #[test]
     fn test_template_string_has_placeholders() {
         assert!(TemplateString::new("${foo}").has_placeholders());
-        assert!(TemplateString::new("{% if x %}").has_placeholders());
         assert!(!TemplateString::new("plain text").has_placeholders());
     }
 
@@ -167,9 +160,10 @@ mod tests {
     }
 
     #[test]
-    fn test_static_string_rejects_block() {
+    fn test_static_string_accepts_block_syntax() {
+        // Block syntax {%...%} is no longer rejected (minijinja removed)
         let result: Result<StaticString, _> = "{% if x %}name{% endif %}".to_string().try_into();
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -23,7 +23,6 @@
 mod context;
 mod engine;
 mod error;
-mod filters;
 mod output;
 mod provisioner;
 mod renderer;
@@ -49,23 +48,13 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // =========================================================================
-    // Story: Score Variable Syntax
-    // =========================================================================
-
     #[test]
     fn test_score_metadata_name() {
         let engine = TemplateEngine::new();
         let ctx = TemplateContext::builder()
             .metadata("my-service", HashMap::new())
             .build();
-
-        assert_eq!(
-            engine
-                .render("${metadata.name}", &ctx)
-                .expect("metadata.name should render successfully"),
-            "my-service"
-        );
+        assert_eq!(engine.render("${metadata.name}", &ctx).unwrap(), "my-service");
     }
 
     #[test]
@@ -73,15 +62,11 @@ mod tests {
         let engine = TemplateEngine::new();
         let mut annotations = HashMap::new();
         annotations.insert("version".to_string(), "1.2.3".to_string());
-
         let ctx = TemplateContext::builder()
             .metadata("my-service", annotations)
             .build();
-
         assert_eq!(
-            engine
-                .render("${metadata.annotations.version}", &ctx)
-                .expect("metadata.annotations.version should render successfully"),
+            engine.render("${metadata.annotations.version}", &ctx).unwrap(),
             "1.2.3"
         );
     }
@@ -99,11 +84,8 @@ mod tests {
                     .build(),
             )
             .build();
-
         assert_eq!(
-            engine
-                .render("${resources.db.host}:${resources.db.port}", &ctx)
-                .expect("resource outputs should render successfully"),
+            engine.render("${resources.db.host}:${resources.db.port}", &ctx).unwrap(),
             "postgres.svc:5432"
         );
     }
@@ -169,35 +151,12 @@ mod tests {
     }
 
     #[test]
-    fn test_lattice_conditional_blocks() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("debug", "true")
-            .build();
-
-        let template = r#"{% if config.debug == "true" %}--debug{% endif %}"#;
-        assert_eq!(
-            engine
-                .render(template, &ctx)
-                .expect("conditional block should render successfully"),
-            "--debug"
-        );
-    }
-
-    // =========================================================================
-    // Story: Strict Undefined Variables
-    // =========================================================================
-
-    #[test]
     fn test_undefined_variable_errors() {
         let engine = TemplateEngine::new();
         let ctx = TemplateContext::builder()
             .metadata("api", HashMap::new())
             .build();
-
-        let result = engine.render("${undefined.var}", &ctx);
-        assert!(result.is_err());
+        assert!(engine.render("${undefined.var}", &ctx).is_err());
     }
 
     #[test]
@@ -206,87 +165,18 @@ mod tests {
         let ctx = TemplateContext::builder()
             .metadata("api", HashMap::new())
             .build();
-
-        let result = engine.render("${resources.missing.host}", &ctx);
-        assert!(result.is_err());
+        assert!(engine.render("${resources.missing.host}", &ctx).is_err());
     }
-
-    // =========================================================================
-    // Story: Filters
-    // =========================================================================
-
-    #[test]
-    fn test_default_filter() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("port", "8080")
-            .build();
-
-        // With value present
-        assert_eq!(
-            engine
-                .render("${config.port | default(\"3000\")}", &ctx)
-                .expect("default filter should render successfully"),
-            "8080"
-        );
-    }
-
-    #[test]
-    fn test_base64_encode_filter() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("secret", "hello")
-            .build();
-
-        assert_eq!(
-            engine
-                .render("${config.secret | base64_encode}", &ctx)
-                .expect("base64_encode filter should render successfully"),
-            "aGVsbG8=" // base64("hello")
-        );
-    }
-
-    #[test]
-    fn test_base64_decode_filter() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("encoded", "aGVsbG8=")
-            .build();
-
-        assert_eq!(
-            engine
-                .render("${config.encoded | base64_decode}", &ctx)
-                .expect("base64_decode filter should render successfully"),
-            "hello"
-        );
-    }
-
-    // =========================================================================
-    // Story: StaticString Rejects Templates
-    // =========================================================================
 
     #[test]
     fn test_static_string_accepts_plain_text() {
         let result: Result<StaticString, _> = "my-service".to_string().try_into();
-        assert!(result.is_ok());
-        assert_eq!(
-            result.expect("static string should be valid").as_str(),
-            "my-service"
-        );
+        assert_eq!(result.unwrap().as_str(), "my-service");
     }
 
     #[test]
     fn test_static_string_rejects_dollar_brace() {
         let result: Result<StaticString, _> = "my-${name}".to_string().try_into();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_static_string_rejects_block_syntax() {
-        let result: Result<StaticString, _> = "{% if x %}foo{% endif %}".to_string().try_into();
         assert!(result.is_err());
     }
 
@@ -439,116 +329,4 @@ mod tests {
         );
     }
 
-    // =========================================================================
-    // Story: Filter Integration Tests
-    // =========================================================================
-
-    #[test]
-    fn test_default_filter_with_undefined_variable() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            // Note: config.missing is NOT defined
-            .build();
-
-        // default filter should return fallback for undefined variable
-        assert_eq!(
-            engine
-                .render("${config.missing | default(\"fallback\")}", &ctx)
-                .expect("default filter with undefined should render fallback"),
-            "fallback"
-        );
-    }
-
-    #[test]
-    fn test_required_filter_with_defined_variable() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("required_value", "present")
-            .build();
-
-        assert_eq!(
-            engine
-                .render("${config.required_value | required}", &ctx)
-                .expect("required filter with defined value should pass"),
-            "present"
-        );
-    }
-
-    #[test]
-    fn test_required_filter_with_undefined_errors() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .build();
-
-        let result = engine.render("${config.missing | required}", &ctx);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_chained_filters() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("name", "MyService")
-            .build();
-
-        // Chain filters: lower then default (default won't apply since value exists)
-        assert_eq!(
-            engine
-                .render("${config.name | lower | default(\"unknown\")}", &ctx)
-                .expect("chained filters should render successfully"),
-            "myservice"
-        );
-    }
-
-    #[test]
-    fn test_base64_filters_in_template() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("secret", "password123")
-            .config("encoded", "cGFzc3dvcmQxMjM=") // base64 of "password123"
-            .build();
-
-        // Encode
-        assert_eq!(
-            engine
-                .render("${config.secret | base64_encode}", &ctx)
-                .expect("base64_encode filter should render successfully"),
-            "cGFzc3dvcmQxMjM="
-        );
-
-        // Decode
-        assert_eq!(
-            engine
-                .render("${config.encoded | base64_decode}", &ctx)
-                .expect("base64_decode filter should render successfully"),
-            "password123"
-        );
-    }
-
-    #[test]
-    fn test_case_filters_in_template() {
-        let engine = TemplateEngine::new();
-        let ctx = TemplateContext::builder()
-            .metadata("api", HashMap::new())
-            .config("name", "MyServiceName")
-            .build();
-
-        assert_eq!(
-            engine
-                .render("${config.name | upper}", &ctx)
-                .expect("upper filter should render successfully"),
-            "MYSERVICENAME"
-        );
-        assert_eq!(
-            engine
-                .render("${config.name | lower}", &ctx)
-                .expect("lower filter should render successfully"),
-            "myservicename"
-        );
-    }
 }

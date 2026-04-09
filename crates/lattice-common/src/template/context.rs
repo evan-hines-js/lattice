@@ -7,7 +7,6 @@
 //! - `${env.*}` - Environment config
 //! - `${config.*}` - Service config
 
-use minijinja::Value;
 use std::collections::HashMap;
 
 /// Template context containing all values available for placeholder resolution
@@ -36,42 +35,39 @@ impl TemplateContext {
         TemplateContextBuilder::default()
     }
 
-    /// Convert to minijinja Value for rendering
-    pub fn to_value(&self) -> Value {
-        let mut map = HashMap::new();
+    /// Convert to a flat `lattice_template::TemplateContext` for the new engine.
+    pub fn to_flat_context(&self) -> lattice_template::TemplateContext {
+        let mut builder = lattice_template::TemplateContext::builder();
 
-        // metadata
-        let mut metadata_map = HashMap::new();
-        metadata_map.insert("name".to_string(), Value::from(self.metadata.name.clone()));
-        metadata_map.insert(
-            "annotations".to_string(),
-            Value::from_iter(self.metadata.annotations.clone()),
-        );
-        map.insert("metadata".to_string(), Value::from_iter(metadata_map));
+        // metadata.name
+        builder = builder.set("metadata.name", &self.metadata.name);
+        for (k, v) in &self.metadata.annotations {
+            builder = builder.set(format!("metadata.annotations.{}", k), v);
+        }
 
-        // resources — normalize hyphens to underscores so minijinja doesn't
-        // interpret `my-db` as subtraction. Templates are also normalized in
-        // TemplateEngine::render() so `${resources.my-db.host}` matches `my_db`.
-        let resources_map: HashMap<String, Value> = self
-            .resources
-            .iter()
-            .map(|(name, outputs)| (name.replace('-', "_"), outputs.to_value()))
-            .collect();
-        map.insert("resources".to_string(), Value::from_iter(resources_map));
+        // resources — flatten each ResourceOutputs into resources.NAME.FIELD
+        for (name, outputs) in &self.resources {
+            let normalized = name.replace('-', "_");
+            for (field, value) in &outputs.outputs {
+                builder = builder.set(format!("resources.{}.{}", normalized, field), value);
+            }
+            for (field, value) in &outputs.sensitive {
+                builder = builder.set(format!("resources.{}.{}", normalized, field), value);
+            }
+        }
 
-        // cluster
-        map.insert(
-            "cluster".to_string(),
-            Value::from_iter(self.cluster.clone()),
-        );
+        // cluster, env, config
+        for (k, v) in &self.cluster {
+            builder = builder.set(format!("cluster.{}", k), v);
+        }
+        for (k, v) in &self.env {
+            builder = builder.set(format!("env.{}", k), v);
+        }
+        for (k, v) in &self.config {
+            builder = builder.set(format!("config.{}", k), v);
+        }
 
-        // env
-        map.insert("env".to_string(), Value::from_iter(self.env.clone()));
-
-        // config
-        map.insert("config".to_string(), Value::from_iter(self.config.clone()));
-
-        Value::from_iter(map)
+        builder.build()
     }
 }
 
@@ -182,25 +178,6 @@ impl ResourceOutputs {
         self.sensitive.contains_key(field)
     }
 
-    /// Convert to minijinja Value for template rendering
-    ///
-    /// Both sensitive and non-sensitive values are merged for rendering.
-    /// Sensitivity tracking happens separately during rendering.
-    pub fn to_value(&self) -> Value {
-        let mut map: HashMap<String, Value> = HashMap::new();
-
-        // Add non-sensitive outputs
-        for (key, value) in &self.outputs {
-            map.insert(key.clone(), Value::from(value.clone()));
-        }
-
-        // Add sensitive outputs (they render the same, but sensitivity is tracked separately)
-        for (key, value) in &self.sensitive {
-            map.insert(key.clone(), Value::from(value.clone()));
-        }
-
-        Value::from_iter(map)
-    }
 }
 
 /// Builder for ResourceOutputs
@@ -324,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_value() {
+    fn test_to_flat_context() {
         let ctx = TemplateContext::builder()
             .metadata("api", HashMap::new())
             .resource(
@@ -336,20 +313,27 @@ mod tests {
             )
             .build();
 
-        let value = ctx.to_value();
-        // Basic sanity check - it should be indexable as a map
-        assert!(!value.is_undefined());
+        let flat = ctx.to_flat_context();
+        assert_eq!(flat.resolve("metadata.name"), Some("api"));
+        assert_eq!(flat.resolve("resources.db.host"), Some("db.svc"));
+        assert_eq!(flat.resolve("resources.db.port"), Some("5432"));
     }
 
     #[test]
-    fn test_to_value_includes_sensitive() {
-        let outputs = ResourceOutputs::builder()
-            .output("host", "db.svc")
-            .sensitive("password", "secret")
+    fn test_to_flat_context_includes_sensitive() {
+        let ctx = TemplateContext::builder()
+            .metadata("api", HashMap::new())
+            .resource(
+                "db",
+                ResourceOutputs::builder()
+                    .output("host", "db.svc")
+                    .sensitive("password", "secret")
+                    .build(),
+            )
             .build();
 
-        let value = outputs.to_value();
-        // Both should be present in the value for template rendering
-        assert!(!value.is_undefined());
+        let flat = ctx.to_flat_context();
+        assert_eq!(flat.resolve("resources.db.host"), Some("db.svc"));
+        assert_eq!(flat.resolve("resources.db.password"), Some("secret"));
     }
 }

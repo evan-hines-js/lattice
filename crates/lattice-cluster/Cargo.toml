@@ -67,9 +67,6 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 time = { workspace = true }
 
-# Templating
-minijinja = { workspace = true }
-
 # Concurrency
 dashmap = { workspace = true }
 parking_lot = { workspace = true }

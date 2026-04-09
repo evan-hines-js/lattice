@@ -6,15 +6,11 @@ use std::fmt;
 #[derive(Debug)]
 pub enum TemplateError {
     /// Template rendering failed
-    Render(minijinja::Error),
+    Render(String),
     /// Template syntax is invalid
     Syntax(String),
     /// Required variable is undefined
     Undefined(String),
-    /// Filter operation failed
-    Filter(String),
-    /// Base64 encoding/decoding failed
-    Base64(String),
     /// Container image "." placeholder has no config value
     MissingImage(String),
     /// Inline access denied because an external service CRD governs this host
@@ -34,8 +30,6 @@ impl fmt::Display for TemplateError {
             Self::Render(e) => write!(f, "template render error: {}", e),
             Self::Syntax(msg) => write!(f, "template syntax error: {}", msg),
             Self::Undefined(var) => write!(f, "undefined variable: {}", var),
-            Self::Filter(msg) => write!(f, "filter error: {}", msg),
-            Self::Base64(msg) => write!(f, "base64 error: {}", msg),
             Self::MissingImage(container) => write!(
                 f,
                 "container '{}' has image: \".\" but no image found in config (expected config.image.{} or config.image)",
@@ -46,20 +40,7 @@ impl fmt::Display for TemplateError {
     }
 }
 
-impl std::error::Error for TemplateError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Render(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<minijinja::Error> for TemplateError {
-    fn from(err: minijinja::Error) -> Self {
-        Self::Render(err)
-    }
-}
+impl std::error::Error for TemplateError {}
 
 #[cfg(test)]
 mod tests {

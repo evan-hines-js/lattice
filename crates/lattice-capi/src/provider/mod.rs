@@ -1295,7 +1295,10 @@ fn generate_rke2_control_plane(
     .with_spec(spec))
 }
 
-/// Load and render the bootstrap script template using minijinja
+/// Load and render the bootstrap script template.
+///
+/// Replaces `{{ endpoint }}`, `{{ cluster_name }}`, `{{ token }}`, and
+/// `{{ ca_cert_path }}` placeholders in the shell script.
 fn render_bootstrap_script(
     endpoint: &str,
     cluster_name: &str,
@@ -1311,21 +1314,11 @@ fn render_bootstrap_script(
         ))
     })?;
 
-    let mut env = minijinja::Environment::new();
-    env.add_template("bootstrap", &template)
-        .map_err(|e| Error::bootstrap(format!("Invalid bootstrap template: {}", e)))?;
-
-    let ctx = minijinja::context! {
-        endpoint => endpoint,
-        cluster_name => cluster_name,
-        token => token,
-        ca_cert_path => ca_cert_path,
-    };
-
-    env.get_template("bootstrap")
-        .map_err(|e| Error::bootstrap(format!("Template not found: {}", e)))?
-        .render(ctx)
-        .map_err(|e| Error::bootstrap(format!("Failed to render bootstrap template: {}", e)))
+    Ok(template
+        .replace("{{ endpoint }}", endpoint)
+        .replace("{{ cluster_name }}", cluster_name)
+        .replace("{{ token }}", token)
+        .replace("{{ ca_cert_path }}", ca_cert_path))
 }
 
 /// Build postKubeadmCommands for agent bootstrap

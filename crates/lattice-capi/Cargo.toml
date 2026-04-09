@@ -32,9 +32,6 @@ thiserror = { workspace = true }
 # Logging
 tracing = { workspace = true }
 
-# Templating
-minijinja = { workspace = true }
-
 # Random
 rand = { workspace = true }
 
