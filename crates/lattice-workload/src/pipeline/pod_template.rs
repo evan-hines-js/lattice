@@ -119,14 +119,15 @@ impl PodTemplateCompiler {
         }
 
         // Check if any container runs as root (UID 0) — this affects pod-level defaults
-        let any_root = workload
-            .containers
-            .values()
-            .any(|c| c.security.as_ref().is_some_and(|s| s.run_as_user == Some(0)))
-            || runtime
-                .sidecars
-                .values()
-                .any(|s| s.security.as_ref().is_some_and(|s| s.run_as_user == Some(0)));
+        let any_root = workload.containers.values().any(|c| {
+            c.security
+                .as_ref()
+                .is_some_and(|s| s.run_as_user == Some(0))
+        }) || runtime.sidecars.values().any(|s| {
+            s.security
+                .as_ref()
+                .is_some_and(|s| s.run_as_user == Some(0))
+        });
 
         let security_context = Some(Self::compile_pod_security_context(runtime, any_root));
 

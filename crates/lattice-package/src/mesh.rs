@@ -65,9 +65,7 @@ mod tests {
     #[test]
     fn builds_mesh_member_from_config() {
         let mesh = PackageMeshConfig {
-            selector: BTreeMap::from([
-                ("app".to_string(), "redis".to_string()),
-            ]),
+            selector: BTreeMap::from([("app".to_string(), "redis".to_string())]),
             ports: vec![PackageMeshPort {
                 name: "redis".to_string(),
                 port: 6379,

@@ -57,10 +57,12 @@ pub(crate) fn parse_directive(
     path: &str,
     name_prefix: &str,
 ) -> Result<SecretDirective, TemplateError> {
-    let obj = value.as_object().ok_or_else(|| TemplateError::InvalidDirective {
-        path: path.to_string(),
-        reason: "$secret value must be an object".to_string(),
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| TemplateError::InvalidDirective {
+            path: path.to_string(),
+            reason: "$secret value must be an object".to_string(),
+        })?;
 
     if obj.is_empty() {
         return Err(TemplateError::InvalidDirective {
@@ -72,13 +74,15 @@ pub(crate) fn parse_directive(
     let mut keys = Vec::with_capacity(obj.len());
 
     for (target_key, ref_value) in obj {
-        let ref_str = ref_value.as_str().ok_or_else(|| TemplateError::InvalidDirective {
-            path: path.to_string(),
-            reason: format!(
-                "{}: value must be a string resource reference like \"${{resource.key}}\"",
-                target_key
-            ),
-        })?;
+        let ref_str = ref_value
+            .as_str()
+            .ok_or_else(|| TemplateError::InvalidDirective {
+                path: path.to_string(),
+                reason: format!(
+                    "{}: value must be a string resource reference like \"${{resource.key}}\"",
+                    target_key
+                ),
+            })?;
 
         let (resource_name, resource_key) =
             parse_resource_ref(ref_str).ok_or_else(|| TemplateError::InvalidDirective {
@@ -170,7 +174,11 @@ mod tests {
         assert_eq!(d.secret_name, "redis-prod-auth-existingsecret");
         assert_eq!(d.keys.len(), 2);
 
-        let pw = d.keys.iter().find(|k| k.target_key == "redis-password").unwrap();
+        let pw = d
+            .keys
+            .iter()
+            .find(|k| k.target_key == "redis-password")
+            .unwrap();
         assert_eq!(pw.resource_name, "redis-creds");
         assert_eq!(pw.resource_key, "password");
     }
@@ -184,7 +192,11 @@ mod tests {
         let d = parse_directive(&val, "secrets.ref", "my-app").unwrap();
         assert_eq!(d.keys.len(), 2);
 
-        let db = d.keys.iter().find(|k| k.target_key == "db-password").unwrap();
+        let db = d
+            .keys
+            .iter()
+            .find(|k| k.target_key == "db-password")
+            .unwrap();
         assert_eq!(db.resource_name, "db-creds");
 
         let tls = d.keys.iter().find(|k| k.target_key == "tls.crt").unwrap();

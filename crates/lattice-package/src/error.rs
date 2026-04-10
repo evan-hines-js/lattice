@@ -11,7 +11,9 @@ pub enum PackageError {
     #[error("template expansion failed: {0}")]
     TemplateExpansion(String),
 
-    #[error("secret resource '{resource}' referenced in values but not declared in resources block")]
+    #[error(
+        "secret resource '{resource}' referenced in values but not declared in resources block"
+    )]
     UndeclaredResource { resource: String },
 
     #[error("secret '{resource}.{key}' not found in synced Secret data")]

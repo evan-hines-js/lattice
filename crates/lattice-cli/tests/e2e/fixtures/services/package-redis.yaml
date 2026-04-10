@@ -1,0 +1,36 @@
+apiVersion: lattice.dev/v1alpha1
+kind: LatticePackage
+metadata:
+  name: podinfo-test
+  namespace: package-test
+spec:
+  chart:
+    repository: oci://ghcr.io/stefanprodan/charts
+    name: podinfo
+    version: "6.11.2"
+  resources:
+    app-creds:
+      type: secret
+      id: podinfo-test-creds
+      params:
+        provider: lattice-local
+        keys:
+          - token
+  values:
+    replicaCount: 1
+    extraEnvs:
+      - name: AUTH_TOKEN_FROM
+        value: /secrets/token
+    extraSecretMounts:
+      - name: app-secrets
+        mountPath: /secrets
+        secretName:
+          $secret:
+            token: "${app-creds.token}"
+    resources:
+      requests:
+        cpu: "50m"
+        memory: 32Mi
+      limits:
+        cpu: "100m"
+        memory: 64Mi

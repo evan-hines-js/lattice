@@ -177,7 +177,6 @@ impl ResourceOutputs {
     pub fn is_sensitive(&self, field: &str) -> bool {
         self.sensitive.contains_key(field)
     }
-
 }
 
 /// Builder for ResourceOutputs

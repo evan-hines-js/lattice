@@ -922,6 +922,8 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
                     EgressTarget::Entity("world".to_string()),
                     vec![DEFAULT_GRPC_PORT, DEFAULT_BOOTSTRAP_PORT],
                 ),
+                // Helm pulls OCI charts from container registries (HTTPS)
+                EgressRule::tcp(EgressTarget::Entity("world".to_string()), vec![443]),
             ],
             allow_peer_traffic: false,
             depends_all: false,

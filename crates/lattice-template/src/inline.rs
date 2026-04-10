@@ -27,11 +27,7 @@ pub(crate) fn parse_secret_inner(inner: &str) -> Option<(String, String, String)
         return None;
     }
 
-    let eso_data_key = format!(
-        "{}_{}",
-        resource.replace('-', "_"),
-        key.replace('-', "_")
-    );
+    let eso_data_key = format!("{}_{}", resource.replace('-', "_"), key.replace('-', "_"));
 
     Some((resource.to_string(), key.to_string(), eso_data_key))
 }

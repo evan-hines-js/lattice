@@ -14,11 +14,9 @@ use lattice_template::SecretDirective;
 
 use crate::error::PackageError;
 
-/// Validated secret reference from a directive key mapping.
+/// A generated ExternalSecret from a $secret directive.
 #[derive(Debug)]
 pub struct ResolvedDirective {
-    /// Name for the generated K8s Secret
-    pub secret_name: String,
     /// ExternalSecret to apply
     pub external_secret: ExternalSecret,
 }
@@ -193,7 +191,6 @@ pub fn generate_external_secrets(
         );
 
         result.push(ResolvedDirective {
-            secret_name: directive.secret_name.clone(),
             external_secret: es,
         });
     }
@@ -224,7 +221,11 @@ mod tests {
         }
     }
 
-    fn make_directive(path: &str, secret_name: &str, mappings: &[(&str, &str, &str)]) -> SecretDirective {
+    fn make_directive(
+        path: &str,
+        secret_name: &str,
+        mappings: &[(&str, &str, &str)],
+    ) -> SecretDirective {
         SecretDirective {
             secret_name: secret_name.to_string(),
             path: path.to_string(),
@@ -299,7 +300,8 @@ mod tests {
             ],
         )];
 
-        let result = generate_external_secrets("myapp", "default", &directives, &resources).unwrap();
+        let result =
+            generate_external_secrets("myapp", "default", &directives, &resources).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].secret_name, "myapp-auth");
         assert_eq!(result[0].external_secret.spec.data.len(), 2);
@@ -308,8 +310,14 @@ mod tests {
     #[test]
     fn generate_mixed_stores_errors() {
         let resources = BTreeMap::from([
-            ("creds-a".to_string(), make_secret_resource("vault-a", "a/creds", &["pw"])),
-            ("creds-b".to_string(), make_secret_resource("vault-b", "b/creds", &["pw"])),
+            (
+                "creds-a".to_string(),
+                make_secret_resource("vault-a", "a/creds", &["pw"]),
+            ),
+            (
+                "creds-b".to_string(),
+                make_secret_resource("vault-b", "b/creds", &["pw"]),
+            ),
         ]);
         let directives = vec![make_directive(
             "auth.secret",

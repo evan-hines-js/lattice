@@ -49,6 +49,7 @@ pub mod multi_hop;
 pub mod node_autoscaling;
 pub mod observability;
 pub mod oidc;
+pub mod package;
 pub mod parent_delete;
 pub mod pivot;
 pub mod proxy;

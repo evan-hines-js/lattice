@@ -89,13 +89,13 @@ pub use observability::{
 pub use oidc_provider::{
     OIDCProvider, OIDCProviderPhase, OIDCProviderSpec, OIDCProviderStatus, RequiredClaim,
 };
-pub use providers::{
-    AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
-    ProxmoxConfig,
-};
 pub use package::{
     ChartRef, LatticePackage, LatticePackageSpec, LatticePackageStatus, PackageMeshConfig,
     PackageMeshPort, PackagePhase,
+};
+pub use providers::{
+    AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
+    ProxmoxConfig,
 };
 pub use quota::{
     LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,

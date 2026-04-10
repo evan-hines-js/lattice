@@ -9,7 +9,6 @@ use crate::crd::{ContainerSpec, FileMount, VolumeMount, WorkloadSpec};
 use crate::graph::ServiceGraph;
 
 use super::context::TemplateContext;
-use super::engine::TemplateEngine;
 use super::error::TemplateError;
 use super::provisioner::{ProvisionerContext, ProvisionerRegistry};
 
@@ -305,7 +304,6 @@ pub fn parse_secret_ref_inner(inner: &str) -> Option<(String, String, String)> {
 
 /// Template renderer for LatticeService specs
 pub struct TemplateRenderer {
-    engine: TemplateEngine,
     registry: ProvisionerRegistry,
 }
 
@@ -315,11 +313,34 @@ impl Default for TemplateRenderer {
     }
 }
 
+/// Render a template string using `lattice_template::expand`.
+///
+/// Secret references (`${secret.*}`) pass through unchanged (Collect mode).
+pub(crate) fn render_template(
+    template: &str,
+    ctx: &TemplateContext,
+) -> Result<String, TemplateError> {
+    if !template.contains("${") {
+        return Ok(template.to_string());
+    }
+    let flat_ctx = ctx.to_flat_context();
+    let mut value = serde_json::Value::String(template.to_string());
+    let opts = lattice_template::ExpandOptions {
+        secret_mode: lattice_template::SecretMode::Collect,
+        name_prefix: String::new(),
+    };
+    lattice_template::expand(&mut value, &flat_ctx, &opts)
+        .map_err(|e| TemplateError::Render(e.to_string()))?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        _ => unreachable!("expand on a string always returns a string"),
+    }
+}
+
 impl TemplateRenderer {
     /// Create a new template renderer
     pub fn new() -> Self {
         Self {
-            engine: TemplateEngine::new(),
             registry: ProvisionerRegistry::new(),
         }
     }
@@ -440,7 +461,7 @@ impl TemplateRenderer {
             // non-secret parts, produce ESO Go template content
             if template_str.contains("${secret.") {
                 let (preprocessed, refs) = extract_secret_refs(template_str, false);
-                let rendered = self.engine.render(&preprocessed, ctx)?;
+                let rendered = render_template(&preprocessed, ctx)?;
                 eso_templated_variables.insert(
                     k.clone(),
                     EsoTemplatedEnvVar {
@@ -452,7 +473,7 @@ impl TemplateRenderer {
             }
 
             // Case 3: No secret refs — render normally
-            let rendered = self.engine.render(template_str, ctx)?;
+            let rendered = render_template(template_str, ctx)?;
             let sensitive = self.is_template_sensitive(template_str, ctx);
             variables.insert(
                 k.clone(),
@@ -590,9 +611,9 @@ impl TemplateRenderer {
             let step1 = template.replace("$${", PLACEHOLDER);
             let step2 = step1.replace("${", "$${"); // Escape single so they stay literal
             let step3 = step2.replace(PLACEHOLDER, "${"); // Double becomes single for expansion
-            self.engine.render(&step3, ctx)
+            render_template(&step3, ctx)
         } else {
-            self.engine.render(template, ctx)
+            render_template(template, ctx)
         }
     }
 
@@ -603,7 +624,7 @@ impl TemplateRenderer {
         ctx: &TemplateContext,
     ) -> Result<RenderedVolume, TemplateError> {
         let source = match &vol.source {
-            Some(s) => Some(self.engine.render(s.as_str(), ctx)?),
+            Some(s) => Some(render_template(s.as_str(), ctx)?),
             None => None,
         };
 

@@ -1412,8 +1412,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         mock.expect_delete_revoked_external_secrets()
             .returning(|_, _| Ok(()));
-        mock.expect_verify_quota_freshness()
-            .returning(|_| Ok(true));
+        mock.expect_verify_quota_freshness().returning(|_| Ok(true));
         mock
     }
 

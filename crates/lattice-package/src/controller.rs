@@ -9,24 +9,21 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument};
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
-    ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase,
-};
-use lattice_common::kube_utils::ApplyOptions;
-use lattice_common::ReconcileError;
+use lattice_common::crd::{ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase};
+use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
 use crate::error::PackageError;
 use crate::secrets;
 
 const FIELD_MANAGER: &str = "lattice-package-controller";
+const FINALIZER: &str = "lattice.dev/package-cleanup";
 const REQUEUE_READY: Duration = Duration::from_secs(60);
-const REQUEUE_PENDING: Duration = Duration::from_secs(5);
 
 /// Context for the package controller.
 pub struct PackageContext {
     pub client: Client,
     pub cedar: Arc<PolicyEngine>,
-    /// Directory for caching pulled helm charts
+    pub registry: Arc<CrdRegistry>,
     pub chart_cache_dir: String,
 }
 
@@ -45,9 +42,30 @@ pub async fn reconcile(
 ) -> Result<Action, ReconcileError> {
     let name = package.name_any();
     let namespace = package.namespace().unwrap_or_default();
+
+    // Handle deletion — uninstall Helm release and clean up ExternalSecrets
+    if package.metadata.deletion_timestamp.is_some() {
+        return handle_deletion(&package, &name, &namespace, &ctx).await;
+    }
+
+    // Ensure finalizer is present
+    if !has_finalizer(&package) {
+        add_finalizer(&name, &namespace, &ctx.client).await?;
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+
+    // Skip if already Ready and generation hasn't changed
+    if let Some(ref status) = package.status {
+        if status.phase == PackagePhase::Ready
+            && status.observed_generation == package.metadata.generation
+        {
+            return Ok(Action::requeue(REQUEUE_READY));
+        }
+    }
+
     info!("reconciling package");
 
-    // Step 1: Validate
+    // Validate
     if let Err(e) = package.spec.validate() {
         update_status(
             &ctx.client,
@@ -55,35 +73,24 @@ pub async fn reconcile(
             &namespace,
             PackagePhase::Failed,
             Some(format!("Validation failed: {}", e)),
-            None,
+            package.metadata.generation,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
-    match compile_and_apply(&package, &name, &namespace, &ctx).await {
-        Ok(applied) => {
-            info!(
-                resources = applied.resource_count,
-                version = %applied.chart_version,
-                "package applied"
-            );
+    match compile_and_install(&package, &name, &namespace, &ctx).await {
+        Ok(version) => {
+            info!(version = %version, "package installed/upgraded");
             let mut status = LatticePackageStatus::with_phase(PackagePhase::Ready);
-            status.chart_version = Some(applied.chart_version);
-            status.applied_hash = Some(applied.manifest_hash);
-            status.resource_count = Some(applied.resource_count);
+            status.chart_version = Some(version.clone());
             status.observed_generation = package.metadata.generation;
-            status.message = Some(format!(
-                "{} {} applied ({} resources)",
-                package.spec.chart.name,
-                package.spec.chart.version,
-                applied.resource_count,
-            ));
+            status.message = Some(format!("{} {} installed", package.spec.chart.name, version,));
             status.set_condition(
                 "Ready",
                 ConditionStatus::True,
-                "Applied",
-                "All manifests applied",
+                "Installed",
+                "Helm release installed",
             );
             patch_status(&ctx.client, &name, &namespace, &status).await?;
             Ok(Action::requeue(REQUEUE_READY))
@@ -109,23 +116,20 @@ pub async fn reconcile(
     }
 }
 
-struct AppliedPackage {
-    chart_version: String,
-    manifest_hash: String,
-    resource_count: u32,
-}
-
-async fn compile_and_apply(
+async fn compile_and_install(
     package: &LatticePackage,
     name: &str,
     namespace: &str,
     ctx: &PackageContext,
-) -> Result<AppliedPackage, PackageError> {
+) -> Result<String, PackageError> {
     let spec = &package.spec;
     let chart = &spec.chart;
 
-    // Step 2: Expand values (collect mode) — find $secret directives
-    let mut values = spec.values.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+    // Step 1: Expand values (collect mode) — find $secret directives
+    let mut values = spec
+        .values
+        .clone()
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     let template_ctx = lattice_template::TemplateContext::builder()
         .set("metadata.name", name)
         .set("metadata.namespace", namespace)
@@ -145,21 +149,20 @@ async fn compile_and_apply(
             .map(|r| format!("${{secret.{}.{}}}", r.resource_name, r.key))
             .collect();
         return Err(PackageError::Validation(format!(
-            "LatticePackage does not support inline ${{secret.X.Y}} refs in values strings. \
+            "LatticePackage does not support inline ${{secret.X.Y}} refs. \
              Use $secret directives instead. Found: {}",
             refs.join(", ")
         )));
     }
 
     if !expansion.directives.is_empty() {
-        // Step 3: Validate directive refs against resources block
-        let referenced =
-            secrets::validate_directive_refs(&expansion.directives, &spec.resources)?;
+        // Step 2: Validate directive refs against resources block
+        let referenced = secrets::validate_directive_refs(&expansion.directives, &spec.resources)?;
 
-        // Step 4: Cedar authorize — only referenced resources
+        // Step 3: Cedar authorize — only referenced resources
         secrets::authorize(&ctx.cedar, name, namespace, &referenced, &spec.resources).await?;
 
-        // Step 5: Generate + apply ExternalSecrets
+        // Step 4: Generate + apply ExternalSecrets
         let resolved = secrets::generate_external_secrets(
             name,
             namespace,
@@ -168,50 +171,33 @@ async fn compile_and_apply(
         )?;
 
         if !resolved.is_empty() {
-            update_status(
-                &ctx.client,
-                name,
-                namespace,
-                PackagePhase::Pending,
-                Some("Applying ExternalSecrets".to_string()),
-                None,
-            )
-            .await
-            .ok();
-
+            let es_ar = ctx
+                .registry
+                .resolve(CrdKind::ExternalSecret)
+                .await
+                .map_err(|e| {
+                    PackageError::Compilation(format!("resolve ExternalSecret CRD: {}", e))
+                })?
+                .ok_or_else(|| {
+                    PackageError::Compilation("ExternalSecret CRD not installed".to_string())
+                })?;
             let params = PatchParams::apply(FIELD_MANAGER).force();
             for r in &resolved {
-                let es_json = serde_json::to_value(&r.external_secret)
-                    .map_err(|e| PackageError::Compilation(format!("serialize ExternalSecret: {}", e)))?;
-                let api: Api<kube::api::DynamicObject> = Api::namespaced_with(
-                    ctx.client.clone(),
-                    namespace,
-                    &lattice_common::kube_utils::build_api_resource(
-                        "external-secrets.io/v1beta1",
-                        "ExternalSecret",
-                    ),
-                );
-                let name = r.external_secret.metadata.name.as_str();
-                api.patch(name, &params, &Patch::Apply(&es_json))
+                let es_json = serde_json::to_value(&r.external_secret).map_err(|e| {
+                    PackageError::Compilation(format!("serialize ExternalSecret: {}", e))
+                })?;
+                let api: Api<kube::api::DynamicObject> =
+                    Api::namespaced_with(ctx.client.clone(), namespace, &es_ar);
+                let es_name = r.external_secret.metadata.name.as_str();
+                api.patch(es_name, &params, &Patch::Apply(&es_json))
                     .await
-                    .map_err(|e| PackageError::Kube(e))?;
-                debug!(external_secret = %name, "applied ExternalSecret");
+                    .map_err(PackageError::Kube)?;
+                debug!(external_secret = %es_name, "applied ExternalSecret");
             }
         }
     }
 
-    // Step 6: Helm template
-    update_status(
-        &ctx.client,
-        name,
-        namespace,
-        PackagePhase::Rendering,
-        Some(format!("Rendering {} v{}", chart.name, chart.version)),
-        None,
-    )
-    .await
-    .ok();
-
+    // Step 5: Pull chart
     let chart_path = crate::helm::pull_chart(
         &chart.repository,
         &chart.name,
@@ -219,98 +205,37 @@ async fn compile_and_apply(
         std::path::Path::new(&ctx.chart_cache_dir),
     )?;
 
-    let target_ns = spec
-        .target_namespace
-        .as_deref()
-        .unwrap_or(namespace);
+    let target_ns = spec.target_namespace.as_deref().unwrap_or(namespace);
 
     let values_json = serde_json::to_string_pretty(&values)
         .map_err(|e| PackageError::Compilation(format!("serialize values: {}", e)))?;
 
-    let rendered = crate::helm::template(
+    // Step 6: Helm install/upgrade
+    crate::helm::install_or_upgrade(
         name,
         &chart_path,
         target_ns,
         &values_json,
+        spec.create_namespace,
         spec.skip_crds,
+        spec.timeout.as_deref(),
     )?;
 
-    // Compute manifest hash for drift detection
-    let hash_bytes = lattice_common::kube_utils::sha256(rendered.as_bytes());
-    let manifest_hash: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-
-    // Check for drift — skip apply if unchanged
-    if let Some(ref status) = package.status {
-        if status.phase == PackagePhase::Ready {
-            if let Some(ref existing_hash) = status.applied_hash {
-                if *existing_hash == manifest_hash {
-                    debug!("manifest hash unchanged, skipping apply");
-                    return Ok(AppliedPackage {
-                        chart_version: chart.version.clone(),
-                        manifest_hash,
-                        resource_count: status.resource_count.unwrap_or(0),
-                    });
-                }
-            }
-        }
-    }
-
-    // Step 7: Server-side apply rendered manifests
-    update_status(
-        &ctx.client,
-        name,
-        namespace,
-        PackagePhase::Applying,
-        Some("Applying rendered manifests".to_string()),
-        None,
-    )
-    .await
-    .ok();
-
-    // Split multi-doc YAML into individual documents for apply_manifests
-    let manifests: Vec<String> = rendered
-        .split("\n---")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "---")
-        .collect();
-
-    if spec.create_namespace {
-        lattice_common::kube_utils::ensure_namespace(
-            &ctx.client,
-            target_ns,
-            None,
-            FIELD_MANAGER,
-        )
-        .await?;
-    }
-
-    let apply_opts = ApplyOptions {
-        skip_missing_crds: spec.skip_crds,
-    };
-    lattice_common::kube_utils::apply_manifests(&ctx.client, &manifests, &apply_opts)
-        .await
-        .map_err(PackageError::Common)?;
-
-    let resource_count = manifests.len();
-    info!(
-        resources = resource_count,
-        hash = %manifest_hash,
-        "manifests applied"
-    );
-
-    // Step 8: Apply MeshMember if mesh config is set
+    // Step 7: Apply MeshMember if mesh config is set
     if let Some(ref mesh) = spec.mesh {
+        let mm_ar = ctx
+            .registry
+            .resolve(CrdKind::MeshMember)
+            .await
+            .map_err(|e| PackageError::Compilation(format!("resolve MeshMember CRD: {}", e)))?
+            .ok_or_else(|| {
+                PackageError::Compilation("LatticeMeshMember CRD not installed".to_string())
+            })?;
         let member = crate::mesh::build_mesh_member(name, target_ns, mesh);
         let member_json = serde_json::to_value(&member)
             .map_err(|e| PackageError::Compilation(format!("serialize MeshMember: {}", e)))?;
-        let mm_api: Api<kube::api::DynamicObject> = Api::namespaced_with(
-            ctx.client.clone(),
-            target_ns,
-            &lattice_common::kube_utils::build_api_resource(
-                "lattice.dev/v1alpha1",
-                "LatticeMeshMember",
-            ),
-        );
+        let mm_api: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(ctx.client.clone(), target_ns, &mm_ar);
         let params = PatchParams::apply(FIELD_MANAGER).force();
         mm_api
             .patch(name, &params, &Patch::Apply(&member_json))
@@ -319,12 +244,135 @@ async fn compile_and_apply(
         debug!("applied MeshMember");
     }
 
-    Ok(AppliedPackage {
-        chart_version: chart.version.clone(),
-        manifest_hash,
-        resource_count: resource_count as u32,
-    })
+    Ok(chart.version.clone())
 }
+
+// =============================================================================
+// Deletion handling
+// =============================================================================
+
+async fn handle_deletion(
+    package: &LatticePackage,
+    name: &str,
+    namespace: &str,
+    ctx: &PackageContext,
+) -> Result<Action, ReconcileError> {
+    if !has_finalizer(package) {
+        return Ok(Action::await_change());
+    }
+
+    info!("deleting package — uninstalling Helm release");
+
+    let target_ns = package
+        .spec
+        .target_namespace
+        .as_deref()
+        .unwrap_or(namespace);
+
+    // Uninstall Helm release (deletes all chart-managed resources)
+    if let Err(e) = crate::helm::uninstall(name, target_ns) {
+        error!(error = %e, "helm uninstall failed");
+        // Don't block finalizer removal — the release may already be gone
+    }
+
+    // Delete ExternalSecrets owned by this package
+    if let Ok(Some(es_ar)) = ctx.registry.resolve(CrdKind::ExternalSecret).await {
+        delete_owned_resources(&ctx.client, namespace, name, &es_ar).await;
+    }
+
+    // Delete MeshMember if it exists
+    if let Ok(Some(mm_ar)) = ctx.registry.resolve(CrdKind::MeshMember).await {
+        delete_owned_resources(&ctx.client, target_ns, name, &mm_ar).await;
+    }
+
+    // Remove finalizer
+    remove_finalizer(name, namespace, &ctx.client).await?;
+    info!("package cleanup complete");
+
+    Ok(Action::await_change())
+}
+
+/// Delete resources labeled with the package owner label.
+async fn delete_owned_resources(
+    client: &Client,
+    namespace: &str,
+    owner: &str,
+    ar: &kube::discovery::ApiResource,
+) {
+    let api: Api<kube::api::DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
+
+    let label_selector = format!("{}={}", lattice_common::LABEL_SERVICE_OWNER, owner);
+    let lp = kube::api::ListParams::default().labels(&label_selector);
+
+    match api.list(&lp).await {
+        Ok(list) => {
+            for item in &list.items {
+                if let Some(item_name) = &item.metadata.name {
+                    let _ = api.delete(item_name, &Default::default()).await;
+                    debug!(kind = %ar.kind, name = %item_name, "deleted owned resource");
+                }
+            }
+        }
+        Err(e) => {
+            debug!(kind = %ar.kind, error = %e, "failed to list owned resources for cleanup (may not exist)");
+        }
+    }
+}
+
+// =============================================================================
+// Finalizer helpers
+// =============================================================================
+
+fn has_finalizer(package: &LatticePackage) -> bool {
+    package
+        .metadata
+        .finalizers
+        .as_ref()
+        .map(|f| f.contains(&FINALIZER.to_string()))
+        .unwrap_or(false)
+}
+
+async fn add_finalizer(name: &str, namespace: &str, client: &Client) -> Result<(), ReconcileError> {
+    let api: Api<LatticePackage> = Api::namespaced(client.clone(), namespace);
+    let patch = serde_json::json!({
+        "metadata": {
+            "finalizers": [FINALIZER]
+        }
+    });
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+    debug!("added finalizer");
+    Ok(())
+}
+
+async fn remove_finalizer(
+    name: &str,
+    namespace: &str,
+    client: &Client,
+) -> Result<(), ReconcileError> {
+    let api: Api<LatticePackage> = Api::namespaced(client.clone(), namespace);
+    let patch = serde_json::json!({
+        "metadata": {
+            "finalizers": null
+        }
+    });
+    api.patch(
+        name,
+        &PatchParams::apply(FIELD_MANAGER),
+        &Patch::Merge(&patch),
+    )
+    .await?;
+    debug!("removed finalizer");
+    Ok(())
+}
+
+// =============================================================================
+// Status helpers
+// =============================================================================
 
 async fn update_status(
     client: &Client,

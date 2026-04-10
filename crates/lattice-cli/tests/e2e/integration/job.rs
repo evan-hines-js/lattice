@@ -94,10 +94,7 @@ async fn test_vcjob_created(kubeconfig: &str) -> Result<(), String> {
     let tasks = vcjob["spec"]["tasks"]
         .as_array()
         .ok_or("VCJob spec.tasks is not an array")?;
-    let task_names: Vec<&str> = tasks
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let task_names: Vec<&str> = tasks.iter().filter_map(|t| t["name"].as_str()).collect();
     if !task_names.contains(&"master") || !task_names.contains(&"worker") {
         return Err(format!(
             "Expected VCJob tasks 'master' and 'worker', got: {:?}",
@@ -106,9 +103,7 @@ async fn test_vcjob_created(kubeconfig: &str) -> Result<(), String> {
     }
 
     // Verify scheduler is volcano
-    let scheduler = vcjob["spec"]["schedulerName"]
-        .as_str()
-        .unwrap_or("unset");
+    let scheduler = vcjob["spec"]["schedulerName"].as_str().unwrap_or("unset");
     if scheduler != "volcano" {
         return Err(format!(
             "Expected schedulerName 'volcano', got: '{scheduler}'"
@@ -365,9 +360,7 @@ async fn test_vccronjob_created(kubeconfig: &str) -> Result<(), String> {
     let cronjob: serde_json::Value = serde_json::from_str(&cronjob_json)
         .map_err(|e| format!("Failed to parse VCCronJob JSON: {e}"))?;
 
-    let schedule = cronjob["spec"]["schedule"]
-        .as_str()
-        .unwrap_or("unset");
+    let schedule = cronjob["spec"]["schedule"].as_str().unwrap_or("unset");
     if schedule != "*/5 * * * *" {
         return Err(format!(
             "Expected schedule '*/5 * * * *', got: '{schedule}'"
@@ -387,10 +380,7 @@ async fn test_vccronjob_created(kubeconfig: &str) -> Result<(), String> {
     let tasks = cronjob["spec"]["jobTemplate"]["spec"]["tasks"]
         .as_array()
         .ok_or("VCCronJob jobTemplate.spec.tasks is not an array")?;
-    let task_names: Vec<&str> = tasks
-        .iter()
-        .filter_map(|t| t["name"].as_str())
-        .collect();
+    let task_names: Vec<&str> = tasks.iter().filter_map(|t| t["name"].as_str()).collect();
     if !task_names.contains(&"worker") {
         return Err(format!(
             "Expected VCCronJob jobTemplate task 'worker', got: {task_names:?}"

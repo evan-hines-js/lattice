@@ -187,6 +187,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // LatticePackage (Helm chart with $secret directive)
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Package",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::package::run_package_tests(&kc).await
+            }),
+        ));
+    }
+
     // Vault secrets tests (Vault KV v2 ESO backend — skips if Vault not available)
     {
         let kc = ctx.require_workload()?.to_string();

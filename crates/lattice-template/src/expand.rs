@@ -78,17 +78,14 @@ fn walk(
             if !s.contains("${") {
                 return Ok(()); // fast path
             }
-            let expanded =
-                expand_string(s, ctx, &opts.secret_mode, path, &mut result.inline_refs)?;
+            let expanded = expand_string(s, ctx, &opts.secret_mode, path, &mut result.inline_refs)?;
             *s = expanded;
         }
 
         Value::Object(map) => {
             // Check for $secret directive
             if map.contains_key("$secret") {
-                let directive_val = map
-                    .get("$secret")
-                    .expect("just checked contains_key");
+                let directive_val = map.get("$secret").expect("just checked contains_key");
                 let d = directive::parse_directive(directive_val, path, &opts.name_prefix)?;
                 *value = Value::String(d.secret_name.clone());
                 result.directives.push(d);
@@ -147,19 +144,22 @@ fn expand_string(
         result.push_str(&remaining[..pos]);
 
         let after = &remaining[pos + 2..];
-        let end = after.find('}').ok_or_else(|| TemplateError::UnclosedPlaceholder {
-            path: path.to_string(),
-        })?;
+        let end = after
+            .find('}')
+            .ok_or_else(|| TemplateError::UnclosedPlaceholder {
+                path: path.to_string(),
+            })?;
         let expr = &after[..end];
         remaining = &after[end + 1..];
 
         if let Some(inner) = expr.strip_prefix("secret.") {
             // Secret reference
-            let (resource, key, eso_key) =
-                inline::parse_secret_inner(inner).ok_or_else(|| TemplateError::InvalidSecretRef {
+            let (resource, key, eso_key) = inline::parse_secret_inner(inner).ok_or_else(|| {
+                TemplateError::InvalidSecretRef {
                     inner: inner.to_string(),
                     path: path.to_string(),
-                })?;
+                }
+            })?;
 
             refs.push(InlineSecretRef {
                 path: path.to_string(),
@@ -205,10 +205,12 @@ fn expand_string(
             } else {
                 expr
             };
-            let value = ctx.resolve(lookup).ok_or_else(|| TemplateError::Unresolved {
-                expr: expr.to_string(),
-                path: path.to_string(),
-            })?;
+            let value = ctx
+                .resolve(lookup)
+                .ok_or_else(|| TemplateError::Unresolved {
+                    expr: expr.to_string(),
+                    path: path.to_string(),
+                })?;
             result.push_str(value);
         }
     }
@@ -411,10 +413,7 @@ mod tests {
         let ctx = empty_ctx();
         let mut val = json!("postgres://${secret.db.user}:${secret.db.pass}@host");
         let exp = expand(&mut val, &ctx, &eso_opts()).unwrap();
-        assert_eq!(
-            val,
-            json!("postgres://{{ .db_user }}:{{ .db_pass }}@host")
-        );
+        assert_eq!(val, json!("postgres://{{ .db_user }}:{{ .db_pass }}@host"));
         assert_eq!(exp.inline_refs.len(), 2);
     }
 
@@ -487,7 +486,11 @@ mod tests {
         );
         assert_eq!(exp.directives.len(), 1);
         assert_eq!(exp.directives[0].keys.len(), 2);
-        let pw = exp.directives[0].keys.iter().find(|k| k.target_key == "redis-password").unwrap();
+        let pw = exp.directives[0]
+            .keys
+            .iter()
+            .find(|k| k.target_key == "redis-password")
+            .unwrap();
         assert_eq!(pw.resource_name, "redis-creds");
         assert_eq!(pw.resource_key, "password");
     }
@@ -567,7 +570,10 @@ mod tests {
         assert_eq!(val["name"], json!("redis-prod"));
         assert_eq!(val["replicas"], json!("3"));
         assert!(val["auth"]["existingSecret"].is_string());
-        assert_eq!(val["env"]["REDIS_URL"], json!("redis://redis-prod.svc:6379"));
+        assert_eq!(
+            val["env"]["REDIS_URL"],
+            json!("redis://redis-prod.svc:6379")
+        );
         assert_eq!(val["unchanged"], json!(42));
         assert_eq!(val["also_unchanged"], json!(true));
         assert!(val["null_field"].is_null());

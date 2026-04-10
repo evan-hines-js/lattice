@@ -77,9 +77,7 @@ impl QuotaBudget {
             if let Some(rv) = quota.metadata.resource_version.as_deref() {
                 budget.snapshots.push(QuotaSnapshot {
                     name: quota.name_any(),
-                    namespace: quota
-                        .namespace()
-                        .unwrap_or_default(),
+                    namespace: quota.namespace().unwrap_or_default(),
                     resource_version: rv.to_string(),
                 });
             }
@@ -192,11 +190,7 @@ impl QuotaBudget {
             let api: Api<LatticeQuota> = Api::namespaced(client.clone(), &snap.namespace);
             match api.get_opt(&snap.name).await? {
                 Some(quota) => {
-                    let current_rv = quota
-                        .metadata
-                        .resource_version
-                        .as_deref()
-                        .unwrap_or("");
+                    let current_rv = quota.metadata.resource_version.as_deref().unwrap_or("");
                     if current_rv != snap.resource_version {
                         return Ok(false);
                     }

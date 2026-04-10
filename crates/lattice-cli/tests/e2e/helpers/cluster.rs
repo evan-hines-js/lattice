@@ -785,7 +785,10 @@ pub async fn get_or_create_proxy(
                 return Ok((url.to_string(), None));
             }
             if attempt < 3 {
-                info!("[Helpers] Proxy health check attempt {}/3 failed, retrying...", attempt);
+                info!(
+                    "[Helpers] Proxy health check attempt {}/3 failed, retrying...",
+                    attempt
+                );
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }

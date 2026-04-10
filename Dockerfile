@@ -104,6 +104,9 @@ RUN microdnf install -y \
 # Copy Lattice operator binary (manifests are embedded at build time)
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
 
+# Copy Helm binary (built from source with FIPS in go-builder stage)
+COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
+
 # Copy CAPI providers downloaded by build.rs during compilation
 COPY --from=rust-builder /app/test-providers /providers
 

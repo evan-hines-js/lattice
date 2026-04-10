@@ -31,8 +31,8 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
 use lattice_common::crd::{
-    CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticeQuota,
-    LatticeService, OIDCProvider,
+    CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
+    LatticeQuota, LatticeService, OIDCProvider,
 };
 use lattice_common::graph::ServiceGraph;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
@@ -448,6 +448,41 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                         lattice_quota::reconcile,
                         ctx,
                         "LatticeQuota",
+                    )
+                    .await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            }
+        },
+    ));
+
+    // LatticePackage (Helm chart lifecycle with secret injection)
+    tokio::spawn(controller_runner::leader_controller(
+        client.clone(),
+        pod_name.clone(),
+        "package",
+        cancel.clone(),
+        false,
+        {
+            let client = client.clone();
+            let cedar = cedar.clone();
+            move || {
+                let client = client.clone();
+                let cedar = cedar.clone();
+                Box::pin(async move {
+                    wait_for_api_ready_for::<LatticePackage>(&client).await;
+                    let registry = Arc::new(CrdRegistry::new(client.clone()).await);
+                    let ctx = Arc::new(lattice_package::PackageContext {
+                        client: client.clone(),
+                        cedar,
+                        registry,
+                        chart_cache_dir: std::env::var("LATTICE_CHART_CACHE_DIR")
+                            .unwrap_or_else(|_| "/tmp/lattice-charts".to_string()),
+                    });
+                    controller_runner::simple_controller(
+                        Api::<LatticePackage>::all(client),
+                        lattice_package::reconcile,
+                        ctx,
+                        "LatticePackage",
                     )
                     .await;
                 }) as Pin<Box<dyn Future<Output = ()> + Send>>

@@ -27,16 +27,12 @@ use super::ResourceSpec;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PackagePhase {
-    /// Waiting for secrets to sync
+    /// Initial state, not yet reconciled
     #[default]
     Pending,
-    /// Secrets resolved, rendering chart
-    Rendering,
-    /// Applying rendered manifests
-    Applying,
-    /// All manifests applied and healthy
+    /// Helm release installed and healthy
     Ready,
-    /// Chart pull, render, apply, or authorization failed
+    /// Chart pull, install, or authorization failed
     Failed,
 }
 
@@ -44,8 +40,6 @@ impl std::fmt::Display for PackagePhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pending => write!(f, "Pending"),
-            Self::Rendering => write!(f, "Rendering"),
-            Self::Applying => write!(f, "Applying"),
             Self::Ready => write!(f, "Ready"),
             Self::Failed => write!(f, "Failed"),
         }
@@ -86,6 +80,7 @@ pub struct LatticePackageSpec {
     /// Each directive maps target keys to resources via `${resource.key}`.
     /// Processed by `lattice_template::expand()`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::crd::preserve_unknown_fields")]
     pub values: Option<serde_json::Value>,
 
     /// Secret resources referenced by `$secret` directives in `values`.
@@ -194,14 +189,6 @@ pub struct LatticePackageStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chart_version: Option<String>,
 
-    /// SHA-256 hash of the rendered manifests for drift detection
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied_hash: Option<String>,
-
-    /// Number of K8s resources applied
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resource_count: Option<u32>,
-
     /// Status conditions
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
@@ -260,7 +247,13 @@ impl LatticePackageStatus {
     }
 
     /// Set a condition on the status
-    pub fn set_condition(&mut self, type_: &str, status: ConditionStatus, reason: &str, message: &str) {
+    pub fn set_condition(
+        &mut self,
+        type_: &str,
+        status: ConditionStatus,
+        reason: &str,
+        message: &str,
+    ) {
         // Remove existing condition of the same type
         self.conditions.retain(|c| c.type_ != type_);
         self.conditions
@@ -394,8 +387,6 @@ values:
     #[test]
     fn phase_display() {
         assert_eq!(PackagePhase::Pending.to_string(), "Pending");
-        assert_eq!(PackagePhase::Rendering.to_string(), "Rendering");
-        assert_eq!(PackagePhase::Applying.to_string(), "Applying");
         assert_eq!(PackagePhase::Ready.to_string(), "Ready");
         assert_eq!(PackagePhase::Failed.to_string(), "Failed");
     }
@@ -403,11 +394,21 @@ values:
     #[test]
     fn status_set_condition() {
         let mut status = LatticePackageStatus::default();
-        status.set_condition("SecretsReady", ConditionStatus::True, "Synced", "All secrets synced");
+        status.set_condition(
+            "SecretsReady",
+            ConditionStatus::True,
+            "Synced",
+            "All secrets synced",
+        );
         assert_eq!(status.conditions.len(), 1);
 
         // Setting same type replaces
-        status.set_condition("SecretsReady", ConditionStatus::False, "Failed", "Sync failed");
+        status.set_condition(
+            "SecretsReady",
+            ConditionStatus::False,
+            "Failed",
+            "Sync failed",
+        );
         assert_eq!(status.conditions.len(), 1);
         assert_eq!(status.conditions[0].reason, "Failed");
     }

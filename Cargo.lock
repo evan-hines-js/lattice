@@ -3141,6 +3141,7 @@ dependencies = [
  "lattice-job",
  "lattice-mesh-member",
  "lattice-model",
+ "lattice-package",
  "lattice-proto",
  "lattice-quota",
  "lattice-secret-provider",
