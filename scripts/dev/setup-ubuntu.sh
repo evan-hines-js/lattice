@@ -135,6 +135,19 @@ fi
 curl -fsSL https://claude.ai/install.sh | bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 
+# ---- DNS resolver for e2e.internal zone ----
+echo "=== Configuring DNS resolver for e2e.internal ==="
+PIHOLE_IP="${LATTICE_PIHOLE_RESOLVER:-10.0.0.131:5353}"
+mkdir -p /etc/systemd/resolved.conf.d
+cat > /etc/systemd/resolved.conf.d/pihole.conf <<EOF
+[Resolve]
+DNS=${PIHOLE_IP}
+DNSOverTLS=no
+Domains=~e2e.internal
+EOF
+systemctl restart systemd-resolved
+echo "DNS: e2e.internal queries routed to ${PIHOLE_IP}"
+
 # ---- Summary ----
 echo
 echo "=== Setup complete ==="
