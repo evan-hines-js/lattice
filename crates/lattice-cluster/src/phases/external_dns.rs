@@ -214,7 +214,7 @@ fn build_cluster_role(name: &str) -> Value {
         "rules": [
             {
                 "apiGroups": [""],
-                "resources": ["services", "endpoints", "pods", "nodes", "namespaces"],
+                "resources": ["services", "endpoints", "nodes", "namespaces"],
                 "verbs": ["get", "list", "watch"]
             },
             {
@@ -266,7 +266,6 @@ fn common_args(cluster_name: &str) -> Vec<String> {
         "--interval=30s".to_string(),
         "--source=gateway-httproute".to_string(),
         "--source=gateway-grpcroute".to_string(),
-        "--source=service".to_string(),
     ]
 }
 
@@ -628,8 +627,6 @@ mod tests {
         assert!(args.contains(&"--txt-owner-id=lattice-test-cluster"));
         assert!(args.contains(&"--source=gateway-httproute"));
         assert!(args.contains(&"--source=gateway-grpcroute"));
-        assert!(args.contains(&"--source=gateway-tcproute"));
-        assert!(args.contains(&"--source=service"));
 
         let env_names = deployment_env(dep);
         assert!(env_names.contains(&"EXTERNAL_DNS_PIHOLE_PASSWORD"));
