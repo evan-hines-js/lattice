@@ -214,17 +214,12 @@ fn build_cluster_role(name: &str) -> Value {
         "rules": [
             {
                 "apiGroups": [""],
-                "resources": ["services", "endpoints", "nodes", "namespaces"],
+                "resources": ["namespaces"],
                 "verbs": ["get", "list", "watch"]
             },
             {
                 "apiGroups": ["gateway.networking.k8s.io"],
-                "resources": ["gateways", "httproutes", "grpcroutes", "tcproutes"],
-                "verbs": ["get", "list", "watch"]
-            },
-            {
-                "apiGroups": ["extensions", "networking.k8s.io"],
-                "resources": ["ingresses"],
+                "resources": ["gateways", "httproutes", "grpcroutes"],
                 "verbs": ["get", "list", "watch"]
             }
         ]
@@ -813,7 +808,7 @@ mod tests {
 
         let cr = &manifests[1];
         let rules = cr["rules"].as_array().unwrap();
-        assert_eq!(rules.len(), 3);
+        assert_eq!(rules.len(), 2);
 
         let core_resources: Vec<&str> = rules[0]["resources"]
             .as_array()
@@ -821,9 +816,6 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert!(core_resources.contains(&"services"));
-        assert!(core_resources.contains(&"endpoints"));
-        assert!(core_resources.contains(&"nodes"));
         assert!(core_resources.contains(&"namespaces"));
 
         let gateway_resources: Vec<&str> = rules[1]["resources"]
@@ -835,15 +827,6 @@ mod tests {
         assert!(gateway_resources.contains(&"gateways"));
         assert!(gateway_resources.contains(&"httproutes"));
         assert!(gateway_resources.contains(&"grpcroutes"));
-        assert!(gateway_resources.contains(&"tcproutes"));
-
-        let ingress_resources: Vec<&str> = rules[2]["resources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(ingress_resources.contains(&"ingresses"));
     }
 
     #[test]
