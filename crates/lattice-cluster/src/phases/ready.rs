@@ -772,39 +772,24 @@ async fn reconcile_dns_forwarding(
             Error::internal(format!("failed to patch CoreDNS ConfigMap '{cm_name}': {e}"))
         })?;
 
-    // Restart CoreDNS pods to pick up the new Corefile. The `reload` plugin
-    // watches the Corefile on disk, but kubelet's ConfigMap sync delay (60-120s)
-    // plus RKE2 Helm-managed CoreDNS may not hot-reload reliably.
-    // A rollout restart via annotation bump is the safest path.
-    let deploy_api: Api<k8s_openapi::api::apps::v1::Deployment> =
+    // Delete CoreDNS pods so they restart with the updated ConfigMap.
+    // The `reload` plugin in the Corefile detects changes on disk, but
+    // kubelet's ConfigMap sync delay (60-120s) makes this unreliable.
+    // Deleting pods forces immediate remount of the updated ConfigMap.
+    let pod_api: Api<k8s_openapi::api::core::v1::Pod> =
         Api::namespaced(client.clone(), "kube-system");
-
-    // Find the CoreDNS deployment by the same label
-    let deploys = deploy_api
+    let coredns_pods = pod_api
         .list(&kube::api::ListParams::default().labels(label_selector))
         .await
-        .map_err(|e| Error::internal(format!("failed to list CoreDNS deployments: {e}")))?;
+        .map_err(|e| Error::internal(format!("failed to list CoreDNS pods: {e}")))?;
 
-    for deploy in &deploys.items {
-        let deploy_name = deploy.metadata.name.as_deref().unwrap_or("");
-        let restart_patch = serde_json::json!({
-            "spec": {
-                "template": {
-                    "metadata": {
-                        "annotations": {
-                            "lattice.dev/corefile-restart": chrono::Utc::now().to_rfc3339()
-                        }
-                    }
-                }
-            }
-        });
-        deploy_api
-            .patch(deploy_name, &PatchParams::apply("lattice-dns"), &Patch::Merge(&restart_patch))
-            .await
-            .map_err(|e| {
-                Error::internal(format!("failed to restart CoreDNS deployment '{deploy_name}': {e}"))
-            })?;
-        info!(deployment = deploy_name, "Restarted CoreDNS to pick up Corefile changes");
+    for pod in &coredns_pods.items {
+        let pod_name = pod.metadata.name.as_deref().unwrap_or("");
+        if let Err(e) = pod_api.delete(pod_name, &Default::default()).await {
+            warn!(pod = pod_name, error = %e, "Failed to delete CoreDNS pod for restart");
+        } else {
+            info!(pod = pod_name, "Deleted CoreDNS pod to reload Corefile");
+        }
     }
 
     info!(
