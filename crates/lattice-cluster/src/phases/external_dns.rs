@@ -262,10 +262,10 @@ fn common_args(cluster_name: &str) -> Vec<String> {
         "--policy=upsert-only".to_string(),
         "--registry=txt".to_string(),
         format!("--txt-owner-id=lattice-{cluster_name}"),
+        "--request-timeout=120s".to_string(),
         "--interval=30s".to_string(),
         "--source=gateway-httproute".to_string(),
         "--source=gateway-grpcroute".to_string(),
-        "--source=gateway-tcproute".to_string(),
         "--source=service".to_string(),
     ]
 }
