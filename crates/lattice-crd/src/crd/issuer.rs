@@ -127,20 +127,6 @@ pub struct VaultIssuerSpec {
     pub auth_credentials: super::types::CredentialSpec,
 }
 
-/// DNS configuration for a cluster.
-///
-/// Maps named keys to DNSProvider CRD references. Each key can be referenced
-/// by ACME issuers via `dnsProviderRef`.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DnsConfig {
-    /// Named DNS provider references.
-    /// Keys are logical names (e.g., "public", "internal"), values are
-    /// names of DNSProvider CRD resources.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub providers: std::collections::BTreeMap<String, String>,
-}
-
 /// CertIssuer status
 ///
 /// All optional fields serialize as `null` (no `skip_serializing_if`) so that
@@ -255,22 +241,6 @@ impl CertIssuerSpec {
     }
 }
 
-impl DnsConfig {
-    /// Validate the DNS config.
-    pub fn validate(&self) -> Result<(), String> {
-        for key in self.providers.keys() {
-            crate::crd::validate_dns_label(key, "dns provider key")?;
-        }
-        for (key, value) in &self.providers {
-            if value.is_empty() {
-                return Err(format!(
-                    "dns.providers['{key}']: DNSProvider reference cannot be empty"
-                ));
-            }
-        }
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {

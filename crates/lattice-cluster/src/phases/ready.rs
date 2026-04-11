@@ -371,11 +371,11 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
             if let Err(e) = reconcile_issuers(client, cluster, &ctx.cache).await {
                 warn!(error = %e, "failed to reconcile issuers, will retry");
             }
-            if let Err(e) = reconcile_dns_forwarding(client, cluster, &ctx.cache).await {
+            if let Err(e) = reconcile_dns_forwarding(client).await {
                 warn!(error = %e, "failed to reconcile DNS forwarding, will retry");
             }
             if let Err(e) =
-                super::external_dns::reconcile_external_dns(client, cluster, &ctx.cache).await
+                super::external_dns::reconcile_external_dns(client, cluster).await
             {
                 warn!(error = %e, "failed to reconcile external-dns, will retry");
             }
@@ -656,29 +656,16 @@ async fn reconcile_issuers(
 /// they're authoritative DNS managed by external-dns, resolved via public DNS.
 async fn reconcile_dns_forwarding(
     client: &Client,
-    cluster: &LatticeCluster,
-    cache: &lattice_cache::ResourceCache,
 ) -> Result<(), Error> {
-    let dns_config = match &cluster.spec.dns {
-        Some(dns) if !dns.providers.is_empty() => dns,
-        _ => return Ok(()),
-    };
-
-    let ns = cluster
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
+    let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let providers = dns_api
+        .list(&Default::default())
+        .await
+        .map_err(|e| Error::internal(format!("failed to list DNSProviders: {e}")))?;
 
     let mut custom_blocks = Vec::new();
 
-    for provider_name in dns_config.providers.values() {
-        let provider = match cache.get_namespaced::<DNSProvider>(provider_name, &ns) {
-            Some(p) => p,
-            None => {
-                warn!(provider = %provider_name, "DNSProvider not found in cache, skipping");
-                continue;
-            }
-        };
-
+    for provider in &providers.items {
         if let Some(ref resolver) = provider.spec.resolver {
             let zone = &provider.spec.zone;
             custom_blocks.push(format!(

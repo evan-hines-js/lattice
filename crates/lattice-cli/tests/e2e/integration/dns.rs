@@ -106,20 +106,6 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     info!("[DNS] Testing external-dns deployment...");
 
     let pihole = pihole_url();
-    let cluster_name = super::super::helpers::get_workload_cluster_name();
-
-    // Patch the cluster to reference the PiHole DNSProvider
-    let patch =
-        format!(r#"{{"spec":{{"dns":{{"providers":{{"local":"{PIHOLE_DNS_PROVIDER}"}}}}}}}}"#);
-    run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "patch", "latticecluster", &cluster_name,
-        "--type=merge", "-p", &patch,
-    ])
-    .await
-    .map_err(|e| format!("Failed to patch LatticeCluster with dns: {e}"))?;
-
-    info!("[DNS] Patched cluster with dns.providers.local='{PIHOLE_DNS_PROVIDER}'");
 
     // Wait for external-dns deployment to become available
     let kc = kubeconfig.to_string();

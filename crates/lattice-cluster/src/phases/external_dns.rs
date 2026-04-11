@@ -19,26 +19,28 @@ const EXTERNAL_DNS_IMAGE: &str = "registry.k8s.io/external-dns/external-dns:v0.1
 /// Field manager for server-side apply.
 const FIELD_MANAGER: &str = "lattice-cluster-controller";
 
-/// Reconcile external-dns deployments for all DNS providers configured on the cluster.
+/// Reconcile external-dns deployments for all DNSProvider CRDs in the cluster.
 ///
-/// For each DNSProvider referenced in `spec.dns`, generates and applies the necessary
-/// Kubernetes resources (Namespace, ServiceAccount, RBAC, Deployment) via SSA.
+/// Lists DNSProvider CRDs in the lattice-system namespace and deploys
+/// external-dns for each one. No cluster-level DNS config needed — the
+/// presence of a DNSProvider CRD is sufficient.
 pub async fn reconcile_external_dns(
     client: &Client,
     cluster: &LatticeCluster,
-    cache: &lattice_cache::ResourceCache,
 ) -> Result<(), Error> {
-    let dns_config = match &cluster.spec.dns {
-        Some(dns) if !dns.providers.is_empty() => dns,
-        _ => return Ok(()),
-    };
-
     let cluster_name = cluster.name_any();
-    let ns = cluster
-        .namespace()
-        .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
-    // Ensure the shared namespace exists first
+    let dns_api: Api<DNSProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let providers = dns_api
+        .list(&Default::default())
+        .await
+        .map_err(|e| Error::internal(format!("failed to list DNSProviders: {e}")))?;
+
+    if providers.items.is_empty() {
+        return Ok(());
+    }
+
+    // Ensure the shared namespace exists
     let ns_manifest = build_namespace();
     let ns_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
     ns_api
@@ -50,14 +52,8 @@ pub async fn reconcile_external_dns(
         .await
         .map_err(|e| Error::internal(format!("failed to apply external-dns namespace: {e}")))?;
 
-    for provider_name in dns_config.providers.values() {
-        let provider = match cache.get_namespaced::<DNSProvider>(provider_name, &ns) {
-            Some(p) => p,
-            None => {
-                warn!(provider = %provider_name, "DNSProvider not found in cache for external-dns, skipping");
-                continue;
-            }
-        };
+    for provider in &providers.items {
+        let provider_name = provider.name_any();
 
         // Create ESO ExternalSecret for the provider's credentials in external-dns namespace
         if let Some(ref credentials) = provider.spec.credentials {
@@ -80,7 +76,7 @@ pub async fn reconcile_external_dns(
         let resolved_secret_ref = provider.k8s_secret_ref();
         let manifests = build_external_dns_manifests(
             &provider.spec,
-            provider_name,
+            &provider_name,
             &cluster_name,
             resolved_secret_ref.as_ref(),
         );
@@ -94,7 +90,7 @@ pub async fn reconcile_external_dns(
 
     info!(
         cluster = %cluster_name,
-        providers = dns_config.providers.len(),
+        providers = providers.items.len(),
         "external-dns deployments reconciled"
     );
 

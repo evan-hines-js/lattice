@@ -7,7 +7,6 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::issuer::DnsConfig;
 use super::topology::NetworkTopologyConfig;
 use super::types::{
     ClusterPhase, Condition, EndpointsSpec, NodeSpec, ProviderSpec, RegistryMirror,
@@ -123,10 +122,6 @@ pub struct LatticeClusterSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_mirrors: Option<Vec<RegistryMirror>>,
 
-    /// DNS provider configuration for external-dns and ACME DNS-01 challenges.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dns: Option<DnsConfig>,
-
     /// Named cert-manager issuer references.
     /// Keys are logical names (e.g., "public", "internal"), values are
     /// names of CertIssuer CRD resources. Each referenced CertIssuer generates
@@ -163,14 +158,9 @@ impl LatticeClusterSpec {
             pc.validate()?;
         }
 
-        // Validate DNS config
-        if let Some(ref dns) = self.dns {
-            dns.validate().map_err(crate::ValidationError::new)?;
-        }
-
         // Validate issuer references
         for (key, cert_issuer_ref) in &self.issuers {
-            crate::crd::validate_dns_label(key, "issuer key")
+            lattice_core::validate_dns_label(key, "issuer key")
                 .map_err(crate::ValidationError::new)?;
             if cert_issuer_ref.is_empty() {
                 return Err(crate::ValidationError::new(format!(
