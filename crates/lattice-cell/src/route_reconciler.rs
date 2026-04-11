@@ -268,98 +268,81 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
         };
         let svc_ns = ls.metadata.namespace.as_deref().unwrap_or("default");
 
-        let ingress = match &ls.spec.ingress {
-            Some(i) => i,
+        // Advertise is a top-level service concern, not a route concern.
+        // An advertised service publishes its identity and ports for
+        // cross-cluster discovery via Istio multi-cluster.
+        let advertise = match &ls.spec.advertise {
+            Some(a) => a,
             None => continue,
         };
 
-        for route in ingress.routes.values() {
-            if route.advertise.is_none() {
-                continue;
-            }
+        let service_ports: std::collections::BTreeMap<String, u16> = ls
+            .spec
+            .workload
+            .service
+            .as_ref()
+            .map(|svc| {
+                svc.ports
+                    .iter()
+                    .map(|(name, ps)| (name.clone(), ps.port))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-            if route.hosts.is_empty() {
+        // If the service has ingress routes, use the gateway address and
+        // hostnames for externally routable discovery. Otherwise, publish
+        // as a mesh-internal route (no address, consumers use the service FQDN).
+        let (address, port) = ls
+            .spec
+            .ingress
+            .as_ref()
+            .filter(|i| !i.routes.is_empty())
+            .map(|_| resolve_gateway_address(svc_ns, &gateways))
+            .unwrap_or((String::new(), 0));
+
+        // Collect hostnames from ingress routes (if any) for external discovery.
+        // Mesh-internal services use the service FQDN directly — no hostname needed
+        // in the route table, but we still publish a route for the route-adapter.
+        let hostnames: Vec<String> = ls
+            .spec
+            .ingress
+            .as_ref()
+            .map(|i| {
+                i.routes
+                    .values()
+                    .flat_map(|r| r.hosts.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // For mesh-internal services, use the service FQDN as the hostname
+        let hostnames = if hostnames.is_empty() {
+            vec![format!("{svc_name}.{svc_ns}.svc.cluster.local")]
+        } else {
+            hostnames
+        };
+
+        for hostname in &hostnames {
+            let cr = ClusterRoute {
+                service_name: svc_name.to_string(),
+                service_namespace: svc_ns.to_string(),
+                hostname: hostname.clone(),
+                address: address.clone(),
+                port,
+                protocol: "HTTP".to_string(),
+                allowed_services: advertise.allowed_services.clone(),
+                service_ports: service_ports.clone(),
+            };
+            if let Err(reason) = cr.validate() {
                 warn!(
                     service = svc_name,
                     namespace = svc_ns,
-                    "advertised route has no hostnames — cannot be discovered"
+                    reason = %reason,
+                    "rejecting local route"
                 );
                 continue;
             }
-
-            // Resolve the gateway address for routes with external access.
-            // Advertise-only routes (no external gateway) don't need an address —
-            // consumers reach the service via Istio multi-cluster using the
-            // service FQDN, not a gateway IP.
-            let (address, port) = if route.external_gateway {
-                let result = resolve_gateway_address(svc_ns, &gateways);
-                if result.0.is_empty() {
-                    warn!(
-                        service = svc_name,
-                        namespace = svc_ns,
-                        "advertised route has no Gateway address — route will not be discoverable until Gateway gets an IP"
-                    );
-                    continue;
-                }
-                result
-            } else {
-                (String::new(), 0)
-            };
-
-            let allowed_services = route
-                .advertise
-                .as_ref()
-                .map(|a| a.allowed_services.clone())
-                .unwrap_or_default();
-
-            let protocol = match route.kind {
-                lattice_crd::crd::RouteKind::HTTPRoute => {
-                    if route.tls.is_some() {
-                        "HTTPS"
-                    } else {
-                        "HTTP"
-                    }
-                }
-                lattice_crd::crd::RouteKind::GRPCRoute => "GRPC",
-                lattice_crd::crd::RouteKind::TCPRoute => "TCP",
-                _ => "HTTP",
-            };
-
-            let service_ports: std::collections::BTreeMap<String, u16> = ls
-                .spec
-                .workload
-                .service
-                .as_ref()
-                .map(|svc| {
-                    svc.ports
-                        .iter()
-                        .map(|(name, ps)| (name.clone(), ps.port))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            for host in &route.hosts {
-                let cr = ClusterRoute {
-                    service_name: svc_name.to_string(),
-                    service_namespace: svc_ns.to_string(),
-                    hostname: host.clone(),
-                    address: address.clone(),
-                    port,
-                    protocol: protocol.to_string(),
-                    allowed_services: allowed_services.clone(),
-                    service_ports: service_ports.clone(),
-                };
-                if let Err(reason) = cr.validate() {
-                    warn!(
-                        service = svc_name,
-                        namespace = svc_ns,
-                        reason = %reason,
-                        "rejecting local route"
-                    );
-                    continue;
-                }
-                routes.push(cr);
-            }
+            routes.push(cr);
         }
     }
 

@@ -241,6 +241,7 @@ impl IngressCompiler {
         ingress: &IngressSpec,
         ports: &[MeshMemberPort],
         trust_domain: &str,
+        advertise: Option<&AdvertiseConfig>,
     ) -> Result<GeneratedIngress, String> {
         let mut output = GeneratedIngress::default();
         let mut all_listeners = Vec::new();
@@ -252,13 +253,6 @@ impl IngressCompiler {
         let gateway_name = mesh::ingress_gateway_name(namespace);
 
         for (route_name, route_spec) in &ingress.routes {
-            // Skip Gateway/Route creation when external_gateway is disabled.
-            // The route is still advertised for cross-cluster discovery via
-            // the route reconciler, which reads ingress.routes directly.
-            if !route_spec.external_gateway {
-                continue;
-            }
-
             let backend_port = route_spec.resolve_port(ports).map_err(|e| {
                 format!(
                     "route '{}' for service '{}': {}",
@@ -329,11 +323,10 @@ impl IngressCompiler {
                 &gateway_name,
                 &all_listeners,
             ));
-            // Enable frontend mTLS if any route is advertised for cross-cluster access.
+            // Enable frontend mTLS if the service is advertised for cross-cluster access.
             // This ensures only clusters sharing the Lattice CA can connect.
-            let has_advertised_routes = ingress.routes.values().any(|r| r.advertise.is_some());
 
-            let frontend_tls = if has_advertised_routes {
+            let frontend_tls = if advertise.is_some() {
                 Some(GatewayFrontendMtls {
                     frontend: GatewayFrontendTls {
                         default: GatewayFrontendTlsDefault {
@@ -369,32 +362,21 @@ impl IngressCompiler {
             //
             // The policy uses notPrincipals: traffic from any principal NOT in the
             // allowed list is denied. Traffic from allowed principals passes through
-            // to the normal ALLOW evaluation.
-            // Check if any route has restricted (non-wildcard) advertise config.
-            // If so, generate a DENY policy — even if all allowedServices entries
-            // are malformed and parse to zero principals. An empty notPrincipals
-            // list in a DENY policy means "deny all" which is correct fail-closed.
-            let has_restricted_advertise = ingress
-                .routes
-                .values()
-                .any(|r| r.advertise.as_ref().map(|a| !a.is_open()).unwrap_or(false));
-
-            if has_restricted_advertise {
-                let principals: Vec<String> = ingress
-                    .routes
-                    .values()
-                    .filter_map(|r| r.advertise.as_ref())
-                    .filter(|a| !a.is_open())
-                    .flat_map(|a| a.to_spiffe_principals(trust_domain))
-                    .collect();
-
-                output.cross_cluster_auth_policy =
-                    Some(AuthorizationPolicy::new_deny_not_principals(
-                        &format!("{}-cross-cluster-deny", service_name),
-                        namespace,
-                        &gateway_name,
-                        &principals,
-                    ));
+            // If the service is advertised with restricted (non-wildcard) callers,
+            // generate a DENY policy for cross-cluster traffic that doesn't match
+            // the allowed SPIFFE principals. An empty notPrincipals list means
+            // "deny all" which is correct fail-closed.
+            if let Some(adv) = advertise {
+                if !adv.is_open() {
+                    let principals = adv.to_spiffe_principals(trust_domain);
+                    output.cross_cluster_auth_policy =
+                        Some(AuthorizationPolicy::new_deny_not_principals(
+                            &format!("{}-cross-cluster-deny", service_name),
+                            namespace,
+                            &gateway_name,
+                            &principals,
+                        ));
+                }
             }
 
             output.gateway_graph_registration = Some(GraphRegistration {
@@ -865,7 +847,7 @@ mod tests {
     fn generates_gateway_with_http_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
@@ -886,7 +868,7 @@ mod tests {
     fn generates_gateway_with_https_listener() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
@@ -906,7 +888,7 @@ mod tests {
     fn generates_http_route() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
@@ -931,7 +913,7 @@ mod tests {
     fn generates_certificate_for_auto_tls() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert_eq!(output.certificates.len(), 1);
@@ -982,7 +964,7 @@ mod tests {
         };
 
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
         let route = &output.http_routes[0];
         let matches = &route.spec.rules[0].matches;
@@ -1031,7 +1013,7 @@ mod tests {
         };
 
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
         let route = &output.http_routes[0];
         let m = &route.spec.rules[0].matches[0];
@@ -1048,7 +1030,7 @@ mod tests {
     fn multi_host_generates_per_host_listeners() {
         let ingress = make_ingress_spec(vec!["api.example.com", "api.internal.example.com"], true);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
@@ -1083,7 +1065,7 @@ mod tests {
             )]),
         };
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let gateway = output.gateway.expect("should have gateway");
@@ -1148,7 +1130,7 @@ mod tests {
             )]),
         };
         let output =
-            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("db", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert!(output.http_routes.is_empty());
@@ -1209,7 +1191,7 @@ mod tests {
         };
 
         let output =
-            IngressCompiler::compile("svc", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("svc", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert_eq!(output.http_routes.len(), 1);
@@ -1229,7 +1211,7 @@ mod tests {
 
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert!(!output.is_empty());
@@ -1366,7 +1348,7 @@ mod tests {
     fn gateway_generates_cnp_with_correct_selector() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
@@ -1384,7 +1366,7 @@ mod tests {
     fn gateway_cnp_has_listener_port_ingress() {
         let ingress = make_ingress_spec(vec!["api.example.com"], true);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
@@ -1410,7 +1392,7 @@ mod tests {
     fn gateway_cnp_has_hbone_ingress_and_egress() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let cnp = output.gateway_policy.expect("should have gateway CNP");
@@ -1450,7 +1432,7 @@ mod tests {
             routes: BTreeMap::new(),
         };
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         assert!(output.gateway.is_none());
@@ -1492,7 +1474,7 @@ mod tests {
     fn produces_gateway_graph_registration() {
         let ingress = make_ingress_spec(vec!["api.example.com"], false);
         let output =
-            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234")
+            IngressCompiler::compile("api", "prod", &ingress, &single_port(), "lattice.abcd1234", None)
                 .unwrap();
 
         let reg = output

@@ -108,6 +108,15 @@ pub struct LatticeServiceSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressSpec>,
 
+    /// Advertise this service for cross-cluster discovery via Istio multi-cluster.
+    ///
+    /// When set, the service is reachable from other clusters via the mesh.
+    /// This is independent of `ingress` — a service can be advertised without
+    /// external Gateway resources, or have external access without being
+    /// advertised, or both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<super::workload::ingress::AdvertiseConfig>,
+
     /// Network topology configuration for topology-aware scheduling.
     /// When set, pods are scheduled via Volcano with a PodGroup for co-placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
