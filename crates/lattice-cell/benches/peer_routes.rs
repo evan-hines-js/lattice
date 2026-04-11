@@ -1,24 +1,17 @@
 //! Criterion benchmarks for peer route synchronization
 //!
-//! Measures the peer route sync pipeline at scale, comparing the legacy
-//! approach (recompute everything per heartbeat) vs the indexed approach
-//! (pre-compute on route change, O(clusters) per heartbeat).
-//!
-//! Benchmark groups:
-//! - Legacy full pipeline (convert → filter → hash) — the old O(routes) path
-//! - Index build cost — paid once when route table changes
-//! - Indexed heartbeat — the fast O(clusters) path
-//! - Multi-child: N children processing heartbeats against same index
-//! - Extreme scale: up to 1M routes
+//! Measures PeerRouteIndex performance at scale:
+//! - Index build cost (paid once when route table changes)
+//! - Per-heartbeat hash check (O(clusters), the fast path)
+//! - Multi-child heartbeat wave (build once, N hash checks)
+//! - Extreme scale: up to 1M routes from 10K clusters
 
 use std::collections::BTreeMap;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use lattice_crd::crd::ClusterRoute;
-use lattice_cell::peer_routes::{
-    hash_peer_routes, peer_routes_for, tagged_to_proto, PeerRouteIndex,
-};
+use lattice_cell::peer_routes::PeerRouteIndex;
 use lattice_cell::route_reconciler::TaggedRoute;
 
 // =============================================================================
@@ -59,43 +52,11 @@ fn generate_tagged_routes(num_routes: usize, num_clusters: usize) -> Vec<TaggedR
 }
 
 // =============================================================================
-// Benchmarks: Legacy pipeline (old approach — O(routes) per heartbeat)
-// =============================================================================
-
-fn bench_legacy_pipeline(c: &mut Criterion) {
-    let mut group = c.benchmark_group("peer_route_legacy");
-    group.sample_size(10);
-
-    for (num_routes, num_clusters) in [
-        (1_000, 20),
-        (10_000, 100),
-        (100_000, 1_000),
-        (1_000_000, 10_000),
-    ] {
-        let tagged = generate_tagged_routes(num_routes, num_clusters);
-
-        group.bench_with_input(
-            BenchmarkId::new("pipeline", format!("{}r_{}c", num_routes, num_clusters)),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let proto = tagged_to_proto(&tagged);
-                    let peers = peer_routes_for(&proto, "cluster-0");
-                    black_box(hash_peer_routes(&peers));
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
-// =============================================================================
 // Benchmarks: Index build (paid once when route table changes)
 // =============================================================================
 
 fn bench_index_build(c: &mut Criterion) {
-    let mut group = c.benchmark_group("peer_route_index_build");
+    let mut group = c.benchmark_group("peer_route_build");
     group.sample_size(10);
 
     for (num_routes, num_clusters) in [
@@ -122,11 +83,11 @@ fn bench_index_build(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Indexed heartbeat (O(clusters) per heartbeat)
+// Benchmarks: Per-heartbeat hash check (O(clusters))
 // =============================================================================
 
-fn bench_indexed_heartbeat(c: &mut Criterion) {
-    let mut group = c.benchmark_group("peer_route_indexed_heartbeat");
+fn bench_heartbeat_hash(c: &mut Criterion) {
+    let mut group = c.benchmark_group("peer_route_heartbeat");
     group.sample_size(10);
 
     for (num_routes, num_clusters) in [
@@ -139,9 +100,8 @@ fn bench_indexed_heartbeat(c: &mut Criterion) {
         let tagged = generate_tagged_routes(num_routes, num_clusters);
         let index = PeerRouteIndex::build(&tagged);
 
-        // Hash check only (the common fast path — no mismatch)
         group.bench_with_input(
-            BenchmarkId::new("hash_check", format!("{}r_{}c", num_routes, num_clusters)),
+            BenchmarkId::new("hash_excluding", format!("{}r_{}c", num_routes, num_clusters)),
             &(),
             |b, _| {
                 b.iter(|| {
@@ -155,14 +115,14 @@ fn bench_indexed_heartbeat(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Multi-child heartbeat wave — the key comparison
+// Benchmarks: Multi-child heartbeat wave
 //
-// Legacy: each child does convert + filter + hash over ALL routes
-// Indexed: build index once, each child just combines per-cluster hashes
+// Build index once, then N children each do a hash check.
+// This is the realistic hot path after a route table change.
 // =============================================================================
 
 fn bench_multi_child(c: &mut Criterion) {
-    let mut group = c.benchmark_group("peer_route_multi_child");
+    let mut group = c.benchmark_group("peer_route_wave");
     group.sample_size(10);
 
     for (num_routes, num_clusters, num_children) in [
@@ -173,29 +133,9 @@ fn bench_multi_child(c: &mut Criterion) {
     ] {
         let tagged = generate_tagged_routes(num_routes, num_clusters);
 
-        // Legacy: O(children × routes)
         group.bench_with_input(
             BenchmarkId::new(
-                "legacy",
-                format!("{}r_{}children", num_routes, num_children),
-            ),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let proto = tagged_to_proto(&tagged);
-                    for child_idx in 0..num_children {
-                        let child_name = format!("cluster-{}", child_idx);
-                        let peers = peer_routes_for(&proto, &child_name);
-                        black_box(hash_peer_routes(&peers));
-                    }
-                });
-            },
-        );
-
-        // Indexed: O(routes) build + O(children × clusters) heartbeats
-        group.bench_with_input(
-            BenchmarkId::new(
-                "indexed",
+                "build_plus_heartbeats",
                 format!("{}r_{}children", num_routes, num_children),
             ),
             &(),
@@ -215,7 +155,7 @@ fn bench_multi_child(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Extreme scale — head-to-head at 1M routes
+// Benchmarks: Extreme scale — 1M routes
 // =============================================================================
 
 fn bench_extreme(c: &mut Criterion) {
@@ -224,37 +164,36 @@ fn bench_extreme(c: &mut Criterion) {
 
     let tagged_1m = generate_tagged_routes(1_000_000, 10_000);
 
-    // Legacy: single child at 1M
-    group.bench_function("legacy_1m_single", |b| {
-        b.iter(|| {
-            let proto = tagged_to_proto(&tagged_1m);
-            let peers = peer_routes_for(&proto, "cluster-0");
-            black_box(hash_peer_routes(&peers));
-        });
-    });
-
-    // Indexed: build at 1M
-    group.bench_function("indexed_1m_build", |b| {
+    // Build cost at 1M
+    group.bench_function("build_1m", |b| {
         b.iter(|| {
             black_box(PeerRouteIndex::build(&tagged_1m));
         });
     });
 
-    // Indexed: heartbeat at 1M (after build)
+    // Single heartbeat at 1M (after build)
     let index_1m = PeerRouteIndex::build(&tagged_1m);
-    group.bench_function("indexed_1m_heartbeat", |b| {
+
+    group.bench_function("heartbeat_1m", |b| {
         b.iter(|| {
             black_box(index_1m.hash_excluding("cluster-0"));
         });
     });
 
-    // Indexed: 100 children at 1M
-    group.bench_function("indexed_1m_100children", |b| {
+    // 100 children at 1M (heartbeats only, index pre-built)
+    group.bench_function("100_heartbeats_1m", |b| {
         b.iter(|| {
             for child_idx in 0..100 {
                 let child_name = format!("cluster-{}", child_idx);
                 black_box(index_1m.hash_excluding(&child_name));
             }
+        });
+    });
+
+    // Peer routes payload build on mismatch (the slow path)
+    group.bench_function("peer_routes_for_1m", |b| {
+        b.iter(|| {
+            black_box(index_1m.peer_routes_for("cluster-0"));
         });
     });
 
@@ -267,9 +206,8 @@ fn bench_extreme(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_legacy_pipeline,
     bench_index_build,
-    bench_indexed_heartbeat,
+    bench_heartbeat_hash,
     bench_multi_child,
     bench_extreme,
 );

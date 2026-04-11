@@ -578,6 +578,7 @@ async fn process_agent_message(
     ctx: &MessageContext,
     msg: &AgentMessage,
     peer_config: Option<&PeerRouteConfig>,
+    peer_index: Option<&crate::peer_routes::PeerRouteIndex>,
 ) -> bool {
     let registry = &ctx.registry;
     let command_tx = &ctx.command_tx;
@@ -673,12 +674,14 @@ async fn process_agent_message(
 
             // Check peer routes hash — if the child's hash doesn't match what
             // we'd send it, push a full PeerRouteSync
-            if let Some(pc) = peer_config {
+            if let (Some(pc), Some(index)) = (peer_config, peer_index) {
                 crate::peer_routes::check_and_sync_peer_routes(
                     registry,
                     cluster_name,
                     &hb.peer_routes_hash,
-                    pc,
+                    index,
+                    &pc.proxy_url,
+                    &pc.ca_cert_pem,
                     kube_client,
                 )
                 .await;
@@ -1275,6 +1278,11 @@ impl LatticeAgent for AgentServer {
 
         // Spawn task to handle incoming messages
         tokio::spawn(async move {
+            // Cached peer route index — rebuilt only when the route table changes.
+            // Kept across messages so heartbeats from different children share one build.
+            let mut cached_routes_rx: Option<crate::route_reconciler::AllRoutesReceiver> = None;
+            let mut cached_index: Option<crate::peer_routes::PeerRouteIndex> = None;
+
             while let Some(result) = inbound.next().await {
                 match result {
                     Ok(msg) => {
@@ -1288,7 +1296,22 @@ impl LatticeAgent for AgentServer {
                         }
 
                         let peer_config = peer_config_lock.read().await.clone();
-                        if !process_agent_message(&msg_ctx, &msg, peer_config.as_ref()).await {
+
+                        // Rebuild the index only when the route table has changed
+                        if let Some(ref pc) = peer_config {
+                            let needs_rebuild = match cached_routes_rx {
+                                Some(ref mut rx) => rx.has_changed().unwrap_or(true),
+                                None => true,
+                            };
+                            if needs_rebuild {
+                                let mut rx = pc.all_routes.clone();
+                                let tagged = rx.borrow_and_update().clone();
+                                cached_index = Some(crate::peer_routes::PeerRouteIndex::build(&tagged));
+                                cached_routes_rx = Some(rx);
+                            }
+                        }
+
+                        if !process_agent_message(&msg_ctx, &msg, peer_config.as_ref(), cached_index.as_ref()).await {
                             break;
                         }
                     }

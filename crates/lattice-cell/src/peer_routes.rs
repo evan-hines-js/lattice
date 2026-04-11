@@ -101,7 +101,7 @@ impl PeerRouteIndex {
 /// Convert a single tagged route to proto format.
 fn tagged_route_to_proto(
     cluster: &str,
-    r: &lattice_common::crd::ClusterRoute,
+    r: &lattice_crd::crd::ClusterRoute,
 ) -> SubtreeService {
     SubtreeService {
         name: r.service_name.clone(),
@@ -117,7 +117,7 @@ fn tagged_route_to_proto(
         service_ports: r
             .service_ports
             .iter()
-            .map(|(k, &v)| (k.clone(), v as u32))
+            .map(|(k, v): (&String, &u16)| (k.clone(), *v as u32))
             .collect(),
     }
 }
