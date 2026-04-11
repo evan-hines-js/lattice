@@ -1071,6 +1071,7 @@ impl Installer {
             "default",
             ImageProviderSpec {
                 provider_type: ImageProviderType::Generic,
+                insecure: false,
                 registry: parse_first_registry(creds).ok_or_else(|| {
                     Error::validation(
                         "Failed to parse registry from dockerconfigjson — \

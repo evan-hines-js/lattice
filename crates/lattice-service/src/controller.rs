@@ -1187,7 +1187,7 @@ async fn resolve_image_trust(
 ) -> std::collections::BTreeMap<String, lattice_workload::ImageTrustEntry> {
     let mut result = std::collections::BTreeMap::new();
 
-    for (provider_name, registry, trust_policy) in cache.resolve_image_trust_policies() {
+    for (provider_name, registry, insecure, trust_policy) in cache.resolve_image_trust_policies() {
         let mut authorities = Vec::new();
 
         for authority in &trust_policy.authorities {
@@ -1233,6 +1233,7 @@ async fn resolve_image_trust(
                 registry,
                 lattice_workload::ImageTrustEntry {
                     enforce: trust_policy.enforce,
+                    insecure,
                     authorities,
                 },
             );

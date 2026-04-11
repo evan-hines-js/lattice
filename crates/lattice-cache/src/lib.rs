@@ -305,7 +305,7 @@ impl ResourceCache {
     /// needed to construct ESO secret names for cosign key resolution.
     pub fn resolve_image_trust_policies(
         &self,
-    ) -> Vec<(String, String, lattice_crd::crd::ImageTrustPolicy)> {
+    ) -> Vec<(String, String, bool, lattice_crd::crd::ImageTrustPolicy)> {
         use lattice_crd::crd::ImageProvider;
 
         let mut result = Vec::new();
@@ -318,7 +318,7 @@ impl ResourceCache {
             if let Some(ref trust) = item.spec.trust {
                 if trust.enforce {
                     let name = item.metadata.name.clone().unwrap_or_default();
-                    result.push((name, item.spec.registry.clone(), trust.clone()));
+                    result.push((name, item.spec.registry.clone(), item.spec.insecure, trust.clone()));
                 }
             }
         }

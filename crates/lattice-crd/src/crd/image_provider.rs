@@ -74,6 +74,10 @@ pub struct ImageProviderSpec {
     /// Registry hostname (e.g., "ghcr.io", "docker.io", "123456789.dkr.ecr.us-east-1.amazonaws.com")
     pub registry: String,
 
+    /// Whether the registry uses plain HTTP (no TLS). Default: false.
+    #[serde(default)]
+    pub insecure: bool,
+
     /// ESO-managed credential source. The controller creates an ExternalSecret
     /// that syncs credentials from a ClusterSecretStore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +266,7 @@ impl ImageProviderSpec {
         Self {
             provider_type,
             registry: registry.to_string(),
+            insecure: false,
             credentials: None,
             credential_data: None,
             ecr: None,

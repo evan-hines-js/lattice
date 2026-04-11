@@ -20,16 +20,16 @@ pub enum VerifyResult {
 }
 
 /// Verify an image signature using a cosign public key (PEM bytes).
-pub async fn verify_image(image: &str, key_pem: &[u8]) -> VerifyResult {
+///
+/// Set `insecure` to true for HTTP registries (no TLS).
+pub async fn verify_image(image: &str, key_pem: &[u8], insecure: bool) -> VerifyResult {
     let oci_ref = match image.parse::<OciReference>() {
         Ok(r) => r,
         Err(e) => return VerifyResult::Error(format!("invalid image reference '{image}': {e}")),
     };
 
-    // Use HTTP for registries that don't support TLS (IP:port, localhost, etc.)
     let mut oci_config = ClientConfig::default();
-    let registry = oci_ref.registry();
-    if is_insecure_registry(registry) {
+    if insecure {
         oci_config.protocol = ClientProtocol::Http;
     }
 
@@ -90,36 +90,13 @@ pub async fn verify_image(image: &str, key_pem: &[u8]) -> VerifyResult {
     }
 }
 
-/// Detect registries that use HTTP instead of HTTPS.
-///
-/// Registries accessed by IP address, with non-standard ports, or on localhost
-/// are typically insecure (no TLS). Standard registries (ghcr.io, docker.io,
-/// quay.io, etc.) use HTTPS.
-fn is_insecure_registry(registry: &str) -> bool {
-    // Localhost is always insecure
-    if registry.starts_with("localhost") || registry.starts_with("127.0.0.1") {
-        return true;
-    }
-    // IP address with port (e.g., 10.0.0.131:5557)
-    if let Some((host, _port)) = registry.rsplit_once(':') {
-        if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            return true;
-        }
-    }
-    // Bare IP without port
-    if registry.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        return true;
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn invalid_image_ref_returns_error() {
-        let result = verify_image("not a valid ref!!!", b"fake-key").await;
+        let result = verify_image("not a valid ref!!!", b"fake-key", false).await;
         assert!(matches!(result, VerifyResult::Error(_)));
     }
 }

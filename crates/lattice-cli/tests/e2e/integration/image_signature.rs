@@ -155,6 +155,7 @@ metadata:
 spec:
   type: generic
   registry: "{LOCAL_REGISTRY}"
+  insecure: true
   trust:
     enforce: true
     authorities:

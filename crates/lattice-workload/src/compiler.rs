@@ -67,6 +67,8 @@ pub struct WorkloadCompiler<'a> {
 pub struct ImageTrustEntry {
     /// Whether verification is enforced.
     pub enforce: bool,
+    /// Whether the registry uses plain HTTP (no TLS).
+    pub insecure: bool,
     /// Authority name → PEM public key bytes.
     pub authorities: Vec<(String, Vec<u8>)>,
 }
@@ -244,7 +246,7 @@ impl<'a> WorkloadCompiler<'a> {
             // Try each authority
             let mut verified = false;
             for (authority_name, key_pem) in &entry.authorities {
-                match crate::cosign::verify_image(image, key_pem).await {
+                match crate::cosign::verify_image(image, key_pem, entry.insecure).await {
                     crate::cosign::VerifyResult::Verified => {
                         tracing::info!(
                             image = image,
