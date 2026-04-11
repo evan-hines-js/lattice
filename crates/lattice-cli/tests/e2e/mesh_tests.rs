@@ -15,7 +15,7 @@ use futures::future::try_join_all;
 use kube::api::Api;
 use tracing::info;
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 
 use super::helpers::{
     apply_mesh_wildcard_inbound_policy, client_from_kubeconfig, create_with_retry,

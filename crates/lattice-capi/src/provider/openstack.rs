@@ -16,7 +16,7 @@ use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_NODE_CIDR_OPENSTACK, INFRASTRUCTURE_API_GROUP,
     OPENSTACK_API_VERSION,
 };
-use lattice_common::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
+use lattice_crd::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, OPENSTACK_CREDENTIALS_SECRET};
 
 /// Configuration for generating an OpenStack machine template
@@ -297,8 +297,8 @@ impl Provider for OpenStackProvider {
 mod tests {
     use super::*;
     use kube::api::ObjectMeta;
-    use lattice_common::crd::LatticeClusterSpec;
-    use lattice_common::crd::{
+    use lattice_crd::crd::LatticeClusterSpec;
+    use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
         MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
     };

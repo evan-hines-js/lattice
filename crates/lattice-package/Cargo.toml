@@ -9,6 +9,7 @@ description = "LatticePackage controller — Helm chart lifecycle with secret in
 # Internal
 lattice-common = { workspace = true }
 lattice-cedar = { workspace = true }
+lattice-crd = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-template = { workspace = true }
 lattice-cache = { workspace = true }

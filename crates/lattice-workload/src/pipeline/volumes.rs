@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CompilationError;
-use lattice_common::crd::{VolumeAccessMode, WorkloadSpec};
+use lattice_crd::crd::{VolumeAccessMode, WorkloadSpec};
 use lattice_common::kube_utils::{ObjectMeta, OwnerReference};
 
 // =============================================================================
@@ -126,7 +126,7 @@ impl VolumeCompiler {
         service_name: &str,
         namespace: &str,
         workload: &WorkloadSpec,
-        sidecars: &BTreeMap<String, lattice_common::crd::SidecarSpec>,
+        sidecars: &BTreeMap<String, lattice_crd::crd::SidecarSpec>,
         owner_references: &[OwnerReference],
     ) -> Result<GeneratedVolumes, CompilationError> {
         let mut output = GeneratedVolumes::default();
@@ -194,7 +194,7 @@ impl VolumeCompiler {
     fn compile_pvc(
         name: &str,
         namespace: &str,
-        params: &lattice_common::crd::VolumeParams,
+        params: &lattice_crd::crd::VolumeParams,
         owner_references: &[OwnerReference],
     ) -> Result<PersistentVolumeClaim, CompilationError> {
         let access_mode = match params.access_mode {
@@ -236,8 +236,8 @@ impl VolumeCompiler {
     /// Returns (volume_mounts, extra_pod_volumes) where extra_pod_volumes are
     /// emptyDir volumes that need to be added to the pod spec.
     fn resolve_mounts(
-        volumes: &BTreeMap<String, lattice_common::crd::VolumeMount>,
-        mountable_resources: &[(&String, &lattice_common::crd::ResourceSpec)],
+        volumes: &BTreeMap<String, lattice_crd::crd::VolumeMount>,
+        mountable_resources: &[(&String, &lattice_crd::crd::ResourceSpec)],
     ) -> Result<(Vec<crate::k8s::VolumeMount>, Vec<crate::k8s::Volume>), CompilationError> {
         let mut mounts = Vec::new();
         let mut extra_volumes = Vec::new();
@@ -314,10 +314,10 @@ impl VolumeCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, ResourceParams, ResourceSpec, ResourceType, VolumeParams, WorkloadSpec,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     fn make_spec_with_volumes(
         owned: Vec<(&str, Option<&str>, &str, Option<VolumeAccessMode>)>, // (name, id, size, access_mode)
@@ -361,7 +361,7 @@ mod tests {
         for (mount_path, resource_name) in container_mounts {
             volumes.insert(
                 mount_path.to_string(),
-                lattice_common::crd::VolumeMount {
+                lattice_crd::crd::VolumeMount {
                     source: Some(TemplateString::from(format!(
                         "${{resources.{}}}",
                         resource_name
@@ -700,7 +700,7 @@ mod tests {
         for (path, medium, size_limit) in mounts {
             volumes.insert(
                 path.to_string(),
-                lattice_common::crd::VolumeMount {
+                lattice_crd::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,
@@ -784,7 +784,7 @@ mod tests {
         let container = spec.containers.get_mut("main").unwrap();
         container.volumes.insert(
             "/tmp".to_string(),
-            lattice_common::crd::VolumeMount {
+            lattice_crd::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -794,7 +794,7 @@ mod tests {
         );
         container.volumes.insert(
             "/var/cache/nginx".to_string(),
-            lattice_common::crd::VolumeMount {
+            lattice_crd::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn sidecar_emptydir_volumes() {
-        use lattice_common::crd::SidecarSpec;
+        use lattice_crd::crd::SidecarSpec;
 
         let spec = WorkloadSpec {
             containers: {
@@ -865,7 +865,7 @@ mod tests {
         let mut sidecar_volumes = BTreeMap::new();
         sidecar_volumes.insert(
             "/tmp".to_string(),
-            lattice_common::crd::VolumeMount {
+            lattice_crd::crd::VolumeMount {
                 source: None,
                 path: None,
                 read_only: None,
@@ -899,14 +899,14 @@ mod tests {
 
     #[test]
     fn shared_emptydir_between_main_and_sidecar_deduplicates() {
-        use lattice_common::crd::SidecarSpec;
+        use lattice_crd::crd::SidecarSpec;
 
         // Main container declares /tmp and /run
         let mut main_volumes = BTreeMap::new();
         for path in ["/tmp", "/run"] {
             main_volumes.insert(
                 path.to_string(),
-                lattice_common::crd::VolumeMount {
+                lattice_crd::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,
@@ -937,7 +937,7 @@ mod tests {
         for path in ["/tmp", "/run"] {
             sidecar_volumes.insert(
                 path.to_string(),
-                lattice_common::crd::VolumeMount {
+                lattice_crd::crd::VolumeMount {
                     source: None,
                     path: None,
                     read_only: None,

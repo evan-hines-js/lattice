@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::LatticeMeshMember;
+use lattice_crd::crd::LatticeMeshMember;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_workload::CompilationError;
 
@@ -144,7 +144,7 @@ pub struct ServiceCompiler<'a> {
     quota_budget: Option<lattice_quota::QuotaBudget>,
     /// ImageProvider credentials keyed by provider name.
     /// Passed through to WorkloadCompiler for imagePullSecrets injection.
-    image_providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    image_providers: BTreeMap<String, lattice_crd::crd::CredentialSpec>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -201,7 +201,7 @@ impl<'a> ServiceCompiler<'a> {
     /// Passed through to WorkloadCompiler.
     pub fn with_image_providers(
         mut self,
-        providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
+        providers: BTreeMap<String, lattice_crd::crd::CredentialSpec>,
     ) -> Self {
         self.image_providers = providers;
         self

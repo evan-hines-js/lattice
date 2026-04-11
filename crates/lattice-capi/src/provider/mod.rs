@@ -29,7 +29,7 @@ pub use proxmox::ProxmoxProvider;
 
 use async_trait::async_trait;
 
-use lattice_common::crd::{LatticeCluster, ProviderSpec, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
 
 /// A CAPI manifest represented as an untyped Kubernetes resource
@@ -278,7 +278,7 @@ pub struct ClusterConfig<'a> {
     /// Labels to apply to all resources
     pub labels: std::collections::BTreeMap<String, String>,
     /// Bootstrap mechanism (kubeadm or rke2)
-    pub bootstrap: lattice_common::crd::BootstrapProvider,
+    pub bootstrap: lattice_crd::crd::BootstrapProvider,
     /// Infrastructure provider type (Docker, Proxmox, etc.)
     pub provider_type: ProviderType,
     /// Resolved registry mirror configs (upstream → mirror host, optional credentials content)
@@ -344,14 +344,14 @@ impl VipConfig {
 /// Generate kube-vip static pod manifest
 fn generate_kube_vip_manifest(
     vip: &VipConfig,
-    bootstrap: &lattice_common::crd::BootstrapProvider,
+    bootstrap: &lattice_crd::crd::BootstrapProvider,
 ) -> Result<String> {
     use k8s_openapi::api::core::v1::{
         Capabilities, Container, EnvVar, HostAlias, HostPathVolumeSource, Pod, PodSpec,
         SecurityContext, Volume, VolumeMount,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     let kubeconfig_path = match bootstrap {
         BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
@@ -463,7 +463,7 @@ pub struct WorkerPoolConfig<'a> {
     /// Pool identifier (e.g., "general", "gpu")
     pub pool_id: &'a str,
     /// Worker pool specification
-    pub spec: &'a lattice_common::crd::WorkerPoolSpec,
+    pub spec: &'a lattice_crd::crd::WorkerPoolSpec,
 }
 
 /// Get the resource suffix for a pool
@@ -486,9 +486,9 @@ pub fn control_plane_name(cluster_name: &str) -> String {
 /// for the bootstrap provider (e.g., `+rke2r1` for RKE2).
 pub fn format_capi_version(
     raw_version: &str,
-    bootstrap: &lattice_common::crd::BootstrapProvider,
+    bootstrap: &lattice_crd::crd::BootstrapProvider,
 ) -> String {
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     let v = raw_version.trim_start_matches('v');
     match bootstrap {
@@ -509,7 +509,7 @@ pub fn generate_machine_deployment_for_pool(
     infra: &InfrastructureRef,
     pool: &WorkerPoolConfig,
 ) -> CAPIManifest {
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     let suffix = pool_resource_suffix(pool.pool_id);
     let deployment_name = format!("{}-{}", config.name, suffix);
@@ -672,7 +672,7 @@ pub fn generate_bootstrap_config_template_for_pool(
     config: &ClusterConfig,
     pool: &WorkerPoolConfig,
 ) -> CAPIManifest {
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     match config.bootstrap {
         BootstrapProvider::Kubeadm => generate_kubeadm_config_template_for_pool(config, pool),
@@ -979,7 +979,7 @@ fn generate_rke2_config_template_for_pool(
 /// infrastructureRef which points to the provider's infrastructure cluster resource
 /// (DockerCluster, AWSCluster, etc.)
 pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CAPIManifest {
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     // Control plane kind depends on bootstrap provider
     let cp_kind = match config.bootstrap {
@@ -1029,7 +1029,7 @@ pub fn generate_control_plane(
     infra: &InfrastructureRef,
     cp_config: &ControlPlaneConfig,
 ) -> Result<CAPIManifest> {
-    use lattice_common::crd::BootstrapProvider;
+    use lattice_crd::crd::BootstrapProvider;
 
     match config.bootstrap {
         BootstrapProvider::Kubeadm => generate_kubeadm_control_plane(config, infra, cp_config),
@@ -1380,7 +1380,7 @@ BOOTSTRAP_SCRIPT"#
 /// ```ignore
 /// use async_trait::async_trait;
 /// use lattice_capi::provider::{Provider, CAPIManifest, BootstrapInfo};
-/// use lattice_common::crd::{LatticeCluster, ProviderSpec};
+/// use lattice_crd::crd::{LatticeCluster, ProviderSpec};
 /// use lattice_common::Result;
 ///
 /// struct MyProvider;
@@ -1561,7 +1561,7 @@ mod tests {
 
     mod bootstrap_provider_manifests {
         use super::*;
-        use lattice_common::crd::BootstrapProvider;
+        use lattice_crd::crd::BootstrapProvider;
 
         fn test_config(bootstrap: BootstrapProvider) -> ClusterConfig<'static> {
             ClusterConfig {
@@ -1625,7 +1625,7 @@ mod tests {
         }
 
         fn test_pool() -> WorkerPoolConfig<'static> {
-            use lattice_common::crd::WorkerPoolSpec;
+            use lattice_crd::crd::WorkerPoolSpec;
             // Leak a Box to get a 'static reference for test purposes
             let spec = Box::leak(Box::new(WorkerPoolSpec {
                 replicas: 2,
@@ -1731,7 +1731,7 @@ mod tests {
 
         #[test]
         fn machine_deployment_has_autoscaler_annotations_when_min_max_set() {
-            use lattice_common::crd::WorkerPoolSpec;
+            use lattice_crd::crd::WorkerPoolSpec;
 
             let config = test_config(BootstrapProvider::Kubeadm);
             let infra = test_infra();
@@ -2141,7 +2141,7 @@ mod tests {
 
     mod format_capi_version_tests {
         use super::*;
-        use lattice_common::crd::BootstrapProvider;
+        use lattice_crd::crd::BootstrapProvider;
 
         #[test]
         fn kubeadm_adds_v_prefix() {

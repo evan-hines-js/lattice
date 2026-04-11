@@ -31,12 +31,12 @@ use mockall::automock;
 
 use kube::runtime::events::EventType;
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CostEstimate, LatticeModel, LatticeModelStatus, MetricsScraper, MetricsSnapshot,
     ModelCondition, ModelServingPhase, ProviderType,
 };
 use lattice_common::events::{actions, reasons, EventPublisher};
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 use lattice_cost::CostProvider;
@@ -292,7 +292,7 @@ impl ModelContext {
                     .expect("permit-all policy should parse"),
             ),
             events: Arc::new(lattice_common::NoopEventPublisher),
-            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
+            metrics_scraper: Arc::new(lattice_crd::crd::NoopMetricsScraper),
             cost_provider: None,
             cache: lattice_cache::ResourceCache::empty(),
         }
@@ -305,7 +305,7 @@ impl ModelContext {
 fn resolve_model_image_providers(
     model: &LatticeModel,
     cache: &lattice_cache::ResourceCache,
-) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
+) -> std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec> {
     let merged = model.spec.merged_roles();
     let mut provider_names = std::collections::BTreeSet::new();
     for role in merged.values() {
@@ -382,7 +382,7 @@ pub async fn reconcile(
         .unwrap_or_default();
     let quotas: Vec<_> = ctx
         .cache
-        .list::<lattice_common::crd::LatticeQuota>()
+        .list::<lattice_crd::crd::LatticeQuota>()
         .iter()
         .map(|q| (**q).clone())
         .collect();
@@ -691,7 +691,7 @@ pub async fn reconcile(
                 .await;
 
             let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.as_ref());
-            let metrics = lattice_common::crd::scrape_metrics(
+            let metrics = lattice_crd::crd::scrape_metrics(
                 ctx.metrics_scraper.as_ref(),
                 model.spec.observability.as_ref(),
                 namespace,
@@ -754,7 +754,7 @@ fn cleanup_graph(model: &LatticeModel, graph: &ServiceGraph, namespace: &str) {
 /// Compute the set of role graph keys (e.g. "llm-serving-prefill") from the spec.
 fn spec_role_keys(
     model_name: &str,
-    roles: &std::collections::BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    roles: &std::collections::BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
 ) -> std::collections::BTreeSet<String> {
     roles
         .keys()
@@ -1123,7 +1123,7 @@ struct StatusUpdate<'a> {
     message: Option<&'a str>,
     observed_generation: Option<i64>,
     conditions: Option<Vec<ModelCondition>>,
-    auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    auto_topology: Option<lattice_crd::crd::WorkloadNetworkTopology>,
     applied_roles: Option<Vec<String>>,
     cost: Option<CostEstimate>,
     metrics: Option<MetricsSnapshot>,
@@ -1158,7 +1158,7 @@ impl<'a> StatusUpdate<'a> {
         self
     }
 
-    fn auto_topology(mut self, topo: Option<lattice_common::crd::WorkloadNetworkTopology>) -> Self {
+    fn auto_topology(mut self, topo: Option<lattice_crd::crd::WorkloadNetworkTopology>) -> Self {
         self.auto_topology = topo;
         self
     }
@@ -1227,7 +1227,7 @@ mod tests {
                 generation: Some(1),
                 ..Default::default()
             },
-            spec: lattice_common::crd::LatticeModelSpec {
+            spec: lattice_crd::crd::LatticeModelSpec {
                 roles: BTreeMap::from([("serving".to_string(), make_role())]),
                 ..Default::default()
             },
@@ -1490,12 +1490,12 @@ mod tests {
     // Role Graph Key Tests
     // =========================================================================
 
-    fn make_minimal_workload() -> lattice_common::crd::workload::spec::WorkloadSpec {
+    fn make_minimal_workload() -> lattice_crd::crd::workload::spec::WorkloadSpec {
         use std::collections::BTreeMap;
-        lattice_common::crd::workload::spec::WorkloadSpec {
+        lattice_crd::crd::workload::spec::WorkloadSpec {
             containers: BTreeMap::from([(
                 "main".to_string(),
-                lattice_common::crd::ContainerSpec {
+                lattice_crd::crd::ContainerSpec {
                     image: "test:latest".to_string(),
                     ..Default::default()
                 },
@@ -1504,8 +1504,8 @@ mod tests {
         }
     }
 
-    fn make_role() -> lattice_common::crd::ModelRoleSpec {
-        lattice_common::crd::ModelRoleSpec {
+    fn make_role() -> lattice_crd::crd::ModelRoleSpec {
+        lattice_crd::crd::ModelRoleSpec {
             entry_workload: make_minimal_workload(),
             ..Default::default()
         }

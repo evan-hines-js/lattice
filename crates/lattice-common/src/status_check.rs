@@ -4,7 +4,7 @@
 //! Each merge patch generates a watch event (especially because `Condition::new()`
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
-use crate::crd::{
+use lattice_crd::crd::{
     BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus, ClusterBackupPhase,
     DNSProviderPhase, DNSProviderStatus, ImageProviderPhase, ImageProviderStatus,
     InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeClusterBackupStatus,

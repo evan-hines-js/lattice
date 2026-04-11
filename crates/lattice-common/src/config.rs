@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 
 /// Default Lattice container image
 pub const DEFAULT_IMAGE: &str = "ghcr.io/evan-hines-js/lattice:latest";

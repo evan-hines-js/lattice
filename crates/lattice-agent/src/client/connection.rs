@@ -450,7 +450,7 @@ async fn compute_cluster_hashes(
         Err(_) => return (vec![], vec![]),
     };
 
-    let api: kube::Api<lattice_common::crd::LatticeCluster> = kube::Api::all(client);
+    let api: kube::Api<lattice_crd::crd::LatticeCluster> = kube::Api::all(client);
     let cluster = match api.get(cluster_name).await {
         Ok(c) => c,
         Err(_) => return (vec![], vec![]),

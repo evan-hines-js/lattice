@@ -21,7 +21,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_common::crd::{validate_dns_label, ClusterRoute, LatticeClusterRoutes};
+use lattice_crd::crd::{validate_dns_label, ClusterRoute, LatticeClusterRoutes};
 use lattice_common::Error;
 
 const FIELD_MANAGER: &str = "lattice-remote-secret";

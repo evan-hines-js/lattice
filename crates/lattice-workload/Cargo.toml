@@ -12,9 +12,13 @@ fips = ["lattice-common/fips", "aws-lc-rs/fips"]
 # Internal
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+lattice-graph = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-secret-provider = { workspace = true }
 lattice-quota = { workspace = true }
+lattice-render = { workspace = true }
+lattice-template = { workspace = true }
 
 # Crypto (FIPS)
 aws-lc-rs = { workspace = true }

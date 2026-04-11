@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 
 use lattice_cell::bootstrap::{BootstrapState, ClusterRegistration, ManifestGenerator};
 use lattice_cell::parent::ParentServers;
-use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
 use super::cell::discover_cell_host;
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL};

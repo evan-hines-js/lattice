@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lattice_common::crd::BootstrapProvider;
+use lattice_crd::crd::BootstrapProvider;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use tracing::info;
 

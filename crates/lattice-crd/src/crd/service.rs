@@ -271,7 +271,7 @@ mod tests {
         DependencyDirection, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec,
         ResourceType, SecretParams, VolumeAccessMode,
     };
-    use lattice_template::TemplateString;
+    use crate::template_types::TemplateString;
 
     // =========================================================================
     // Test Fixtures

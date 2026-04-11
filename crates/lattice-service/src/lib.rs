@@ -10,6 +10,6 @@ pub mod compiler;
 pub mod controller;
 pub mod workload;
 
-// Bridge lattice_common types into this crate's namespace.
-// Internal modules use `crate::crd`, `crate::graph`, etc.
-pub(crate) use lattice_common::{crd, graph, Error};
+pub(crate) use lattice_common::Error;
+pub(crate) use lattice_crd::crd;
+pub(crate) use lattice_graph as graph;

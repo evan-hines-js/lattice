@@ -23,7 +23,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use kube::api::{DeleteParams, Patch, PatchParams};
 use kube::{Api, Client};
-use lattice_common::crd::{ClusterRoute, LatticeCluster, LatticeClusterRoutes};
+use lattice_crd::crd::{ClusterRoute, LatticeCluster, LatticeClusterRoutes};
 
 use lattice_proto::lattice_agent_server::{LatticeAgent, LatticeAgentServer};
 use lattice_proto::{

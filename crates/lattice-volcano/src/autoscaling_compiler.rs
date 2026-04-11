@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::LatticeModel;
+use lattice_crd::crd::LatticeModel;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
 use crate::routing_compiler::owner_reference;
@@ -177,7 +177,7 @@ pub fn compile_model_autoscaling(model: &LatticeModel) -> CompiledAutoscaling {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         AutoscalingMetric, LatticeModelSpec, ModelAutoscalingBehavior, ModelAutoscalingSpec,
         ModelRoleSpec, ModelScaleDownBehavior, ModelScaleUpBehavior, PortSpec, RuntimeSpec,
         ServicePortsSpec, WorkloadSpec,

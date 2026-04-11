@@ -100,7 +100,7 @@ impl Context {
         capi_installer: Arc<dyn CapiInstaller>,
     ) -> Self {
         use lattice_common::config::LatticeConfig;
-        use lattice_common::crd::ProviderType;
+        use lattice_crd::crd::ProviderType;
         Self {
             kube,
             client: None, // Tests use mocks, not real client

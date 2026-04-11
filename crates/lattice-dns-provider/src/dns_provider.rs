@@ -14,7 +14,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
+use lattice_crd::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 
@@ -154,7 +154,7 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         AzureDnsConfig, CloudflareConfig, CredentialSpec, DNSProviderSpec, GoogleDnsConfig,
         PiholeConfig, Route53Config,
     };

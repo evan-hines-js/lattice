@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use tracing::debug;
 
-use lattice_common::crd::CredentialSpec;
-use lattice_common::template::extract_secret_refs;
+use lattice_crd::crd::CredentialSpec;
+use lattice_render::extract_secret_refs;
 use lattice_common::ReconcileError;
 
 use crate::eso::{apply_external_secret, build_external_secret, build_templated_external_secret};

@@ -43,7 +43,7 @@ use kube::api::Api;
 use tracing::{info, warn};
 
 use lattice_cli::commands::install::Installer;
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 
 use super::super::chaos::{ChaosConfig, ChaosMonkey, ChaosTargets};
 use super::super::context::InfraContext;

@@ -1,7 +1,7 @@
 //! External endpoint authorization via Cedar policies
 
 use lattice_cedar::{ExternalEndpointAuthzRequest, PolicyEngine};
-use lattice_common::crd::WorkloadSpec;
+use lattice_crd::crd::WorkloadSpec;
 
 use crate::error::CompilationError;
 

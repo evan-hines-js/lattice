@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     ContainerSpec, MetricsConfig, ObservabilitySpec, PortSpec, ResourceQuantity,
     ResourceRequirements, SecurityContext, ServicePortsSpec, VolumeMount,
 };
@@ -51,7 +51,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// - Runs busybox httpd serving a static `/metrics` endpoint on port 9090
 /// - Has a port named `"metrics"` (triggers VMServiceScrape generation)
 /// - Has `observability.metrics.mappings` configured with a PromQL query
-fn build_observability_service() -> lattice_common::crd::LatticeService {
+fn build_observability_service() -> lattice_crd::crd::LatticeService {
     let script = format!(
         concat!(
             "mkdir -p /tmp/www && ",

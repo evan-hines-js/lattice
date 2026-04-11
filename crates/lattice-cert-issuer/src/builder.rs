@@ -6,7 +6,7 @@
 
 use serde_json::{json, Value};
 
-use lattice_common::crd::{CertIssuerSpec, DNSProviderSpec, DNSProviderType, IssuerType};
+use lattice_crd::crd::{CertIssuerSpec, DNSProviderSpec, DNSProviderType, IssuerType};
 
 use lattice_common::{LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
 
@@ -227,8 +227,8 @@ fn azure_dns01_solver(dp: &ResolvedDnsProvider<'_>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::CredentialSpec;
-    use lattice_common::crd::{
+    use lattice_crd::crd::CredentialSpec;
+    use lattice_crd::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
         PiholeConfig, Route53Config, VaultIssuerSpec,
     };

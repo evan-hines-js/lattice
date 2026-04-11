@@ -10,7 +10,7 @@ use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
 

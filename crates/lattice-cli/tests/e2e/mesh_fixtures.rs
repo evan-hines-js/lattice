@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     ContainerSpec, DependencyDirection, ExternalServiceParams, LatticeService, LatticeServiceSpec,
     PortSpec, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec, ResourceType,
     RuntimeSpec, SecurityContext, ServicePortsSpec, VolumeMount, WorkloadSpec,
@@ -482,7 +482,7 @@ pub fn create_public_api() -> LatticeService {
 /// and password which are injected as env vars.
 pub fn postgres_container(db_name: &str, user: &str, password: &str) -> ContainerSpec {
     use super::helpers::test_image;
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     let mut volumes = BTreeMap::new();
     volumes.insert("/var/run/postgresql".to_string(), emptydir(None, None));

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kube::api::Api;
-use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use tracing::{info, warn};
@@ -674,7 +674,7 @@ pub fn load_fixture_config<T: serde::de::DeserializeOwned>(filename: &str) -> Re
 }
 
 /// Load a LatticeService from a YAML fixture file in the services directory.
-pub fn load_service_config(filename: &str) -> Result<lattice_common::crd::LatticeService, String> {
+pub fn load_service_config(filename: &str) -> Result<lattice_crd::crd::LatticeService, String> {
     load_fixture_config(filename)
 }
 

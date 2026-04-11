@@ -30,12 +30,12 @@ const SERVICE_NAME: &str = "workload-features";
 
 /// Build a LatticeService exercising multiple workload compilation features:
 /// plain env vars, inline file mounts, emptyDir volumes, init sidecar, regular sidecar.
-fn build_workload_features_service() -> lattice_common::crd::LatticeService {
-    use lattice_common::crd::{
+fn build_workload_features_service() -> lattice_crd::crd::LatticeService {
+    use lattice_crd::crd::{
         ContainerSpec, ExecProbe, FileMount, Probe, ResourceQuantity, ResourceRequirements,
         SecurityContext, SidecarSpec, VolumeMount,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     // -- Main container --
     let mut variables = BTreeMap::new();

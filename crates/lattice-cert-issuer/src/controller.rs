@@ -16,7 +16,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CertIssuer, CertIssuerPhase, CertIssuerStatus, DNSProvider, DNSProviderPhase, IssuerType,
 };
 use lattice_common::status_check;
@@ -230,8 +230,8 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::CredentialSpec;
-    use lattice_common::crd::{AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, VaultIssuerSpec};
+    use lattice_crd::crd::CredentialSpec;
+    use lattice_crd::crd::{AcmeIssuerSpec, CaIssuerSpec, CertIssuerSpec, VaultIssuerSpec};
 
     // =========================================================================
     // Test Helpers

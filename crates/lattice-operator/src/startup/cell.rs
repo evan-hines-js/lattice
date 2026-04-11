@@ -9,7 +9,7 @@ use kube::Client;
 use lattice_common::kube_utils::build_cell_service;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
-use lattice_common::crd::{LatticeCluster, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 
 use super::polling::{
     wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,

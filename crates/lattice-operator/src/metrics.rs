@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use lattice_common::crd::MetricsSnapshot;
+use lattice_crd::crd::MetricsSnapshot;
 use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
 use tracing::warn;
 
@@ -151,7 +151,7 @@ fn validate_promql_template(template: &str) -> Result<(), String> {
 }
 
 #[async_trait]
-impl lattice_common::crd::MetricsScraper for VmMetricsScraper {
+impl lattice_crd::crd::MetricsScraper for VmMetricsScraper {
     async fn scrape(
         &self,
         mappings: &BTreeMap<String, String>,

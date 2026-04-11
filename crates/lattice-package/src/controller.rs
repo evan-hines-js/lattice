@@ -9,7 +9,7 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument};
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase};
+use lattice_crd::crd::{ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase};
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
 use crate::error::PackageError;

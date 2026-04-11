@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use lattice_cedar::{PolicyEngine, SecurityAuthzRequest, SecurityOverrideRequest};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     has_unknown_binary_entrypoint, RuntimeSpec, SecurityContext, WorkloadSpec,
 };
 
@@ -249,7 +249,7 @@ fn collect_container_overrides(
 mod tests {
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{ContainerSpec, RuntimeSpec, SecurityContext, WorkloadSpec};
+    use lattice_crd::crd::{ContainerSpec, RuntimeSpec, SecurityContext, WorkloadSpec};
 
     use super::*;
 

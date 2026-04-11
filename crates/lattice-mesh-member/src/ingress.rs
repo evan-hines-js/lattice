@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
     PathMatchType, RouteKind,
 };
@@ -439,7 +439,7 @@ impl IngressCompiler {
             ingress_rules.push(CiliumIngressRule {
                 to_ports: build_port_rules(
                     &listener_ports,
-                    lattice_common::crd::NetworkProtocol::Tcp,
+                    lattice_crd::crd::NetworkProtocol::Tcp,
                 ),
                 ..Default::default()
             });
@@ -502,7 +502,7 @@ impl IngressCompiler {
     fn build_host_listeners(
         service_name: &str,
         route_name: &str,
-        route_spec: &lattice_common::crd::RouteSpec,
+        route_spec: &lattice_crd::crd::RouteSpec,
         gateway_name: &str,
         namespace: &str,
         tls_secret_name: &str,
@@ -558,7 +558,7 @@ impl IngressCompiler {
         service_name: &str,
         namespace: &str,
         route_name: &str,
-        route_spec: &lattice_common::crd::RouteSpec,
+        route_spec: &lattice_crd::crd::RouteSpec,
         gateway_name: &str,
         backend_port: u16,
     ) -> (Vec<GatewayListener>, HttpRoute, Option<Certificate>) {
@@ -602,7 +602,7 @@ impl IngressCompiler {
         service_name: &str,
         namespace: &str,
         route_name: &str,
-        route_spec: &lattice_common::crd::RouteSpec,
+        route_spec: &lattice_crd::crd::RouteSpec,
         gateway_name: &str,
         backend_port: u16,
     ) -> (Vec<GatewayListener>, GrpcRoute, Option<Certificate>) {
@@ -646,7 +646,7 @@ impl IngressCompiler {
         service_name: &str,
         namespace: &str,
         route_name: &str,
-        route_spec: &lattice_common::crd::RouteSpec,
+        route_spec: &lattice_crd::crd::RouteSpec,
         gateway_name: &str,
         backend_port: u16,
     ) -> (Vec<GatewayListener>, TcpRoute, Option<Certificate>) {
@@ -707,7 +707,7 @@ impl IngressCompiler {
             .unwrap_or_else(|| format!("{}-{}-tls", service_name, route_name))
     }
 
-    fn build_http_matches(route_spec: &lattice_common::crd::RouteSpec) -> Vec<HttpRouteMatch> {
+    fn build_http_matches(route_spec: &lattice_crd::crd::RouteSpec) -> Vec<HttpRouteMatch> {
         if let Some(ref rules) = route_spec.rules {
             rules
                 .iter()
@@ -732,10 +732,10 @@ impl IngressCompiler {
                                         name: h.name.clone(),
                                         value: h.value.clone(),
                                         type_: h.type_.as_ref().map(|t| match t {
-                                            lattice_common::crd::HeaderMatchType::Exact => {
+                                            lattice_crd::crd::HeaderMatchType::Exact => {
                                                 "Exact".to_string()
                                             }
-                                            lattice_common::crd::HeaderMatchType::RegularExpression => {
+                                            lattice_crd::crd::HeaderMatchType::RegularExpression => {
                                                 "RegularExpression".to_string()
                                             }
                                             _ => "Exact".to_string(),
@@ -760,7 +760,7 @@ impl IngressCompiler {
         }
     }
 
-    fn build_grpc_matches(route_spec: &lattice_common::crd::RouteSpec) -> Vec<GrpcRouteMatch> {
+    fn build_grpc_matches(route_spec: &lattice_crd::crd::RouteSpec) -> Vec<GrpcRouteMatch> {
         if let Some(ref rules) = route_spec.rules {
             rules
                 .iter()
@@ -782,7 +782,7 @@ impl IngressCompiler {
         service_name: &str,
         namespace: &str,
         route_name: &str,
-        route_spec: &lattice_common::crd::RouteSpec,
+        route_spec: &lattice_crd::crd::RouteSpec,
     ) -> Option<Certificate> {
         let tls = route_spec.tls.as_ref()?;
         let issuer_ref = tls.issuer_ref.as_ref()?;
@@ -812,7 +812,7 @@ impl IngressCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         CertIssuerRef, HeaderMatch as CrdHeaderMatch, HeaderMatchType as CrdHeaderMatchType,
         PathMatch as CrdPathMatch, PeerAuth, RouteKind, RouteMatch as CrdRouteMatch,
         RouteRule as CrdRouteRule, RouteSpec as CrdRouteSpec,

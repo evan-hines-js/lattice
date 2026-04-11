@@ -4,14 +4,12 @@
 
 pub mod capi_lifecycle;
 pub mod config;
-pub use lattice_crd::crd;
 pub mod crd_registry;
 pub mod credentials;
 pub mod error;
 pub mod events;
 pub mod fips;
 pub mod gpu;
-pub mod graph;
 pub mod kube_utils;
 pub mod leader_election;
 pub mod mesh;
@@ -24,7 +22,6 @@ pub mod retry;
 pub mod routing;
 pub mod status_check;
 pub mod telemetry;
-pub mod template;
 pub mod watcher;
 
 pub use config::{LatticeConfig, SharedConfig};

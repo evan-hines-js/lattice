@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
+use lattice_crd::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
@@ -141,7 +141,7 @@ fn resolve_topology(
 }
 
 fn compile_roles(
-    role_specs: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    role_specs: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
     role_templates: &BTreeMap<String, RoleTemplates>,
 ) -> Vec<ModelServingRole> {
     role_specs
@@ -167,7 +167,7 @@ fn compile_roles(
 /// conflicts with Kthena's immutability constraint on `minRoleReplicas` — the
 /// value stays stable across replica changes, so SSA updates never hit a 422.
 fn compute_gang_policy(
-    role_specs: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    role_specs: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
 ) -> GangPolicy {
     let min_role_replicas = role_specs.keys().map(|name| (name.clone(), 1)).collect();
     GangPolicy { min_role_replicas }
@@ -176,7 +176,7 @@ fn compute_gang_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         LatticeModelSpec, ModelRoleSpec, RecoveryPolicy, RuntimeSpec, TopologyMode,
         WorkloadNetworkTopology, WorkloadSpec,
     };
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn kv_connector_auto_injects_topology() {
-        use lattice_common::crd::{
+        use lattice_crd::crd::{
             InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
         };
 
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn mooncake_connector_auto_injects_tier_3() {
-        use lattice_common::crd::{
+        use lattice_crd::crd::{
             InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
         };
 

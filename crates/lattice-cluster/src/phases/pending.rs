@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
 use lattice_capi::installer::CapiProviderConfig;
-use lattice_common::crd::{ClusterPhase, LatticeCluster};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{capi_namespace, Error};
@@ -142,7 +142,7 @@ async fn handle_child_cluster(
         })?;
 
     // Validate InfraProvider has credentials for non-Docker providers
-    if provider_type != lattice_common::crd::ProviderType::Docker
+    if provider_type != lattice_crd::crd::ProviderType::Docker
         && cloud_provider.spec.credentials.is_none()
     {
         return Err(Error::validation(format!(

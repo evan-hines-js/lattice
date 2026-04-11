@@ -3,7 +3,7 @@
 //! Converts `PackageMeshConfig` into a `LatticeMeshMember` CR that the
 //! mesh-member controller reconciles into Cilium + Istio policies.
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PackageMeshConfig,
     PeerAuth,
 };
@@ -60,7 +60,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{PackageMeshPort, ServiceRef};
+    use lattice_crd::crd::{PackageMeshPort, ServiceRef};
 
     #[test]
     fn builds_mesh_member_from_config() {
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn includes_egress_rules() {
-        use lattice_common::crd::{EgressRule, EgressTarget, NetworkProtocol};
+        use lattice_crd::crd::{EgressRule, EgressTarget, NetworkProtocol};
 
         let mesh = PackageMeshConfig {
             selector: BTreeMap::from([("app".to_string(), "redis".to_string())]),

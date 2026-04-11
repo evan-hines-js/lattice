@@ -13,7 +13,7 @@ use tracing::{info, warn};
 #[cfg(test)]
 use mockall::automock;
 
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 use lattice_common::{DistributableResources, Error};
 use lattice_move::CellMoverConfig;
 use lattice_proto::AgentState;

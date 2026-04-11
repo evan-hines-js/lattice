@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
+use lattice_crd::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 
@@ -177,7 +177,7 @@ fn default_policies(_max_retry: Option<u32>) -> Vec<VCJobTaskPolicy> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ConcurrencyPolicy, JobTaskSpec, LatticeJobSpec, RuntimeSpec, VolcanoPolicy,
         VolcanoPolicyAction, VolcanoPolicyEvent, WorkloadSpec,
     };

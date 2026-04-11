@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
 use lattice_common::capi_lifecycle::{teardown_cluster, TeardownConfig};
-use lattice_common::crd::{LatticeCluster, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_common::kube_utils;
 use lattice_common::{capi_namespace, kubeconfig_secret_name};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;

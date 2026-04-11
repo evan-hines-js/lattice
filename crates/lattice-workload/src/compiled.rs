@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::LatticeMeshMember;
+use lattice_crd::crd::LatticeMeshMember;
 use lattice_secret_provider::eso::ExternalSecret;
 
 use crate::k8s::{ConfigMap, Secret};

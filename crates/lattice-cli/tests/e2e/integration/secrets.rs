@@ -29,7 +29,7 @@
 #![cfg(feature = "provider-e2e")]
 
 use kube::Api;
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use lattice_common::LOCAL_WEBHOOK_STORE_NAME;
 use tracing::info;
 
@@ -531,7 +531,7 @@ pub async fn run_secrets_route_tests(kubeconfig: &str, namespace: &str) -> Resul
 ///
 /// Takes an existing service and patches its `main` container's variables.
 fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> LatticeService {
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     if let Some(container) = service.spec.workload.containers.get_mut("main") {
         for (name, value) in vars {

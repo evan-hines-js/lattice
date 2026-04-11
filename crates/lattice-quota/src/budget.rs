@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use kube::ResourceExt;
-use lattice_common::crd::LatticeQuota;
+use lattice_crd::crd::LatticeQuota;
 use lattice_common::resources::{parse_resource_by_key, WorkloadResourceDemand};
 
 /// Snapshot of a quota's identity at read time, for optimistic concurrency.
@@ -53,7 +53,7 @@ impl QuotaBudget {
         namespace_labels: &BTreeMap<String, String>,
         workload_annotations: &BTreeMap<String, String>,
     ) -> Self {
-        use lattice_common::crd::QuotaPrincipal;
+        use lattice_crd::crd::QuotaPrincipal;
 
         let mut budget = Self::default();
         let mut has_match = false;
@@ -184,7 +184,7 @@ impl QuotaBudget {
     /// (another compilation may have consumed budget — caller should requeue).
     pub async fn verify_freshness(&self, client: &kube::Client) -> Result<bool, kube::Error> {
         use kube::api::Api;
-        use lattice_common::crd::LatticeQuota;
+        use lattice_crd::crd::LatticeQuota;
 
         for snap in &self.snapshots {
             let api: Api<LatticeQuota> = Api::namespaced(client.clone(), &snap.namespace);
@@ -205,7 +205,7 @@ impl QuotaBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus};
+    use lattice_crd::crd::{LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus};
 
     fn make_quota(soft_cpu: &str, used_cpu: Option<&str>, max_cpu: Option<&str>) -> LatticeQuota {
         let mut quota = LatticeQuota::new(

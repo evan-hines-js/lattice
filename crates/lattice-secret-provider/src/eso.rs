@@ -433,7 +433,7 @@ pub struct ExternalSecretExtract {
 // Shared ExternalSecret Builders
 // =============================================================================
 
-use lattice_common::template::FileSecretRef;
+use lattice_render::FileSecretRef;
 
 /// Build an ExternalSecret that syncs from a ClusterSecretStore.
 ///

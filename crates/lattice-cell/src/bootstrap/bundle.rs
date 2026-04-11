@@ -5,7 +5,7 @@
 //! bootstrap webhook (child clusters) call this function.
 
 use kube::CustomResourceExt;
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 
 use super::addons;
 use super::errors::BootstrapError;

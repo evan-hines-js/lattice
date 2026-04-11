@@ -19,8 +19,8 @@ use std::time::Duration;
 use kube::api::Api;
 use tracing::info;
 
-use lattice_common::crd::workload::ingress::AdvertiseConfig;
-use lattice_common::crd::{
+use lattice_crd::crd::workload::ingress::AdvertiseConfig;
+use lattice_crd::crd::{
     ContainerSpec, IngressSpec, LatticeService, LatticeServiceSpec, PortSpec, RouteKind, RouteSpec,
     ServicePortsSpec, WorkloadSpec,
 };
@@ -47,9 +47,9 @@ fn build_advertised_service(
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    use lattice_common::crd::{ResourceQuantity, ResourceRequirements};
+    use lattice_crd::crd::{ResourceQuantity, ResourceRequirements};
 
-    use lattice_common::crd::VolumeMount;
+    use lattice_crd::crd::VolumeMount;
 
     let mut volumes = BTreeMap::new();
     volumes.insert("/tmp".to_string(), VolumeMount::default());
@@ -135,7 +135,7 @@ fn build_cross_cluster_consumer(
     remote_namespace: &str,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType};
+    use lattice_crd::crd::{DependencyDirection, ResourceSpec, ResourceType};
 
     // Use the K8s Service DNS name — istiod discovers remote services under
     // their real names, not custom hostnames.

@@ -12,6 +12,7 @@ fips = ["lattice-common/fips"]
 # Internal
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
 
 # Cedar
 cedar-policy = { workspace = true }

@@ -1,8 +1,8 @@
 //! Volume authorization — owner consent + Cedar policy
 
 use lattice_cedar::{PolicyEngine, VolumeAuthzRequest};
-use lattice_common::crd::WorkloadSpec;
-use lattice_common::graph::ServiceGraph;
+use lattice_crd::crd::WorkloadSpec;
+use lattice_graph::ServiceGraph;
 
 use crate::error::CompilationError;
 

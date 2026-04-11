@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use kube::api::Api;
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 use tracing::info;
 
 use super::super::helpers::{

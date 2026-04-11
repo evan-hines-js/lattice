@@ -82,7 +82,7 @@ async fn deploy_and_wait(
 ) -> Result<(), String> {
     ensure_fresh_namespace(kubeconfig, namespace).await?;
 
-    let job: lattice_common::crd::LatticeJob = load_fixture_config(fixture)?;
+    let job: lattice_crd::crd::LatticeJob = load_fixture_config(fixture)?;
     let yaml =
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;

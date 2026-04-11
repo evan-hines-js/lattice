@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::template::RenderedVariable;
+use lattice_render::RenderedVariable;
 
 use crate::k8s::{ConfigMap, ConfigMapEnvSource, EnvFromSource, Secret, SecretEnvSource};
 

@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use lattice_common::template::TemplateError;
+use lattice_render::TemplateError;
 
 /// Errors that can occur during workload compilation
 #[derive(Debug)]

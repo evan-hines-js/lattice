@@ -13,7 +13,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget,
     SecretProvider, SecretProviderPhase,
 };
@@ -735,7 +735,7 @@ async fn update_status(
         .namespace()
         .unwrap_or_else(|| LATTICE_SYSTEM_NAMESPACE.to_string());
 
-    let status = lattice_common::crd::SecretProviderStatus {
+    let status = lattice_crd::crd::SecretProviderStatus {
         phase,
         message,
         last_validated: Some(chrono::Utc::now().to_rfc3339()),
@@ -931,7 +931,7 @@ mod tests {
 
     /// Build a vault SecretProvider with a given server URL for testing.
     fn vault_secret_provider(name: &str, server: &str) -> SecretProvider {
-        use lattice_common::crd::SecretProviderSpec;
+        use lattice_crd::crd::SecretProviderSpec;
 
         let mut provider = serde_json::Map::new();
         provider.insert(
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn egress_lmm_not_needed_for_cluster_local_webhook() {
-        use lattice_common::crd::SecretProviderSpec;
+        use lattice_crd::crd::SecretProviderSpec;
 
         let mut provider = serde_json::Map::new();
         provider.insert(

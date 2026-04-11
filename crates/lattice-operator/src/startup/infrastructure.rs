@@ -14,7 +14,7 @@ use lattice_common::{ParentConnectionConfig, SharedConfig};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_capi::installer::{CapiInstaller, CapiProviderConfig};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig, ProviderType,
 };
 use lattice_infra::bootstrap::{self, InfrastructureConfig};

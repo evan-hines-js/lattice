@@ -33,12 +33,12 @@ const SERVICE_WITHOUT_TOPO: &str = "notopo-service";
 // =============================================================================
 
 /// Build a LatticeService with topology-aware scheduling enabled (soft, maxTier 2)
-fn build_service_with_topology() -> lattice_common::crd::LatticeService {
-    use lattice_common::crd::{
+fn build_service_with_topology() -> lattice_crd::crd::LatticeService {
+    use lattice_crd::crd::{
         ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext, TopologyMode,
         WorkloadNetworkTopology,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     let mut variables = BTreeMap::new();
     variables.insert("ROLE".to_string(), TemplateString::new("topology-test"));
@@ -84,11 +84,11 @@ fn build_service_with_topology() -> lattice_common::crd::LatticeService {
 }
 
 /// Build a LatticeService without topology (baseline comparison)
-fn build_service_without_topology() -> lattice_common::crd::LatticeService {
-    use lattice_common::crd::{
+fn build_service_without_topology() -> lattice_crd::crd::LatticeService {
+    use lattice_crd::crd::{
         ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     let mut variables = BTreeMap::new();
     variables.insert("ROLE".to_string(), TemplateString::new("no-topology-test"));

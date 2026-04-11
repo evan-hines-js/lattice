@@ -22,7 +22,7 @@ use kube::{Client, Resource};
 use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{create_provider, CAPIManifest};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
 };
 use lattice_common::events::{actions, reasons};
@@ -332,7 +332,7 @@ pub async fn generate_capi_manifests(
 /// then reads the ESO-synced secrets to extract `.dockerconfigjson` content.
 /// Returns a map of remote_key → dockerconfigjson content.
 async fn resolve_registry_credentials(
-    mirrors: &[lattice_common::crd::RegistryMirror],
+    mirrors: &[lattice_crd::crd::RegistryMirror],
     ctx: &crate::controller::Context,
 ) -> Result<std::collections::HashMap<String, String>, Error> {
     use lattice_secret_provider::credentials::{reconcile_credentials, ProviderCredentialConfig};

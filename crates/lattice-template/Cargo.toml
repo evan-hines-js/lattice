@@ -6,9 +6,15 @@ license.workspace = true
 description = "Template expansion for Lattice — walks Value trees, resolves ${...} placeholders and $secret directives"
 
 [dependencies]
+lattice-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "expand"
+harness = false

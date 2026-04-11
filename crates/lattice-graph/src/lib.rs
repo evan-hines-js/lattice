@@ -13,15 +13,14 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
-use crate::crd::{
+use lattice_crd::crd::{
     EgressRule, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberTarget, PeerAuth, ServiceRef,
     VolumeParams, WorkloadSpec,
 };
+use lattice_core::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 
 /// Fully qualified service reference: (namespace, name)
 pub type QualifiedName = (String, String);
-
-use crate::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 
 /// Type of service node in the graph
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -371,7 +370,7 @@ impl ServiceNode {
     pub fn istio_match_labels(&self) -> BTreeMap<String, String> {
         self.selector
             .clone()
-            .unwrap_or_else(|| BTreeMap::from([(crate::LABEL_NAME.to_string(), self.name.clone())]))
+            .unwrap_or_else(|| BTreeMap::from([(lattice_core::LABEL_NAME.to_string(), self.name.clone())]))
     }
 
     /// Effective match labels for Cilium policies (custom selector with k8s: prefix or CILIUM_LABEL_NAME).
@@ -385,7 +384,7 @@ impl ServiceNode {
                     .collect()
             })
             .unwrap_or_else(|| {
-                BTreeMap::from([(crate::CILIUM_LABEL_NAME.to_string(), self.name.clone())])
+                BTreeMap::from([(lattice_core::CILIUM_LABEL_NAME.to_string(), self.name.clone())])
             })
     }
 
@@ -534,7 +533,7 @@ pub fn compute_edge_hash(
         let _ = write!(input, "out:{ns}/{name}->");
     }
     let _ = write!(input, "cedar:{cedar_epoch}");
-    crate::deterministic_hash(&input)
+    lattice_core::deterministic_hash(&input)
 }
 
 /// Volume ownership record: who owns a shared volume and who may consume it
@@ -750,7 +749,7 @@ impl ServiceGraph {
     /// Remote services are registered with `allowed_callers` derived from the
     /// route's `allowed_services`. Empty list = fail-closed (nobody allowed).
     /// Must use `["*"]` explicitly to allow all callers.
-    pub fn put_remote_service(&self, source_cluster: &str, route: &crate::crd::ClusterRoute) {
+    pub fn put_remote_service(&self, source_cluster: &str, route: &lattice_crd::crd::ClusterRoute) {
         let namespace = &route.service_namespace;
         let name = &route.service_name;
 
@@ -828,7 +827,7 @@ impl ServiceGraph {
     /// Removes all `Remote` nodes that were sourced from `source_cluster` and
     /// inserts the new routes. This is per-cluster, so updates from cluster A
     /// don't affect routes from cluster B (no flapping).
-    pub fn sync_remote_services(&self, source_cluster: &str, routes: &[crate::crd::ClusterRoute]) {
+    pub fn sync_remote_services(&self, source_cluster: &str, routes: &[lattice_crd::crd::ClusterRoute]) {
         // Remove existing remote nodes from this source cluster only
         let stale_keys: Vec<QualifiedName> = self
             .vertices
@@ -1302,11 +1301,11 @@ pub type SharedServiceGraph = Arc<ServiceGraph>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::VMAGENT_SA_NAME;
+    use lattice_core::VMAGENT_SA_NAME;
     use std::collections::BTreeMap;
 
     fn make_service_spec(deps: Vec<&str>, callers: Vec<&str>) -> LatticeServiceSpec {
-        use crate::crd::{
+        use lattice_crd::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceSpec, ServicePortsSpec,
             WorkloadSpec,
         };
@@ -1373,7 +1372,7 @@ mod tests {
 
     #[test]
     fn test_cross_namespace_dependency() {
-        use crate::crd::{
+        use lattice_crd::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
             ResourceType, ServicePortsSpec, WorkloadSpec,
         };
@@ -1562,7 +1561,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_cross_namespace() {
-        use crate::crd::{
+        use lattice_crd::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
             ResourceType, ServicePortsSpec, WorkloadSpec,
         };
@@ -1750,7 +1749,7 @@ mod tests {
         callers: Vec<&str>,
         deps: Vec<&str>,
     ) -> LatticeMeshMemberSpec {
-        use crate::crd::{MeshMemberPort, PeerAuth, ServiceRef};
+        use lattice_crd::crd::{MeshMemberPort, PeerAuth, ServiceRef};
 
         LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(labels),
@@ -1808,7 +1807,7 @@ mod tests {
 
         // api depends on prometheus — need cross-namespace dep, build manually
         {
-            use crate::crd::{
+            use lattice_crd::crd::{
                 ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
                 ResourceType, ServicePortsSpec, WorkloadSpec,
             };
@@ -1895,11 +1894,11 @@ mod tests {
 
         let spec = LatticeMeshMemberSpec {
             target: MeshMemberTarget::Namespace("kube-system".to_string()),
-            ports: vec![crate::crd::MeshMemberPort {
+            ports: vec![lattice_crd::crd::MeshMemberPort {
                 port: 443,
                 service_port: None,
                 name: "https".to_string(),
-                peer_auth: crate::crd::PeerAuth::Permissive,
+                peer_auth: lattice_crd::crd::PeerAuth::Permissive,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
@@ -2040,7 +2039,7 @@ mod tests {
         graph.put_mesh_member("monitoring", "scraper", &spec);
 
         // api in prod allows scraper from monitoring
-        use crate::crd::{
+        use lattice_crd::crd::{
             ContainerSpec, DependencyDirection, PortSpec, ResourceParams, ResourceSpec,
             ResourceType, ServicePortsSpec, WorkloadSpec,
         };
@@ -2171,7 +2170,7 @@ mod tests {
 
     #[test]
     fn test_depends_all_excludes_remote_services() {
-        use crate::crd::ClusterRoute;
+        use lattice_crd::crd::ClusterRoute;
 
         let graph = ServiceGraph::new("lattice.test").with_cluster_name("mgmt");
 
@@ -2214,7 +2213,7 @@ mod tests {
     // =========================================================================
     #[test]
     fn put_service_preserves_mesh_member_egress_rules() {
-        use crate::crd::{
+        use lattice_crd::crd::{
             EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
         };
 
@@ -2223,7 +2222,7 @@ mod tests {
         // MeshMember controller writes node with egress rules
         let mm_spec = LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::new()),
-            ports: vec![crate::crd::MeshMemberPort {
+            ports: vec![lattice_crd::crd::MeshMemberPort {
                 port: 8080,
                 service_port: None,
                 name: "http".to_string(),
@@ -2271,7 +2270,7 @@ mod tests {
 
     #[test]
     fn put_mesh_member_overwrites_service_egress_rules() {
-        use crate::crd::{
+        use lattice_crd::crd::{
             EgressRule, EgressTarget, LatticeMeshMemberSpec, MeshMemberTarget, PeerAuth,
         };
 
@@ -2284,14 +2283,14 @@ mod tests {
         // MeshMember controller writes node with egress rules
         let mm_spec = LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::new()),
-            ports: vec![crate::crd::MeshMemberPort {
+            ports: vec![lattice_crd::crd::MeshMemberPort {
                 port: 8080,
                 service_port: None,
                 name: "http".to_string(),
                 peer_auth: PeerAuth::Strict,
             }],
             allowed_callers: vec![],
-            dependencies: vec![crate::crd::ServiceRef {
+            dependencies: vec![lattice_crd::crd::ServiceRef {
                 name: "api".to_string(),
                 namespace: None,
             }],
@@ -2316,7 +2315,7 @@ mod tests {
     /// extra_callers means "no callers" (same as put_service).
     #[test]
     fn test_put_workload_extra_callers_are_authoritative() {
-        use crate::crd::ServiceRef;
+        use lattice_crd::crd::ServiceRef;
 
         let graph = ServiceGraph::new("lattice.test");
 

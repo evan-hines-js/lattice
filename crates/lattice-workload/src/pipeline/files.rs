@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use lattice_common::template::{FileSecretRef, RenderedFile};
+use lattice_render::{FileSecretRef, RenderedFile};
 use lattice_secret_provider::eso::ExternalSecret;
 
 use crate::error::CompilationError;

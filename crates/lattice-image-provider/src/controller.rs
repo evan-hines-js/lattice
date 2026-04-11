@@ -12,7 +12,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
+use lattice_crd::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
@@ -184,7 +184,7 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{ImageProviderSpec, ImageProviderType};
+    use lattice_crd::crd::{ImageProviderSpec, ImageProviderType};
 
     fn sample_provider(provider_type: ImageProviderType, registry: &str) -> ImageProvider {
         ImageProvider::new("test", ImageProviderSpec::new(provider_type, registry))

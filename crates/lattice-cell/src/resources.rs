@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
@@ -273,7 +273,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{InfraProviderSpec, InfraProviderType};
+    use lattice_crd::crd::{InfraProviderSpec, InfraProviderType};
 
     // =========================================================================
     // serialize_for_distribution Tests
@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn test_serialize_for_distribution_with_eso_credentials() {
         let mut cp = sample_cloud_provider();
-        cp.spec.credentials = Some(lattice_common::crd::CredentialSpec {
+        cp.spec.credentials = Some(lattice_crd::crd::CredentialSpec {
             id: "infra/aws/prod".to_string(),
             provider: "lattice-local".to_string(),
             ..Default::default()
@@ -431,7 +431,7 @@ mod tests {
     // =========================================================================
 
     fn sample_cedar_policy() -> CedarPolicy {
-        use lattice_common::crd::CedarPolicySpec;
+        use lattice_crd::crd::CedarPolicySpec;
 
         let mut policy = CedarPolicy::new(
             "admin-access",
@@ -449,7 +449,7 @@ mod tests {
     }
 
     fn sample_oidc_provider() -> OIDCProvider {
-        use lattice_common::crd::OIDCProviderSpec;
+        use lattice_crd::crd::OIDCProviderSpec;
 
         let mut provider = OIDCProvider::new(
             "corporate-idp",

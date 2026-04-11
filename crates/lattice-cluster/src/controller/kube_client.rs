@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 #[cfg(test)]
 use mockall::automock;
 
-use lattice_common::crd::{LatticeCluster, LatticeClusterStatus};
+use lattice_crd::crd::{LatticeCluster, LatticeClusterStatus};
 use lattice_common::{Error, CELL_SERVICE_NAME, OPERATOR_NAME};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
@@ -23,7 +23,7 @@ use super::FIELD_MANAGER;
 pub struct NodeCounts {
     pub ready_control_plane: u32,
     pub ready_workers: u32,
-    pub pool_resources: Vec<lattice_common::crd::PoolResourceSummary>,
+    pub pool_resources: Vec<lattice_crd::crd::PoolResourceSummary>,
 }
 
 /// Trait abstracting Kubernetes client operations for LatticeCluster
@@ -69,7 +69,7 @@ pub trait KubeClient: Send + Sync {
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
-        provider_type: &lattice_common::crd::ProviderType,
+        provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error>;
 
     /// Add a finalizer to a LatticeCluster
@@ -110,7 +110,7 @@ pub trait KubeClient: Send + Sync {
     async fn get_cloud_provider(
         &self,
         name: &str,
-    ) -> Result<Option<lattice_common::crd::InfraProvider>, Error>;
+    ) -> Result<Option<lattice_crd::crd::InfraProvider>, Error>;
 
     /// Cordon a node (set spec.unschedulable = true).
     ///
@@ -245,7 +245,7 @@ impl KubeClient for KubeClientImpl {
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
-        provider_type: &lattice_common::crd::ProviderType,
+        provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Service;
 
@@ -427,8 +427,8 @@ impl KubeClient for KubeClientImpl {
     async fn get_cloud_provider(
         &self,
         name: &str,
-    ) -> Result<Option<lattice_common::crd::InfraProvider>, Error> {
-        use lattice_common::crd::InfraProvider;
+    ) -> Result<Option<lattice_crd::crd::InfraProvider>, Error> {
+        use lattice_crd::crd::InfraProvider;
 
         Ok(self
             .cache

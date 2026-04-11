@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     AutoscalingMetric, AutoscalingSpec, ContainerSpec, PortSpec, ResourceQuantity,
     ResourceRequirements, SecurityContext, ServicePortsSpec, VolumeMount,
 };
@@ -60,7 +60,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Uses busybox with an infinite loop (`while true; do :; done`) to consume
 /// 100% of one CPU core. With a 10m CPU request and 20% target threshold,
 /// KEDA will immediately detect massive utilization and scale up.
-fn build_cpu_burner_service() -> lattice_common::crd::LatticeService {
+fn build_cpu_burner_service() -> lattice_crd::crd::LatticeService {
     let container = ContainerSpec {
         image: BUSYBOX_IMAGE.to_string(),
         command: Some(vec!["/bin/sh".to_string()]),
@@ -111,7 +111,7 @@ fn build_cpu_burner_service() -> lattice_common::crd::LatticeService {
 /// gauge. The service exposes a port named `metrics` (port 9090) which triggers
 /// automatic VMServiceScrape generation by the compiler. VictoriaMetrics scrapes
 /// this via the VMServiceScrape, and KEDA queries VictoriaMetrics to trigger scale-up.
-fn build_metrics_server_service() -> lattice_common::crd::LatticeService {
+fn build_metrics_server_service() -> lattice_crd::crd::LatticeService {
     // busybox httpd serves static files — write metrics content then start httpd
     let script = format!(
         concat!(

@@ -61,7 +61,7 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
 
     ensure_fresh_namespace(kubeconfig, COST_NAMESPACE).await?;
 
-    let service: lattice_common::crd::LatticeService =
+    let service: lattice_crd::crd::LatticeService =
         super::super::helpers::load_fixture_config("cost-service.yaml")?;
     let yaml = serde_json::to_string(&service)
         .map_err(|e| format!("Failed to serialize service fixture: {e}"))?;

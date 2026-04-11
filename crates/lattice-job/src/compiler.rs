@@ -17,14 +17,14 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
     ServicePortsSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_common::template::TemplateString;
+use lattice_template::TemplateString;
 use lattice_common::LABEL_TRAINING_JOB;
 use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{inject_pod_labels, CompiledConfig, WorkloadCompiler};
@@ -70,7 +70,7 @@ pub async fn compile_job(
     provider_type: ProviderType,
     cedar: &PolicyEngine,
     quota_budget: Option<&lattice_quota::QuotaBudget>,
-    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    image_providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
 ) -> Result<CompiledJob, JobError> {
     let name = job.metadata.name.as_deref().ok_or(JobError::MissingName)?;
     let namespace = job
@@ -188,7 +188,7 @@ pub async fn compile_job(
         for mm in &mut mesh_members {
             mm.spec.allow_peer_traffic = true;
             mm.spec.ambient = false;
-            mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
+            mm.spec.target = lattice_crd::crd::MeshMemberTarget::Selector(
                 [(LABEL_TRAINING_JOB.to_string(), name.to_string())]
                     .into_iter()
                     .collect(),
@@ -282,7 +282,7 @@ fn prepare_training_tasks(
         // restarts the container locally, which prevents Volcano's PodFailed→RestartJob
         // gang restart from ever triggering. Override if the user set something else.
         match &task.restart_policy {
-            Some(policy) if *policy != lattice_common::crd::RestartPolicy::Never => {
+            Some(policy) if *policy != lattice_crd::crd::RestartPolicy::Never => {
                 tracing::warn!(
                     task = task_name.as_str(),
                     policy = %policy,
@@ -290,10 +290,10 @@ fn prepare_training_tasks(
                      (was '{}' — kubelet restarts prevent Volcano gang restart)",
                     policy,
                 );
-                task.restart_policy = Some(lattice_common::crd::RestartPolicy::Never);
+                task.restart_policy = Some(lattice_crd::crd::RestartPolicy::Never);
             }
             None => {
-                task.restart_policy = Some(lattice_common::crd::RestartPolicy::Never);
+                task.restart_policy = Some(lattice_crd::crd::RestartPolicy::Never);
             }
             Some(_) => {} // Already Never
         }
@@ -302,9 +302,9 @@ fn prepare_training_tasks(
         // marks the job as completed when the coordinator finishes. Only inject
         // if the user hasn't provided explicit task-level policies.
         if *task_name == *coordinator && task.policies.is_none() {
-            task.policies = Some(vec![lattice_common::crd::VolcanoPolicy {
-                event: lattice_common::crd::VolcanoPolicyEvent::TaskCompleted,
-                action: lattice_common::crd::VolcanoPolicyAction::CompleteJob,
+            task.policies = Some(vec![lattice_crd::crd::VolcanoPolicy {
+                event: lattice_crd::crd::VolcanoPolicyEvent::TaskCompleted,
+                action: lattice_crd::crd::VolcanoPolicyAction::CompleteJob,
             }]);
         }
 
@@ -588,7 +588,7 @@ fn inject_rank_env(template: &mut serde_json::Value, rank_offset: u32) {
 /// Extract a field from the first GPU resource in the workload.
 fn gpu_param<T>(
     workload: &WorkloadSpec,
-    f: impl Fn(&lattice_common::crd::GpuParams) -> Option<T>,
+    f: impl Fn(&lattice_crd::crd::GpuParams) -> Option<T>,
 ) -> Option<T> {
     workload
         .resources
@@ -627,7 +627,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, GpuParams, JobTaskSpec, LatticeJobSpec, NcclConfig, ResourceParams,
         ResourceSpec, ResourceType, RestartPolicy, RuntimeSpec, TrainingConfig, TrainingFramework,
         WorkloadSpec,
@@ -977,11 +977,11 @@ mod tests {
         assert_eq!(master_policies.len(), 1);
         assert_eq!(
             master_policies[0].event,
-            lattice_common::crd::VolcanoPolicyEvent::TaskCompleted
+            lattice_crd::crd::VolcanoPolicyEvent::TaskCompleted
         );
         assert_eq!(
             master_policies[0].action,
-            lattice_common::crd::VolcanoPolicyAction::CompleteJob
+            lattice_crd::crd::VolcanoPolicyAction::CompleteJob
         );
 
         // Worker task should have no policies injected
@@ -992,9 +992,9 @@ mod tests {
     fn prepare_training_respects_explicit_coordinator_policies() {
         let mut tasks = BTreeMap::new();
         let mut master = make_training_task("train:latest", 1);
-        master.policies = Some(vec![lattice_common::crd::VolcanoPolicy {
-            event: lattice_common::crd::VolcanoPolicyEvent::TaskCompleted,
-            action: lattice_common::crd::VolcanoPolicyAction::TerminateJob,
+        master.policies = Some(vec![lattice_crd::crd::VolcanoPolicy {
+            event: lattice_crd::crd::VolcanoPolicyEvent::TaskCompleted,
+            action: lattice_crd::crd::VolcanoPolicyAction::TerminateJob,
         }]);
         tasks.insert("master".to_string(), master);
         tasks.insert("worker".to_string(), make_training_task("train:latest", 3));
@@ -1012,7 +1012,7 @@ mod tests {
         assert_eq!(master_policies.len(), 1);
         assert_eq!(
             master_policies[0].action,
-            lattice_common::crd::VolcanoPolicyAction::TerminateJob,
+            lattice_crd::crd::VolcanoPolicyAction::TerminateJob,
             "user's explicit policy should not be overridden"
         );
     }

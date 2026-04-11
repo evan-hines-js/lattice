@@ -12,7 +12,7 @@ use kube::{Api, Client};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{LatticeCluster, LatticeClusterRoutes};
+use lattice_crd::crd::{LatticeCluster, LatticeClusterRoutes};
 use lattice_common::watcher::resilient_watcher;
 use lattice_common::PEER_ROUTES_LABEL;
 use lattice_proto::{

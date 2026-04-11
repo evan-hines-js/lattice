@@ -7,7 +7,7 @@
 
 use tracing::{info, warn};
 
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 use lattice_proto::DeleteCluster;
 
 use super::CommandContext;

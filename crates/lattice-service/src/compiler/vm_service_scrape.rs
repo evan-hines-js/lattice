@@ -328,7 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_port_adds_vmagent_caller_to_mesh_member() {
-        use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
+        use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
         let svc = make_service_with_ports("my-app", "prod", &[("metrics", 9090)]);
         let ctx = make_ctx(&svc, true);

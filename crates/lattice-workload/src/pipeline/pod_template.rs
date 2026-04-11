@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
+use lattice_crd::crd::{GpuParams, ProviderType, RuntimeSpec, WorkloadSpec};
 
 use crate::error::CompilationError;
 use crate::helpers::ContainerCompilationData;
@@ -321,9 +321,9 @@ impl PodTemplateCompiler {
     /// Compile `${secret.RESOURCE.KEY}` references into K8s `secretKeyRef` env vars
     fn compile_secret_env_vars(
         container_name: &str,
-        secret_variables: &BTreeMap<String, lattice_common::template::SecretVariableRef>,
+        secret_variables: &BTreeMap<String, lattice_render::SecretVariableRef>,
         secret_refs: &BTreeMap<String, SecretRef>,
-        resources: &BTreeMap<String, lattice_common::crd::ResourceSpec>,
+        resources: &BTreeMap<String, lattice_crd::crd::ResourceSpec>,
     ) -> Result<Vec<EnvVar>, CompilationError> {
         let mut env = Vec::with_capacity(secret_variables.len());
         for (var_name, secret_var) in secret_variables {
@@ -379,7 +379,7 @@ impl PodTemplateCompiler {
     }
 
     /// Compile a Score-compliant Probe to a K8s ProbeSpec
-    pub(crate) fn compile_probe(p: &lattice_common::crd::Probe) -> crate::k8s::ProbeSpec {
+    pub(crate) fn compile_probe(p: &lattice_crd::crd::Probe) -> crate::k8s::ProbeSpec {
         crate::k8s::ProbeSpec {
             http_get: p.http_get.as_ref().map(|h| crate::k8s::HttpGetAction {
                 path: h.path.clone(),
@@ -409,9 +409,9 @@ impl PodTemplateCompiler {
 
     /// Compile a CRD SecurityContext to a K8s SecurityContext with PSS restricted defaults.
     pub(crate) fn compile_security_context(
-        security: Option<&lattice_common::crd::SecurityContext>,
+        security: Option<&lattice_crd::crd::SecurityContext>,
     ) -> K8sSecurityContext {
-        let default = lattice_common::crd::SecurityContext::default();
+        let default = lattice_crd::crd::SecurityContext::default();
         let s = security.unwrap_or(&default);
 
         let is_privileged = s.privileged == Some(true);
@@ -594,17 +594,17 @@ impl PodTemplateCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ExecProbe, HttpGetProbe, HttpHeader, Probe, ResourceSpec, ResourceType, SecurityContext,
         SidecarSpec,
     };
-    use lattice_common::template::SecretVariableRef;
+    use lattice_render::SecretVariableRef;
 
     fn empty_container_data() -> ContainerCompilationData<'static> {
         static EMPTY_SECRET_REFS: std::sync::LazyLock<BTreeMap<String, SecretRef>> =
             std::sync::LazyLock::new(BTreeMap::new);
         static EMPTY_RENDERED: std::sync::LazyLock<
-            BTreeMap<String, lattice_common::template::RenderedContainer>,
+            BTreeMap<String, lattice_render::RenderedContainer>,
         > = std::sync::LazyLock::new(BTreeMap::new);
         static EMPTY_ENV_FROM: std::sync::LazyLock<
             BTreeMap<String, Vec<crate::k8s::EnvFromSource>>,

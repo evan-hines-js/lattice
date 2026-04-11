@@ -1,0 +1,22 @@
+[package]
+name = "lattice-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Service dependency graph for Lattice mesh policy generation"
+
+[dependencies]
+lattice-crd.workspace = true
+lattice-core.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+rand.workspace = true
+
+[[bench]]
+name = "service_graph"
+harness = false

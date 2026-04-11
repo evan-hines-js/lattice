@@ -31,7 +31,7 @@ use std::sync::LazyLock;
 use kube::ResourceExt;
 use tracing::{debug, info};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
     InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
     MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
@@ -319,7 +319,7 @@ impl From<&LatticeCluster> for InfrastructureConfig {
 /// should leave `remote_networks` unset so SSA preserves existing
 /// meshNetworks in the ConfigMap.
 pub async fn discover_remote_networks(client: &kube::Client) -> Option<Vec<String>> {
-    use lattice_common::crd::LatticeClusterRoutes;
+    use lattice_crd::crd::LatticeClusterRoutes;
 
     let routes_api: kube::Api<LatticeClusterRoutes> = kube::Api::all(client.clone());
     match routes_api.list(&kube::api::ListParams::default()).await {
@@ -629,7 +629,7 @@ pub async fn apply_phase(
     client: &kube::Client,
     phase: &InfraPhase,
 ) -> anyhow::Result<Vec<InfraComponentStatus>> {
-    use lattice_common::crd::InfraComponentPhase;
+    use lattice_crd::crd::InfraComponentPhase;
     use lattice_common::kube_utils;
     use lattice_common::retry::{retry_with_backoff, RetryConfig};
     use lattice_common::{apply_manifests, ApplyOptions};

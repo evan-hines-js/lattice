@@ -15,7 +15,7 @@
 use kube::api::{Api, Patch, PatchParams};
 use tracing::info;
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 
 use super::super::gateway_fixtures::{
     create_backend_a, create_backend_b, create_backend_tls, create_gateway_traffic_gen,

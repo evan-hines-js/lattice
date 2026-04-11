@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::crd::{ContainerSpec, FileMount, VolumeMount, WorkloadSpec};
-use crate::graph::ServiceGraph;
+use lattice_crd::crd::{ContainerSpec, FileMount, VolumeMount, WorkloadSpec};
+use lattice_graph::ServiceGraph;
 
 use super::context::TemplateContext;
 use super::error::TemplateError;
@@ -675,11 +675,11 @@ impl TemplateRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
         ResourceParams, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
-    use crate::template::TemplateString;
+    use lattice_core::template_types::TemplateString;
     use kube::api::ObjectMeta;
 
     fn make_graph_with_db(env: &str) -> ServiceGraph {
@@ -1190,7 +1190,7 @@ mod tests {
             .metadata("api", HashMap::new())
             .resource(
                 "db",
-                crate::template::context::ResourceOutputs::builder()
+                crate::context::ResourceOutputs::builder()
                     .output("host", "db.svc")
                     .output("port", "5432")
                     .sensitive("password", "secret123")
@@ -1492,7 +1492,7 @@ mod tests {
             .metadata("api", std::collections::HashMap::new())
             .resource(
                 "storage",
-                crate::template::context::ResourceOutputs::builder()
+                crate::context::ResourceOutputs::builder()
                     .output("name", "my-pvc")
                     .output("path", "/data/app")
                     .build(),

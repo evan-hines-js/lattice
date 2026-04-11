@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use lattice_common::crd::RegistryMirror;
+use lattice_crd::crd::RegistryMirror;
 
 /// A resolved mirror entry with credentials already read from secrets.
 #[derive(Clone, Debug)]
@@ -503,7 +503,7 @@ mod tests {
 
     #[test]
     fn resolve_mirrors_credentials_propagation() {
-        use lattice_common::crd::CredentialSpec;
+        use lattice_crd::crd::CredentialSpec;
 
         let spec_mirrors = vec![
             RegistryMirror {

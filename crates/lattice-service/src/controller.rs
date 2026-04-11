@@ -315,7 +315,7 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
         service_name: &str,
         namespace: &str,
     ) -> Result<(), Error> {
-        use lattice_common::crd_registry::CrdKind;
+        use lattice_common::CrdKind;
 
         let Some(ar) = self.registry.resolve(CrdKind::ExternalSecret).await? else {
             return Ok(());
@@ -573,7 +573,7 @@ fn check_mesh_member_gate(
     name: &str,
     namespace: &str,
 ) -> MeshMemberGate {
-    use lattice_common::crd::{LatticeMeshMember, MeshMemberPhase};
+    use lattice_crd::crd::{LatticeMeshMember, MeshMemberPhase};
     match cache.get_namespaced::<LatticeMeshMember>(name, namespace) {
         Some(mm) => match mm.status.as_ref().map(|s| &s.phase) {
             Some(MeshMemberPhase::Ready) => MeshMemberGate::Ready,
@@ -741,7 +741,7 @@ impl ServiceContext {
             events: Arc::new(NoopEventPublisher),
             monitoring: MonitoringConfig::default(),
             extension_phases: Vec::new(),
-            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
+            metrics_scraper: Arc::new(lattice_crd::crd::NoopMetricsScraper),
             cost_provider: None,
             cache: lattice_cache::ResourceCache::empty(),
         }
@@ -901,7 +901,7 @@ async fn compile_and_apply(
         .unwrap_or_default();
     let quotas: Vec<_> = ctx
         .cache
-        .list::<lattice_common::crd::LatticeQuota>()
+        .list::<lattice_crd::crd::LatticeQuota>()
         .iter()
         .map(|q| (**q).clone())
         .collect();
@@ -1068,7 +1068,7 @@ async fn compile_and_apply(
     .await;
 
     let existing_metrics = service.status.as_ref().and_then(|s| s.metrics.as_ref());
-    let metrics = lattice_common::crd::scrape_metrics(
+    let metrics = lattice_crd::crd::scrape_metrics(
         ctx.metrics_scraper.as_ref(),
         spec.observability.as_ref(),
         namespace,
@@ -1294,8 +1294,8 @@ mod tests {
         ContainerSpec {
             image: "nginx:latest".to_string(),
             command: Some(vec!["/usr/sbin/nginx".to_string()]),
-            resources: Some(lattice_common::crd::ResourceRequirements {
-                limits: Some(lattice_common::crd::ResourceQuantity {
+            resources: Some(lattice_crd::crd::ResourceRequirements {
+                limits: Some(lattice_crd::crd::ResourceQuantity {
                     memory: Some("256Mi".to_string()),
                     ..Default::default()
                 }),
@@ -1383,7 +1383,7 @@ mod tests {
     /// Tests that compile services with graph edges produce mesh members,
     /// so the cache needs a Ready entry to pass the readiness gate.
     fn cache_with_ready_mesh_member(name: &str, namespace: &str) -> lattice_cache::ResourceCache {
-        use lattice_common::crd::{LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase};
+        use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberStatus, MeshMemberPhase};
         let mut mm: LatticeMeshMember = serde_json::from_value(serde_json::json!({
             "apiVersion": "lattice.dev/v1alpha1",
             "kind": "LatticeMeshMember",
@@ -1659,7 +1659,7 @@ mod tests {
             cluster.clone(),
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            Arc::new(lattice_common::crd::NoopMetricsScraper),
+            Arc::new(lattice_crd::crd::NoopMetricsScraper),
         );
         let ctx2 = ServiceContext::new(
             mock_kube2,
@@ -1667,7 +1667,7 @@ mod tests {
             cluster,
             Arc::clone(&cedar),
             Arc::new(NoopEventPublisher),
-            Arc::new(lattice_common::crd::NoopMetricsScraper),
+            Arc::new(lattice_crd::crd::NoopMetricsScraper),
         );
 
         // Add service via ctx1

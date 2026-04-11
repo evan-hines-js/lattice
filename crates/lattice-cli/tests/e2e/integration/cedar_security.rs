@@ -32,7 +32,7 @@
 
 use std::time::Duration;
 
-use lattice_common::crd::{LatticeService, SecurityContext};
+use lattice_crd::crd::{LatticeService, SecurityContext};
 use tracing::info;
 
 use super::super::helpers::{

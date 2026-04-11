@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CertIssuerRef, IngressSpec, IngressTls, PathMatch, PathMatchType, RouteKind, RouteMatch,
     RouteRule, RouteSpec,
 };
@@ -29,7 +29,7 @@ pub const GATEWAY_TEST_NAMESPACE: &str = "gateway-test";
 // =============================================================================
 
 /// Backend A: nginx with a catch-all HTTPRoute on `backend-a.gateway-test.local`.
-pub fn create_backend_a() -> lattice_common::crd::LatticeService {
+pub fn create_backend_a() -> lattice_crd::crd::LatticeService {
     let mut resources = BTreeMap::new();
     let (key, spec) = inbound_allow_all();
     resources.insert(key, spec);
@@ -73,7 +73,7 @@ pub fn create_backend_a() -> lattice_common::crd::LatticeService {
 /// Requests to other paths (e.g. `/other`) should get 404 from the gateway.
 /// Both rules are in one route to avoid duplicate Gateway listeners (Gateway API
 /// requires unique port+protocol+hostname per listener).
-pub fn create_backend_b() -> lattice_common::crd::LatticeService {
+pub fn create_backend_b() -> lattice_crd::crd::LatticeService {
     let mut resources = BTreeMap::new();
     let (key, spec) = inbound_allow_all();
     resources.insert(key, spec);
@@ -134,7 +134,7 @@ pub fn create_backend_b() -> lattice_common::crd::LatticeService {
 }
 
 /// Backend TLS: nginx with HTTPRoute on `secure.gateway-test.local` with auto TLS.
-pub fn create_backend_tls() -> lattice_common::crd::LatticeService {
+pub fn create_backend_tls() -> lattice_crd::crd::LatticeService {
     let mut resources = BTreeMap::new();
     let (key, spec) = inbound_allow_all();
     resources.insert(key, spec);
@@ -243,7 +243,7 @@ pub fn gateway_traffic_targets() -> Vec<GatewayTestTarget> {
 pub fn create_gateway_traffic_gen(
     gateway_ip: &str,
     gateway_https_port: u16,
-) -> lattice_common::crd::LatticeService {
+) -> lattice_crd::crd::LatticeService {
     let script = generate_gateway_test_script(
         "gateway-traffic-gen",
         gateway_ip,

@@ -15,7 +15,7 @@ use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{LatticeCluster, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
     CsrResponse, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY,
     PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET,
@@ -59,7 +59,7 @@ pub struct ClusterBootstrapInfo {
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
-    pub bootstrap: lattice_common::crd::BootstrapProvider,
+    pub bootstrap: lattice_crd::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons like CCM
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)
@@ -1255,7 +1255,7 @@ mod tests {
                 lb_cidr: None,
 
                 provider: ProviderType::Aws,
-                bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
+                bootstrap: lattice_crd::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 csr_token_hash: None,
@@ -1326,7 +1326,7 @@ mod tests {
                 lb_cidr: None,
 
                 provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::Kubeadm,
+                bootstrap: lattice_crd::crd::BootstrapProvider::Kubeadm,
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
                 csr_token_hash: None,

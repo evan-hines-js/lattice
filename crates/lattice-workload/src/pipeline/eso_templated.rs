@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::template::EsoTemplatedEnvVar;
+use lattice_render::EsoTemplatedEnvVar;
 use lattice_secret_provider::eso::ExternalSecret;
 
 use crate::error::CompilationError;

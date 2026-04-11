@@ -30,11 +30,11 @@ use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
     LatticeQuota, LatticeService, OIDCProvider,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::init_telemetry;
 use lattice_common::CrdRegistry;

@@ -16,7 +16,7 @@ use kube::{Api, Client};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
-use lattice_common::crd::OIDCProvider;
+use lattice_crd::crd::OIDCProvider;
 use lattice_common::is_local_resource;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 

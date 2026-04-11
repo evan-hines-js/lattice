@@ -29,12 +29,12 @@ use mockall::automock;
 
 use kube::runtime::events::EventType;
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CostEstimate, JobPhase, LatticeJob, LatticeJobStatus, MetricsScraper, MetricsSnapshot,
     ProviderType,
 };
 use lattice_common::events::{actions, reasons, EventPublisher};
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::ApplyBatch;
 use lattice_common::{CrdKind, CrdRegistry, Retryable};
 use lattice_cost::CostProvider;
@@ -259,7 +259,7 @@ pub struct JobContext {
 fn resolve_job_image_providers(
     job: &LatticeJob,
     cache: &lattice_cache::ResourceCache,
-) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
+) -> std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec> {
     let mut provider_names = std::collections::BTreeSet::new();
     if let Some(ref defaults) = job.spec.defaults {
         for name in &defaults.runtime.image_pull_secrets {
@@ -315,7 +315,7 @@ impl JobContext {
                     .expect("permit-all policy should parse"),
             ),
             events: Arc::new(lattice_common::NoopEventPublisher),
-            metrics_scraper: Arc::new(lattice_common::crd::NoopMetricsScraper),
+            metrics_scraper: Arc::new(lattice_crd::crd::NoopMetricsScraper),
             cost_provider: None,
             cache: lattice_cache::ResourceCache::empty(),
         }
@@ -591,7 +591,7 @@ async fn submit_job(
         .unwrap_or_default();
     let quotas: Vec<_> = ctx
         .cache
-        .list::<lattice_common::crd::LatticeQuota>()
+        .list::<lattice_crd::crd::LatticeQuota>()
         .iter()
         .map(|q| (**q).clone())
         .collect();
@@ -746,7 +746,7 @@ async fn reconcile_running(
         }
         _ => {
             let existing_metrics = job.status.as_ref().and_then(|s| s.metrics.as_ref());
-            let metrics = lattice_common::crd::scrape_metrics(
+            let metrics = lattice_crd::crd::scrape_metrics(
                 ctx.metrics_scraper.as_ref(),
                 job.spec.observability.as_ref(),
                 namespace,
@@ -1060,7 +1060,7 @@ async fn check_vcjob_status_impl(
 mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{ContainerSpec, JobTaskSpec, LatticeJobSpec};
+    use lattice_crd::crd::{ContainerSpec, JobTaskSpec, LatticeJobSpec};
     use std::collections::BTreeMap;
 
     fn make_minimal_job(name: &str) -> LatticeJob {
@@ -1069,7 +1069,7 @@ mod tests {
             "worker".to_string(),
             JobTaskSpec {
                 replicas: None,
-                workload: lattice_common::crd::workload::spec::WorkloadSpec {
+                workload: lattice_crd::crd::workload::spec::WorkloadSpec {
                     containers: BTreeMap::from([(
                         "main".to_string(),
                         ContainerSpec {

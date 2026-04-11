@@ -2,7 +2,7 @@
 
 use kube::core::admission::{AdmissionRequest, AdmissionResponse};
 use kube::core::DynamicObject;
-use lattice_common::crd::LatticeModel;
+use lattice_crd::crd::LatticeModel;
 
 use super::{parse_admission_object, reject_system_namespace, Validator};
 

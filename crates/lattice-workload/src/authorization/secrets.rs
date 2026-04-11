@@ -1,7 +1,7 @@
 //! Secret authorization via Cedar policies
 
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
-use lattice_common::crd::WorkloadSpec;
+use lattice_crd::crd::WorkloadSpec;
 
 use crate::error::CompilationError;
 

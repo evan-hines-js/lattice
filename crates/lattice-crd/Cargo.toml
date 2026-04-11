@@ -13,7 +13,6 @@ serde_json.workspace = true
 schemars.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
-lattice-template.workspace = true
 lattice-core.workspace = true
 aws-lc-rs.workspace = true
 async-trait.workspace = true

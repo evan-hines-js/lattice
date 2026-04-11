@@ -10,7 +10,7 @@ use tracing::info;
 
 use kube::api::Api;
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, ensure_fresh_namespace,

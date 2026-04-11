@@ -12,7 +12,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget,
     OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
 };

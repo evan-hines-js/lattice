@@ -13,7 +13,7 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;

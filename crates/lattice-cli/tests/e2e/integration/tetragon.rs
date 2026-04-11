@@ -19,7 +19,7 @@ use std::time::Duration;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tracing::{info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     ContainerSpec, ExecProbe, LatticeService, LatticeServiceSpec, PortSpec, Probe,
     ResourceQuantity, ResourceRequirements, RuntimeSpec, SecurityContext, ServicePortsSpec,
     SidecarSpec, VolumeMount, WorkloadSpec,

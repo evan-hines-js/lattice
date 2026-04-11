@@ -2,7 +2,7 @@
 //!
 //! Computes hourly cost from resource requests × rates for each workload type.
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CostBreakdown, CostEstimate, LatticeJobSpec, LatticeModelSpec, LatticeServiceSpec, WorkloadSpec,
 };
 use lattice_common::resources::sum_container_cpu_memory;
@@ -132,7 +132,7 @@ fn build_estimate(cpu: f64, memory: f64, gpu: f64) -> CostEstimate {
 mod tests {
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, GpuParams, ResourceParams, ResourceQuantity, ResourceRequirements,
         ResourceSpec, ResourceType,
     };
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_job_cost_multi_task() {
-        use lattice_common::crd::JobTaskSpec;
+        use lattice_crd::crd::JobTaskSpec;
 
         let rates = test_rates();
         let spec = LatticeJobSpec {
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_model_cost_with_workers() {
-        use lattice_common::crd::ModelRoleSpec;
+        use lattice_crd::crd::ModelRoleSpec;
 
         let rates = test_rates();
         let spec = LatticeModelSpec {

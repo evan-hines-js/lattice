@@ -15,7 +15,7 @@ use kube::api::Api;
 use rand::prelude::*;
 use tracing::info;
 
-use lattice_common::crd::{LatticeService, ParsedEndpoint};
+use lattice_crd::crd::{LatticeService, ParsedEndpoint};
 
 use super::helpers::{
     apply_cedar_policies_batch, client_from_kubeconfig, create_with_retry, delete_namespace,

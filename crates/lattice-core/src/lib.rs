@@ -5,6 +5,7 @@
 
 pub mod quantity;
 pub mod system_namespaces;
+pub mod template_types;
 pub mod yaml;
 
 // ============================================================================
@@ -42,6 +43,32 @@ pub const SECRET_TYPE_DOCKERCONFIG: &str = "kubernetes.io/dockerconfigjson";
 
 /// Kubernetes service account token secret type
 pub const SECRET_TYPE_SA_TOKEN: &str = "kubernetes.io/service-account-token";
+
+// ============================================================================
+// Kubernetes labels
+// ============================================================================
+
+/// Standard name label key - identifies the name of the application
+pub const LABEL_NAME: &str = "app.kubernetes.io/name";
+
+/// Cilium selector for app name label
+pub const CILIUM_LABEL_NAME: &str = "k8s:app.kubernetes.io/name";
+
+/// Cilium selector for pod namespace
+pub const CILIUM_LABEL_NAMESPACE: &str = "k8s:io.kubernetes.pod.namespace";
+
+// ============================================================================
+// Monitoring constants
+// ============================================================================
+
+/// Namespace for monitoring stack (VictoriaMetrics, Prometheus)
+pub const MONITORING_NAMESPACE: &str = "monitoring";
+
+/// DaemonSet name for the VMAgent node collector
+pub const VMAGENT_NODE_NAME: &str = "vmagent";
+
+/// ServiceAccount name for the VMAgent metrics collector
+pub const VMAGENT_SA_NAME: &str = "vmagent-lattice-metrics";
 
 // ============================================================================
 // Error types
@@ -91,6 +118,31 @@ pub fn strip_export_metadata(
     meta.creation_timestamp = None;
     meta.managed_fields = None;
     meta.generation = None;
+}
+
+// ============================================================================
+// Hashing
+// ============================================================================
+
+/// Compute a deterministic hash of the input string, returning a 16-char hex digest.
+///
+/// Uses truncated SHA-256 for stability across Rust toolchain versions.
+pub fn deterministic_hash(input: &str) -> String {
+    use aws_lc_rs::digest;
+    let hash = digest::digest(&digest::SHA256, input.as_bytes());
+    hash.as_ref()[..8]
+        .iter()
+        .fold(String::with_capacity(16), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        })
+}
+
+/// Compute a full SHA-256 hash of arbitrary bytes.
+pub fn sha256(data: &[u8]) -> Vec<u8> {
+    use aws_lc_rs::digest;
+    digest::digest(&digest::SHA256, data).as_ref().to_vec()
 }
 
 // ============================================================================

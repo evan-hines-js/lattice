@@ -38,7 +38,7 @@ use crate::constants::{
     DEFAULT_NAMESPACE, DOCKER_INFRASTRUCTURE_API_GROUP, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
     DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
 };
-use lattice_common::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
+use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
 
 /// Docker/Kind infrastructure provider
@@ -397,7 +397,7 @@ mod tests {
         CAPI_CONTROLPLANE_API_VERSION,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, ControlPlaneSpec, EndpointsSpec, KubernetesSpec,
         LatticeClusterSpec, MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
         WorkerPoolSpec,

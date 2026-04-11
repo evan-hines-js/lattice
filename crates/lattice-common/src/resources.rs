@@ -10,7 +10,7 @@ use k8s_openapi::api::core::v1::{Node, Pod};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use tracing::warn;
 
-use crate::crd::PoolResourceSummary;
+use lattice_crd::crd::PoolResourceSummary;
 
 pub use lattice_core::quantity::QuantityParseError;
 
@@ -306,7 +306,7 @@ fn sum_container_requests(
 /// Uses `requests` (not `limits`) — requests represent guaranteed allocation.
 /// Shared by the quota system and the cost calculator.
 pub fn sum_container_cpu_memory(
-    containers: &std::collections::BTreeMap<String, crate::crd::workload::container::ContainerSpec>,
+    containers: &std::collections::BTreeMap<String, lattice_crd::crd::workload::container::ContainerSpec>,
 ) -> Result<(i64, i64), QuantityParseError> {
     let mut cpu_millis: i64 = 0;
     let mut memory_bytes: i64 = 0;
@@ -329,7 +329,7 @@ pub fn sum_container_cpu_memory(
 
 /// Sum GPU count from `type: gpu` resource entries in a workload spec.
 pub fn sum_gpu_count(
-    resources: &std::collections::BTreeMap<String, crate::crd::workload::resources::ResourceSpec>,
+    resources: &std::collections::BTreeMap<String, lattice_crd::crd::workload::resources::ResourceSpec>,
 ) -> u32 {
     resources
         .values()
@@ -379,7 +379,7 @@ impl std::ops::AddAssign<&WorkloadResourceDemand> for WorkloadResourceDemand {
 /// Sums CPU and memory from all container `requests`, and GPU count from
 /// `type: gpu` resource entries. The result is multiplied by `replicas`.
 pub fn compute_workload_demand(
-    workload: &crate::crd::workload::spec::WorkloadSpec,
+    workload: &lattice_crd::crd::workload::spec::WorkloadSpec,
     replicas: u32,
 ) -> Result<WorkloadResourceDemand, QuantityParseError> {
     let (cpu_millis, memory_bytes) = sum_container_cpu_memory(&workload.containers)?;
@@ -489,9 +489,9 @@ mod tests {
 
     #[test]
     fn workload_demand_basic() {
-        use crate::crd::workload::container::ContainerSpec;
-        use crate::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
-        use crate::crd::workload::spec::WorkloadSpec;
+        use lattice_crd::crd::workload::container::ContainerSpec;
+        use lattice_crd::crd::workload::resources::{ResourceQuantity, ResourceRequirements};
+        use lattice_crd::crd::workload::spec::WorkloadSpec;
         use std::collections::BTreeMap;
 
         let mut containers = BTreeMap::new();
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn workload_demand_empty() {
-        use crate::crd::workload::spec::WorkloadSpec;
+        use lattice_crd::crd::workload::spec::WorkloadSpec;
 
         let workload = WorkloadSpec::default();
         let demand = compute_workload_demand(&workload, 1).unwrap();

@@ -30,7 +30,7 @@
 
 use std::time::Duration;
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use tracing::info;
 
 use super::super::helpers::{

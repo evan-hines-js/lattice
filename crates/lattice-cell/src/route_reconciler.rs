@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use lattice_common::watcher::resilient_watcher;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     ClusterRoute, LatticeClusterRoutes, LatticeClusterRoutesSpec, LatticeService,
 };
 
@@ -304,15 +304,15 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 .unwrap_or_default();
 
             let protocol = match route.kind {
-                lattice_common::crd::RouteKind::HTTPRoute => {
+                lattice_crd::crd::RouteKind::HTTPRoute => {
                     if route.tls.is_some() {
                         "HTTPS"
                     } else {
                         "HTTP"
                     }
                 }
-                lattice_common::crd::RouteKind::GRPCRoute => "GRPC",
-                lattice_common::crd::RouteKind::TCPRoute => "TCP",
+                lattice_crd::crd::RouteKind::GRPCRoute => "GRPC",
+                lattice_crd::crd::RouteKind::TCPRoute => "TCP",
                 _ => "HTTP",
             };
 

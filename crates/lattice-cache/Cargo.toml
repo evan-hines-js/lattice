@@ -14,3 +14,4 @@ tracing.workspace = true
 serde.workspace = true
 lattice-common = { path = "../lattice-common" }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }

@@ -11,7 +11,7 @@ use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     BackupStore, ClusterBackupPhase, LatticeClusterBackup, LatticeClusterBackupStatus,
 };
 use lattice_common::status_check::is_status_unchanged;
@@ -227,7 +227,7 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{BackupRetentionSpec, BackupScopeSpec, LatticeClusterBackupSpec};
+    use lattice_crd::crd::{BackupRetentionSpec, BackupScopeSpec, LatticeClusterBackupSpec};
 
     fn sample_backup() -> LatticeClusterBackup {
         use kube::core::ObjectMeta;

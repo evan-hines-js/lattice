@@ -486,7 +486,7 @@ async fn test_model_loading_detects_spec_change(
 // =============================================================================
 
 /// Build a minimal LatticeService with no secrets or dependencies.
-fn build_simple_service(name: &str, namespace: &str) -> lattice_common::crd::LatticeService {
+fn build_simple_service(name: &str, namespace: &str) -> lattice_crd::crd::LatticeService {
     build_service_with_replicas(name, namespace, 1)
 }
 
@@ -631,7 +631,7 @@ async fn wait_for_generation_advance(
 
 /// Load the model-serving fixture with an overridden namespace.
 fn load_model_fixture_for_namespace(namespace: &str) -> Result<String, String> {
-    let mut model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
+    let mut model: lattice_crd::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
     model.metadata.namespace = Some(namespace.to_string());
     serde_json::to_string(&model).map_err(|e| format!("Failed to serialize model fixture: {e}"))
 }
@@ -953,8 +953,8 @@ fn build_service_with_replicas(
     name: &str,
     namespace: &str,
     replicas: u32,
-) -> lattice_common::crd::LatticeService {
-    use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
+) -> lattice_crd::crd::LatticeService {
+    use lattice_crd::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements};
     use std::collections::BTreeMap;
 
     let mut containers = BTreeMap::new();
@@ -973,7 +973,7 @@ fn build_service_with_replicas(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 run_as_user: Some(65534),
                 ..Default::default()
@@ -1069,8 +1069,8 @@ fn build_simple_job(
     name: &str,
     namespace: &str,
     command: &[&str],
-) -> lattice_common::crd::LatticeJob {
-    use lattice_common::crd::{
+) -> lattice_crd::crd::LatticeJob {
+    use lattice_crd::crd::{
         ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceQuantity, ResourceRequirements,
         RestartPolicy,
     };
@@ -1092,7 +1092,7 @@ fn build_simple_job(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 run_as_user: Some(65534),
                 ..Default::default()
@@ -1106,11 +1106,11 @@ fn build_simple_job(
         "worker".to_string(),
         JobTaskSpec {
             replicas: Some(1),
-            workload: lattice_common::crd::WorkloadSpec {
+            workload: lattice_crd::crd::WorkloadSpec {
                 containers,
                 ..Default::default()
             },
-            runtime: lattice_common::crd::RuntimeSpec {
+            runtime: lattice_crd::crd::RuntimeSpec {
                 image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
@@ -1124,7 +1124,7 @@ fn build_simple_job(
         tasks,
         ..Default::default()
     };
-    let mut job = lattice_common::crd::LatticeJob::new(name, spec);
+    let mut job = lattice_crd::crd::LatticeJob::new(name, spec);
     job.metadata.namespace = Some(namespace.to_string());
     job
 }
@@ -1193,8 +1193,8 @@ async fn test_job_compile_failure(kubeconfig: &str, namespace: &str) -> Result<(
 
 /// Build a LatticeJob whose task declares a secret resource with a nonexistent
 /// provider. Cedar default-deny will reject it at compile time.
-fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::LatticeJob {
-    use lattice_common::crd::{
+fn build_job_with_secret(name: &str, namespace: &str) -> lattice_crd::crd::LatticeJob {
+    use lattice_crd::crd::{
         ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceParams, ResourceQuantity,
         ResourceRequirements, ResourceSpec, ResourceType, RestartPolicy, SecretParams,
     };
@@ -1216,7 +1216,7 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 run_as_user: Some(65534),
                 ..Default::default()
@@ -1245,12 +1245,12 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
         "worker".to_string(),
         JobTaskSpec {
             replicas: Some(1),
-            workload: lattice_common::crd::WorkloadSpec {
+            workload: lattice_crd::crd::WorkloadSpec {
                 containers,
                 resources,
                 ..Default::default()
             },
-            runtime: lattice_common::crd::RuntimeSpec {
+            runtime: lattice_crd::crd::RuntimeSpec {
                 image_pull_secrets: vec!["default".to_string()],
                 ..Default::default()
             },
@@ -1264,7 +1264,7 @@ fn build_job_with_secret(name: &str, namespace: &str) -> lattice_common::crd::La
         tasks,
         ..Default::default()
     };
-    let mut job = lattice_common::crd::LatticeJob::new(name, spec);
+    let mut job = lattice_crd::crd::LatticeJob::new(name, spec);
     job.metadata.namespace = Some(namespace.to_string());
     job
 }

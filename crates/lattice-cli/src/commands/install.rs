@@ -38,7 +38,7 @@ const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 use lattice_cell::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
 };
-use lattice_common::crd::{
+use lattice_crd::crd::{
     BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
     LatticePackage, ProviderType,
 };
@@ -995,7 +995,7 @@ impl Installer {
         let credentials = if secret_name.is_empty() {
             None
         } else {
-            Some(lattice_common::crd::CredentialSpec {
+            Some(lattice_crd::crd::CredentialSpec {
                 id: secret_name.to_string(),
                 provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
                 ..Default::default()
@@ -1043,7 +1043,7 @@ impl Installer {
         };
 
         use kube::api::{Api, ObjectMeta, Patch, PatchParams};
-        use lattice_common::crd::{ImageProvider, ImageProviderSpec, ImageProviderType};
+        use lattice_crd::crd::{ImageProvider, ImageProviderSpec, ImageProviderType};
         use std::collections::BTreeMap;
 
         // Create seed Secret in lattice-secrets for ESO to serve
@@ -1078,7 +1078,7 @@ impl Installer {
                          expected exactly one entry in {\"auths\":{\"registry.example.com\":{...}}}",
                     )
                 })?,
-                credentials: Some(lattice_common::crd::CredentialSpec {
+                credentials: Some(lattice_crd::crd::CredentialSpec {
                     id: seed_secret_name.to_string(),
                     provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
                     ..Default::default()
@@ -1174,7 +1174,7 @@ impl Installer {
     /// Checks for `{name}.yaml` then `{name}.yml`.
     async fn find_secret_file(&self, name: &str) -> Result<PathBuf> {
         // Validate name to prevent path traversal (e.g., "../../etc/passwd")
-        lattice_common::crd::validate_dns_label(name, "credentials secret name")
+        lattice_crd::crd::validate_dns_label(name, "credentials secret name")
             .map_err(Error::validation)?;
 
         for ext in &["yaml", "yml"] {

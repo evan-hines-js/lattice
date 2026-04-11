@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use kube::api::{Api, Patch, PatchParams};
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 
 use super::helpers::{
     client_from_kubeconfig, patch_with_retry, run_kubectl, wait_for_condition, CYCLE_END_MARKER,

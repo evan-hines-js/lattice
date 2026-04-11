@@ -229,7 +229,7 @@ pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
 ///
 /// cert-manager must be installed and ready before calling this function,
 /// as CAPI manifests reference cert-manager CRDs (Certificate, Issuer).
-pub async fn ensure_capi_providers(provider: lattice_common::crd::ProviderType) -> Result<()> {
+pub async fn ensure_capi_providers(provider: lattice_crd::crd::ProviderType) -> Result<()> {
     use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
 
     let config = CapiProviderConfig::new(provider).cmd_err()?;

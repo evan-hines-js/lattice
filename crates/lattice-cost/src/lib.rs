@@ -16,7 +16,7 @@ pub mod rates;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use lattice_common::crd::CostEstimate;
+use lattice_crd::crd::CostEstimate;
 use tracing::warn;
 
 pub use calculator::{estimate_job_cost, estimate_model_cost, estimate_service_cost};

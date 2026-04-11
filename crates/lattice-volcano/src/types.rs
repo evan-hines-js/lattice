@@ -136,7 +136,7 @@ pub const PODGROUP_ANNOTATION: &str = "scheduling.volcano.sh/group-name";
 pub fn compile_service_pod_group(
     name: &str,
     namespace: &str,
-    topology: &lattice_common::crd::WorkloadNetworkTopology,
+    topology: &lattice_crd::crd::WorkloadNetworkTopology,
 ) -> PodGroup {
     PodGroup {
         api_version: "scheduling.volcano.sh/v1beta1".to_string(),
@@ -222,7 +222,7 @@ pub struct ModelServingSpec {
     pub replicas: u32,
     pub template: ServingGroupTemplate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_policy: Option<lattice_common::crd::RecoveryPolicy>,
+    pub recovery_policy: Option<lattice_crd::crd::RecoveryPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout_strategy: Option<RolloutStrategy>,
 }
@@ -377,7 +377,7 @@ pub struct KthenaRetryPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct KthenaKvConnector {
     #[serde(rename = "type")]
-    pub type_: lattice_common::crd::KvConnectorType,
+    pub type_: lattice_crd::crd::KvConnectorType,
 }
 
 /// Kthena ModelRoute resource — defines routing rules for a model
@@ -462,7 +462,7 @@ pub struct KthenaRateLimit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens_per_unit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<lattice_common::crd::RateLimitUnit>,
+    pub unit: Option<lattice_crd::crd::RateLimitUnit>,
 }
 
 // =============================================================================
@@ -614,14 +614,14 @@ pub struct KthenaMetricEndpoint {
 /// `VCJobSpec.network_topology` and `PodGroupSpec.network_topology`.
 /// ModelServing callers wrap this in `{"groupPolicy": ...}` at the call site.
 pub fn network_topology_value(
-    topo: &lattice_common::crd::WorkloadNetworkTopology,
+    topo: &lattice_crd::crd::WorkloadNetworkTopology,
 ) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     map.insert(
         "mode".into(),
         match topo.mode {
-            lattice_common::crd::TopologyMode::Hard => "hard".into(),
-            lattice_common::crd::TopologyMode::Soft => "soft".into(),
+            lattice_crd::crd::TopologyMode::Hard => "hard".into(),
+            lattice_crd::crd::TopologyMode::Soft => "soft".into(),
             _ => "soft".into(),
         },
     );
@@ -746,7 +746,7 @@ mod tests {
                     restart_grace_period_seconds: Some(30),
                     network_topology: None,
                 },
-                recovery_policy: Some(lattice_common::crd::RecoveryPolicy::ServingGroupRecreate),
+                recovery_policy: Some(lattice_crd::crd::RecoveryPolicy::ServingGroupRecreate),
                 rollout_strategy: None,
             },
         };
@@ -805,7 +805,7 @@ mod tests {
                     retry: Some(KthenaRetryPolicy { attempts: Some(3) }),
                 }),
                 kv_connector: Some(KthenaKvConnector {
-                    type_: lattice_common::crd::KvConnectorType::Nixl,
+                    type_: lattice_crd::crd::KvConnectorType::Nixl,
                 }),
             },
         };
@@ -855,7 +855,7 @@ mod tests {
                 rate_limit: Some(KthenaRateLimit {
                     input_tokens_per_unit: Some(1000),
                     output_tokens_per_unit: Some(500),
-                    unit: Some(lattice_common::crd::RateLimitUnit::Minute),
+                    unit: Some(lattice_crd::crd::RateLimitUnit::Minute),
                 }),
             },
         };
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn network_topology_value_soft() {
-        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+        use lattice_crd::crd::{TopologyMode, WorkloadNetworkTopology};
 
         let topo = WorkloadNetworkTopology {
             mode: TopologyMode::Soft,
@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn network_topology_value_hard() {
-        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+        use lattice_crd::crd::{TopologyMode, WorkloadNetworkTopology};
 
         let topo = WorkloadNetworkTopology {
             mode: TopologyMode::Hard,
@@ -1019,7 +1019,7 @@ mod tests {
 
     #[test]
     fn network_topology_value_no_tier() {
-        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+        use lattice_crd::crd::{TopologyMode, WorkloadNetworkTopology};
 
         let topo = WorkloadNetworkTopology {
             mode: TopologyMode::Soft,
@@ -1032,7 +1032,7 @@ mod tests {
 
     #[test]
     fn vcjob_with_network_topology_roundtrip() {
-        use lattice_common::crd::{TopologyMode, WorkloadNetworkTopology};
+        use lattice_crd::crd::{TopologyMode, WorkloadNetworkTopology};
 
         let topo = WorkloadNetworkTopology {
             mode: TopologyMode::Hard,

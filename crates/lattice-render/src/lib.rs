@@ -19,7 +19,6 @@ mod error;
 mod output;
 mod provisioner;
 mod renderer;
-mod types;
 
 pub use context::{MetadataContext, ResourceOutputs, TemplateContext};
 pub use error::TemplateError;
@@ -33,7 +32,6 @@ pub use renderer::{
     FileSecretRef, RenderConfig, RenderedContainer, RenderedFile, RenderedVariable, RenderedVolume,
     SecretVariableRef, TemplateRenderer,
 };
-pub use types::{StaticString, TemplateString};
 
 #[cfg(test)]
 mod tests {

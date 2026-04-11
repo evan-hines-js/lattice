@@ -18,7 +18,7 @@ use futures::future::try_join_all;
 use kube::api::Api;
 use tracing::info;
 
-use lattice_common::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
+use lattice_crd::crd::{LatticeService, ParsedEndpoint, ResourceSpec};
 
 use super::helpers::{
     apply_cedar_policies_batch, apply_mesh_wildcard_inbound_policy, client_from_kubeconfig,

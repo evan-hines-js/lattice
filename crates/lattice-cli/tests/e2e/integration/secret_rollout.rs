@@ -18,7 +18,7 @@
 #![cfg(feature = "provider-e2e")]
 
 use kube::Api;
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use lattice_common::LOCAL_WEBHOOK_STORE_NAME;
 use tracing::info;
 

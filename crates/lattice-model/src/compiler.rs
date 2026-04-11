@@ -10,11 +10,11 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     derived_name, EgressRule, EgressTarget, LatticeMeshMember, LatticeModel, MeshMemberPort,
     ModelRoutingSpec, ModelSourceSpec, PeerAuth, PortSpec, ProviderType, ServiceRef,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL};
 use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
@@ -33,7 +33,7 @@ pub struct CompileContext<'a> {
     pub cedar: &'a PolicyEngine,
     pub role_suffix: &'a str,
     pub quota_budget: Option<&'a lattice_quota::QuotaBudget>,
-    pub image_providers: BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    pub image_providers: BTreeMap<String, lattice_crd::crd::CredentialSpec>,
 }
 
 const DEFAULT_DOWNLOADER_IMAGE: &str = "ghcr.io/volcano-sh/downloader:latest";
@@ -70,8 +70,8 @@ pub fn model_callers(routing: Option<&ModelRoutingSpec>, has_autoscaling: bool) 
 
 /// Check whether routing uses P/D disaggregation (kv_connector with prefill/decode roles).
 fn has_pd_disaggregation(
-    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    routing: Option<&lattice_crd::crd::ModelRoutingSpec>,
+    roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
 ) -> bool {
     routing
         .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
@@ -106,7 +106,7 @@ pub struct CompiledModel {
     /// Kthena autoscaling resources (AutoscalingPolicy + AutoscalingPolicyBinding)
     pub autoscaling: Option<CompiledAutoscaling>,
     /// Auto-injected topology from kv_connector (for status reporting, never mutates spec)
-    pub auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    pub auto_topology: Option<lattice_crd::crd::WorkloadNetworkTopology>,
     /// Peer-discovery K8s Services for P/D roles (stable DNS for nixl KV cache transfer)
     pub peer_services: Vec<serde_json::Value>,
 }
@@ -185,7 +185,7 @@ pub async fn compile_model(
 /// Validate model spec and prepare roles with merged defaults and routing ports.
 fn prepare_roles(
     model: &LatticeModel,
-) -> Result<BTreeMap<String, lattice_common::crd::ModelRoleSpec>, ModelError> {
+) -> Result<BTreeMap<String, lattice_crd::crd::ModelRoleSpec>, ModelError> {
     if model.spec.roles.is_empty() {
         return Err(ModelError::NoRoles);
     }
@@ -224,7 +224,7 @@ struct CompilationCtx<'a> {
     graph: &'a ServiceGraph,
     has_topology: bool,
     quota_budget: Option<&'a lattice_quota::QuotaBudget>,
-    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    image_providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
 }
 
 /// Compile a single workload (entry or worker) through the WorkloadCompiler pipeline.
@@ -233,8 +233,8 @@ struct CompilationCtx<'a> {
 async fn compile_workload(
     ctx: &CompilationCtx<'_>,
     workload_name: &str,
-    workload: &lattice_common::crd::WorkloadSpec,
-    runtime: &lattice_common::crd::RuntimeSpec,
+    workload: &lattice_crd::crd::WorkloadSpec,
+    runtime: &lattice_crd::crd::RuntimeSpec,
     role_label: &str,
 ) -> Result<
     (
@@ -299,7 +299,7 @@ struct CompiledRoles {
 /// Compile all roles (entry + optional worker workloads).
 async fn compile_roles(
     name: &str,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
+    roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
     ctx: &CompilationCtx<'_>,
 ) -> Result<CompiledRoles, ModelError> {
     let mut result = CompiledRoles {
@@ -589,7 +589,7 @@ fn inject_model_labels(name: &str, role_templates: &mut BTreeMap<String, RoleTem
 /// Output from assembling ModelServing, routing, and autoscaling.
 struct AssembledServing {
     model_serving: ModelServing,
-    auto_topology: Option<lattice_common::crd::WorkloadNetworkTopology>,
+    auto_topology: Option<lattice_crd::crd::WorkloadNetworkTopology>,
     routing: Option<CompiledRouting>,
     autoscaling: Option<CompiledAutoscaling>,
 }
@@ -633,8 +633,8 @@ fn assemble_serving(
 fn compile_peer_services(
     name: &str,
     namespace: &str,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
+    routing: Option<&lattice_crd::crd::ModelRoutingSpec>,
 ) -> Result<Vec<serde_json::Value>, ModelError> {
     if !has_pd_disaggregation(routing, roles) {
         return Ok(Vec::new());
@@ -646,7 +646,7 @@ fn compile_peer_services(
         .kv_connector
         .as_ref()
         .and_then(|kv| kv.port)
-        .unwrap_or(lattice_common::crd::DEFAULT_KV_SIDE_CHANNEL_PORT);
+        .unwrap_or(lattice_crd::crd::DEFAULT_KV_SIDE_CHANNEL_PORT);
 
     Ok([PD_ROLE_PREFILL, PD_ROLE_DECODE]
         .iter()
@@ -658,8 +658,8 @@ fn compile_peer_services(
 /// and inject model download egress rules when a model source is configured.
 fn finalize_mesh(
     name: &str,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
+    routing: Option<&lattice_crd::crd::ModelRoutingSpec>,
     has_autoscaling: bool,
     model_source: Option<&ModelSourceSpec>,
     mesh_members: &mut [LatticeMeshMember],
@@ -668,7 +668,7 @@ fn finalize_mesh(
 
     for mm in mesh_members.iter_mut() {
         mm.spec.ambient = false;
-        mm.spec.target = lattice_common::crd::MeshMemberTarget::Selector(
+        mm.spec.target = lattice_crd::crd::MeshMemberTarget::Selector(
             [(LABEL_MODEL.to_string(), name.to_string())]
                 .into_iter()
                 .collect(),
@@ -773,8 +773,8 @@ fn compile_peer_service(
 /// don't receive direct inference traffic.
 fn augment_kthena_callers(
     model_name: &str,
-    roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>,
-    routing: Option<&lattice_common::crd::ModelRoutingSpec>,
+    roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
+    routing: Option<&lattice_crd::crd::ModelRoutingSpec>,
     has_autoscaling: bool,
     mesh_members: &mut [LatticeMeshMember],
 ) -> Result<(), ModelError> {
@@ -876,7 +876,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, KvConnectorType,
         LatticeModelSpec, ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
         ModelRoutingSpec, ModelSourceSpec, PortSpec,
@@ -1911,10 +1911,10 @@ mod tests {
 
     #[tokio::test]
     async fn gpu_model_with_source_no_duplicate_dshm() {
-        use lattice_common::crd::workload::resources::{
+        use lattice_crd::crd::workload::resources::{
             GpuParams, ResourceParams, ResourceSpec, ResourceType,
         };
-        use lattice_common::crd::DependencyDirection;
+        use lattice_crd::crd::DependencyDirection;
 
         let mut containers = BTreeMap::new();
         containers.insert(

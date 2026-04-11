@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kube::api::Api;
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use lattice_common::LOCAL_SECRETS_NAMESPACE;
 use tracing::info;
 
@@ -29,11 +29,11 @@ use super::{
 pub fn build_busybox_service(
     name: &str,
     namespace: &str,
-    containers: BTreeMap<String, lattice_common::crd::ContainerSpec>,
-    resources: BTreeMap<String, lattice_common::crd::ResourceSpec>,
+    containers: BTreeMap<String, lattice_crd::crd::ContainerSpec>,
+    resources: BTreeMap<String, lattice_crd::crd::ResourceSpec>,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         LatticeServiceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, WorkloadSpec,
     };
 
@@ -83,7 +83,7 @@ pub fn create_service_with_secrets(
     namespace: &str,
     secrets: Vec<(&str, &str, &str, Option<Vec<&str>>)>,
 ) -> LatticeService {
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, ResourceParams, ResourceQuantity, ResourceRequirements, ResourceSpec,
         ResourceType, SecretParams,
     };
@@ -122,7 +122,7 @@ pub fn create_service_with_secrets(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
                 run_as_user: Some(65534),
@@ -140,7 +140,7 @@ pub fn with_run_as_root(mut service: LatticeService) -> LatticeService {
     if let Some(container) = service.spec.workload.containers.get_mut("main") {
         let security = container
             .security
-            .get_or_insert_with(lattice_common::crd::SecurityContext::default);
+            .get_or_insert_with(lattice_crd::crd::SecurityContext::default);
         security.run_as_user = Some(0);
     }
     service
@@ -155,11 +155,11 @@ pub fn with_run_as_root(mut service: LatticeService) -> LatticeService {
 pub fn create_service_with_security_overrides(
     name: &str,
     namespace: &str,
-    mut security: lattice_common::crd::SecurityContext,
+    mut security: lattice_crd::crd::SecurityContext,
     host_network: Option<bool>,
 ) -> LatticeService {
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, LatticeServiceSpec, PortSpec, ResourceQuantity, ResourceRequirements,
         RuntimeSpec, ServicePortsSpec, WorkloadSpec,
     };
@@ -511,11 +511,11 @@ pub fn create_service_with_all_secret_routes(
     namespace: &str,
     provider: &str,
 ) -> LatticeService {
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, FileMount, ResourceParams, ResourceQuantity, ResourceRequirements,
         ResourceSpec, ResourceType, SecretParams,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     // Container with env vars and file mounts exercising routes 1-3
     let mut variables = BTreeMap::new();
@@ -571,7 +571,7 @@ pub fn create_service_with_all_secret_routes(
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
                 run_as_user: Some(65534),

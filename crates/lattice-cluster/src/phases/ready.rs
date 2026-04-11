@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
 use lattice_cert_issuer::builder;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CertIssuer, CertIssuerPhase, DNSProvider, DNSProviderPhase, LatticeCluster,
     LatticeClusterStatus, WorkerPoolStatus,
 };
@@ -1121,7 +1121,7 @@ async fn update_node_status(
     name: &str,
     mut pool_statuses: BTreeMap<String, WorkerPoolStatus>,
     counts: &NodeCounts,
-    children_health: Vec<lattice_common::crd::ChildClusterHealth>,
+    children_health: Vec<lattice_crd::crd::ChildClusterHealth>,
 ) {
     // Distribute ready workers proportionally across pools for parent-side visibility.
     // Agents report accurate per-pool counts in ClusterHealth.pool_resources.

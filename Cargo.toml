@@ -37,6 +37,8 @@ members = [
     "crates/lattice-package",
     "crates/lattice-crd",
     "crates/lattice-core",
+    "crates/lattice-graph",
+    "crates/lattice-render",
 ]
 
 [workspace.package]
@@ -80,6 +82,8 @@ lattice-template = { path = "crates/lattice-template" }
 lattice-package = { path = "crates/lattice-package" }
 lattice-crd = { path = "crates/lattice-crd" }
 lattice-core = { path = "crates/lattice-core" }
+lattice-graph = { path = "crates/lattice-graph" }
+lattice-render = { path = "crates/lattice-render" }
 
 # Optimization
 good_lp = { version = "1.15", default-features = false, features = ["microlp"] }

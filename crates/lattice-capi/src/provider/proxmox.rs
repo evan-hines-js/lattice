@@ -20,7 +20,7 @@ use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_VIP_INTERFACE_PROXMOX, INFRASTRUCTURE_API_GROUP,
     PROXMOX_API_VERSION,
 };
-use lattice_common::crd::{
+use lattice_crd::crd::{
     InstanceType, Ipv4PoolConfig, LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig,
 };
 use lattice_common::{Error, Result, PROXMOX_CREDENTIALS_SECRET};
@@ -422,7 +422,7 @@ impl Provider for ProxmoxProvider {
 mod tests {
     use super::*;
     use kube::api::ObjectMeta;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         AdditionalNetwork, BackupsConfig, BootstrapProvider, ControlPlaneSpec, KubernetesSpec,
         LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig,
         WorkerPoolSpec,

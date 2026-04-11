@@ -8,6 +8,7 @@ description = "ImageProvider controller for Lattice - manages container registry
 [dependencies]
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
 lattice-secret-provider = { workspace = true }
 
 # Kubernetes

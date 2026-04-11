@@ -7,14 +7,14 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
     MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::{LabelSelector, OwnerReference};
 use lattice_common::mesh;
-use lattice_common::template::{RenderConfig, TemplateRenderer};
+use lattice_render::{RenderConfig, TemplateRenderer};
 use lattice_common::LABEL_NAME;
 
 use crate::authorization::VolumeAuthorizationMode;
@@ -57,7 +57,7 @@ pub struct WorkloadCompiler<'a> {
     eso_content_hash: String,
     quota_budget: Option<lattice_quota::QuotaBudget>,
     replicas: u32,
-    image_providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+    image_providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
 }
 
 impl<'a> WorkloadCompiler<'a> {
@@ -164,7 +164,7 @@ impl<'a> WorkloadCompiler<'a> {
     /// ExternalSecret and a pod imagePullSecret entry.
     pub fn with_image_providers(
         mut self,
-        providers: std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec>,
+        providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
     ) -> Self {
         self.image_providers = providers;
         self
@@ -176,7 +176,7 @@ impl<'a> WorkloadCompiler<'a> {
         service_name: &str,
         container_name: &str,
         namespace: &str,
-        rendered_files: &BTreeMap<String, lattice_common::template::RenderedFile>,
+        rendered_files: &BTreeMap<String, lattice_render::RenderedFile>,
         secret_refs: &BTreeMap<String, crate::pipeline::secrets::SecretRef>,
         files_config_maps: &mut Vec<crate::k8s::ConfigMap>,
         files_secrets: &mut Vec<crate::k8s::Secret>,
@@ -579,8 +579,8 @@ impl<'a> WorkloadCompiler<'a> {
         let caller_refs = self.workload.allowed_callers(self.namespace);
         let allows_all = caller_refs.iter().any(|r| r.name == "*");
 
-        let mut allowed_callers: Vec<lattice_common::crd::ServiceRef> = if allows_all {
-            vec![lattice_common::crd::ServiceRef::local("*")]
+        let mut allowed_callers: Vec<lattice_crd::crd::ServiceRef> = if allows_all {
+            vec![lattice_crd::crd::ServiceRef::local("*")]
         } else {
             caller_refs
         };
@@ -592,12 +592,12 @@ impl<'a> WorkloadCompiler<'a> {
         // MeshMember controller (via IngressCompiler), so this forms a bilateral
         // agreement: the gateway has depends_all, this service allows it.
         if self.ingress.as_ref().is_some_and(|i| !i.routes.is_empty()) {
-            allowed_callers.push(lattice_common::crd::ServiceRef::local(
+            allowed_callers.push(lattice_crd::crd::ServiceRef::local(
                 mesh::ingress_gateway_sa_name(self.namespace),
             ));
         }
 
-        let mut dependencies: Vec<lattice_common::crd::ServiceRef> =
+        let mut dependencies: Vec<lattice_crd::crd::ServiceRef> =
             self.workload.internal_dependencies(self.namespace);
         // Sort for deterministic SSA output
         dependencies.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));

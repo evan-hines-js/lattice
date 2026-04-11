@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::crd::{EgressRule, ResourceSpec, ResourceType, WorkloadSpec};
-use crate::graph::ServiceGraph;
+use lattice_crd::crd::{EgressRule, ResourceSpec, ResourceType, WorkloadSpec};
+use lattice_graph::ServiceGraph;
 
 use super::context::ResourceOutputs;
 use super::error::TemplateError;
@@ -395,7 +395,7 @@ fn provisionable_resources(spec: &WorkloadSpec) -> impl Iterator<Item = (&String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{
+    use lattice_crd::crd::{
         DependencyDirection, ExternalServiceParams, ResourceParams, ResourceSpec, ResourceType,
         VolumeParams,
     };
@@ -407,7 +407,7 @@ mod tests {
         let mut containers = BTreeMap::new();
         containers.insert(
             "main".to_string(),
-            crate::crd::ContainerSpec {
+            lattice_crd::crd::ContainerSpec {
                 image: "nginx:latest".to_string(),
                 ..Default::default()
             },
@@ -416,17 +416,17 @@ mod tests {
         let mut ports = BTreeMap::new();
         ports.insert(
             "http".to_string(),
-            crate::crd::PortSpec {
+            lattice_crd::crd::PortSpec {
                 port,
                 target_port: None,
                 protocol: None,
             },
         );
 
-        let spec = crate::crd::LatticeServiceSpec {
-            workload: crate::crd::WorkloadSpec {
+        let spec = lattice_crd::crd::LatticeServiceSpec {
+            workload: lattice_crd::crd::WorkloadSpec {
                 containers,
-                service: Some(crate::crd::ServicePortsSpec { ports }),
+                service: Some(lattice_crd::crd::ServicePortsSpec { ports }),
                 ..Default::default()
             },
             ..Default::default()
@@ -709,10 +709,10 @@ mod tests {
         );
 
         // Create a minimal workload spec with the resources
-        let spec = crate::crd::WorkloadSpec {
+        let spec = lattice_crd::crd::WorkloadSpec {
             containers: BTreeMap::from([(
                 "main".to_string(),
-                crate::crd::ContainerSpec {
+                lattice_crd::crd::ContainerSpec {
                     image: "app:latest".to_string(),
                     ..Default::default()
                 },

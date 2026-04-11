@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tracing::info;
 
-use lattice_common::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext};
+use lattice_crd::crd::{ContainerSpec, ResourceQuantity, ResourceRequirements, SecurityContext};
 
 use super::super::helpers::{
     apply_yaml, build_busybox_service, delete_namespace, deploy_and_wait_for_phase,
@@ -47,7 +47,7 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
 
     ensure_fresh_namespace(kubeconfig, MODEL_NAMESPACE).await?;
 
-    let mut model: lattice_common::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
+    let mut model: lattice_crd::crd::LatticeModel = load_fixture_config("model-serving.yaml")?;
     inject_pd_connectivity_sidecars(&mut model);
 
     let yaml = serde_json::to_string(&model)
@@ -74,7 +74,7 @@ async fn test_model_deployment(kubeconfig: &str) -> Result<(), String> {
 /// Each sidecar continuously curls the peer role's service on the inference port
 /// and logs ALLOWED/BLOCKED results with cycle markers, matching the mesh test
 /// traffic generator pattern.
-fn inject_pd_connectivity_sidecars(model: &mut lattice_common::crd::LatticeModel) {
+fn inject_pd_connectivity_sidecars(model: &mut lattice_crd::crd::LatticeModel) {
     let inference_port = model
         .spec
         .routing
@@ -1083,7 +1083,7 @@ done"#,
         },
     );
 
-    use lattice_common::crd::{DependencyDirection, ResourceSpec, ResourceType};
+    use lattice_crd::crd::{DependencyDirection, ResourceSpec, ResourceType};
 
     let mut resources = BTreeMap::new();
     resources.insert(

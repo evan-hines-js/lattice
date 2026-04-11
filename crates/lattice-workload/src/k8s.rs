@@ -292,8 +292,8 @@ pub struct ResourceQuantity {
     pub gpu_cores: Option<String>,
 }
 
-impl From<&lattice_common::crd::ResourceQuantity> for ResourceQuantity {
-    fn from(rq: &lattice_common::crd::ResourceQuantity) -> Self {
+impl From<&lattice_crd::crd::ResourceQuantity> for ResourceQuantity {
+    fn from(rq: &lattice_crd::crd::ResourceQuantity) -> Self {
         Self {
             cpu: rq.cpu.clone(),
             memory: rq.memory.clone(),
@@ -302,8 +302,8 @@ impl From<&lattice_common::crd::ResourceQuantity> for ResourceQuantity {
     }
 }
 
-impl From<&lattice_common::crd::ResourceRequirements> for ResourceRequirements {
-    fn from(rr: &lattice_common::crd::ResourceRequirements) -> Self {
+impl From<&lattice_crd::crd::ResourceRequirements> for ResourceRequirements {
+    fn from(rr: &lattice_crd::crd::ResourceRequirements) -> Self {
         Self {
             requests: rr.requests.as_ref().map(ResourceQuantity::from),
             limits: rr.limits.as_ref().map(ResourceQuantity::from),

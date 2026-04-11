@@ -40,7 +40,7 @@ use std::collections::BTreeMap;
 
 use futures::future::try_join_all;
 use kube::api::Api;
-use lattice_common::crd::{LatticeService, ResourceSpec};
+use lattice_crd::crd::{LatticeService, ResourceSpec};
 use tracing::info;
 
 use super::super::helpers::{

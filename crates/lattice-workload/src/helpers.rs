@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use aws_lc_rs::digest::{digest, SHA256};
-use lattice_common::crd::GpuParams;
-use lattice_common::template::RenderedContainer;
+use lattice_crd::crd::GpuParams;
+use lattice_render::RenderedContainer;
 
 use crate::k8s::{
     ConfigMap, EnvFromSource, ResourceQuantity, ResourceRequirements, Secret, Toleration, Volume,

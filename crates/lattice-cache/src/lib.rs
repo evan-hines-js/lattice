@@ -283,8 +283,8 @@ impl ResourceCache {
     pub fn resolve_image_providers(
         &self,
         provider_names: &[String],
-    ) -> std::collections::BTreeMap<String, lattice_common::crd::CredentialSpec> {
-        use lattice_common::crd::ImageProvider;
+    ) -> std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec> {
+        use lattice_crd::crd::ImageProvider;
 
         let mut result = std::collections::BTreeMap::new();
         for name in provider_names {

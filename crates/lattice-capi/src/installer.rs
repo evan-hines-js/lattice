@@ -20,7 +20,7 @@ use kube::Client as KubeClient;
 use mockall::automock;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};

@@ -11,7 +11,7 @@ use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     BackupStorageProvider, BackupStore, BackupStorePhase, BackupStoreStatus,
 };
 use lattice_common::status_check::is_status_unchanged;
@@ -196,11 +196,11 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{BackupStorageSpec, S3StorageConfig};
+    use lattice_crd::crd::{BackupStorageSpec, S3StorageConfig};
 
     fn sample_store() -> BackupStore {
         use kube::core::ObjectMeta;
-        use lattice_common::crd::BackupStoreSpec;
+        use lattice_crd::crd::BackupStoreSpec;
 
         BackupStore {
             metadata: ObjectMeta {

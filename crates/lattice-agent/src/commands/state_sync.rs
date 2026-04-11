@@ -4,7 +4,7 @@
 //! and sending back the full spec + status as JSON.
 
 use kube::Api;
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 use lattice_proto::{agent_message::Payload, AgentMessage, StateSyncResponse};
 use tracing::{debug, error, warn};
 

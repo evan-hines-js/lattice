@@ -12,6 +12,7 @@ fips = ["lattice-common/fips", "lattice-workload/fips", "aws-lc-rs/fips"]
 # Internal
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-graph = { workspace = true }
 lattice-crd = { workspace = true }
 lattice-workload = { workspace = true }
 lattice-quota = { workspace = true }

@@ -27,7 +27,7 @@
 use std::collections::BTreeMap;
 
 use kube::Api;
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use tracing::info;
 
 use super::super::helpers::{
@@ -196,7 +196,7 @@ async fn verify_combined(kubeconfig: &str, namespace: &str) -> Result<(), String
 
 /// Add secret-referencing environment variables to a LatticeService's main container.
 fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> LatticeService {
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     if let Some(container) = service.spec.workload.containers.get_mut("main") {
         for (name, value) in vars {
@@ -213,11 +213,11 @@ fn add_secret_env_vars(mut service: LatticeService, vars: &[(&str, &str)]) -> La
 /// Similar to `create_service_with_all_secret_routes` but with Vault-specific
 /// resource paths and provider.
 fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeService {
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, FileMount, ResourceParams, ResourceQuantity, ResourceRequirements,
         ResourceSpec, ResourceType, SecretParams,
     };
-    use lattice_common::template::TemplateString;
+    use lattice_template::TemplateString;
 
     // Container with env vars and file mounts exercising routes 1-3
     let mut variables = BTreeMap::new();
@@ -273,7 +273,7 @@ fn create_vault_all_routes_service(name: &str, namespace: &str) -> LatticeServic
                     memory: Some("128Mi".to_string()),
                 }),
             }),
-            security: Some(lattice_common::crd::SecurityContext {
+            security: Some(lattice_crd::crd::SecurityContext {
                 apparmor_profile: Some("Unconfined".to_string()),
                 allowed_binaries: vec!["/bin/printenv".to_string(), "/bin/cat".to_string()],
                 run_as_user: Some(65534),

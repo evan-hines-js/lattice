@@ -14,7 +14,7 @@ pub fn build_cell_service(
     bootstrap_port: u16,
     grpc_port: u16,
     proxy_port: u16,
-    provider_type: &crate::crd::ProviderType,
+    provider_type: &lattice_crd::crd::ProviderType,
 ) -> k8s_openapi::api::core::v1::Service {
     use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
     use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;

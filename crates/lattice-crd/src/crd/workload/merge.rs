@@ -244,7 +244,7 @@ impl Merge for ModelRoleSpec {
 mod tests {
     use super::*;
     use crate::crd::ResourceSpec;
-    use lattice_template::TemplateString;
+    use crate::template_types::TemplateString;
 
     fn container_with_resources(cpu: &str, mem: &str) -> ContainerSpec {
         ContainerSpec {

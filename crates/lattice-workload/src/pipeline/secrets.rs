@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, RemoteRef};
 
 use crate::error::CompilationError;
-use lattice_common::crd::WorkloadSpec;
+use lattice_crd::crd::WorkloadSpec;
 // =============================================================================
 // Generated Secrets Container
 // =============================================================================
@@ -53,7 +53,7 @@ pub struct SecretRef {
 /// `context` is used in error messages to identify what's referencing the secrets
 /// (e.g., "env var 'DB_URL'" or "file '/etc/config.yaml'").
 pub(crate) fn resolve_single_store(
-    refs: &[lattice_common::template::FileSecretRef],
+    refs: &[lattice_render::FileSecretRef],
     secret_refs: &BTreeMap<String, SecretRef>,
     context: &str,
 ) -> Result<String, CompilationError> {
@@ -94,7 +94,7 @@ pub(crate) fn resolve_single_store(
 ///
 /// `context` is used in error messages (e.g., "env var 'DB_URL'", "file 'config.yaml'").
 pub(crate) fn resolve_eso_data(
-    refs: &[lattice_common::template::FileSecretRef],
+    refs: &[lattice_render::FileSecretRef],
     secret_refs: &BTreeMap<String, SecretRef>,
     context: &str,
 ) -> Result<Vec<ExternalSecretData>, CompilationError> {
@@ -231,7 +231,7 @@ impl SecretsCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, ResourceParams, ResourceSpec, ResourceType, SecretParams, WorkloadSpec,
     };
     use std::collections::BTreeMap;

@@ -2564,6 +2564,7 @@ dependencies = [
  "lattice-capi",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "lattice-move",
  "lattice-proto",
@@ -2606,6 +2607,7 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-proto",
  "mockall",
  "reqwest",
@@ -2649,6 +2651,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2666,6 +2669,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "serde",
  "tokio",
  "tracing",
@@ -2681,6 +2685,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "mockall",
  "rand 0.8.5",
@@ -2702,6 +2707,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
@@ -2719,6 +2725,7 @@ dependencies = [
  "axum-server",
  "base64",
  "chrono",
+ "criterion",
  "dashmap",
  "futures",
  "k8s-openapi",
@@ -2726,6 +2733,7 @@ dependencies = [
  "lattice-auth",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "lattice-move",
  "lattice-proto",
@@ -2760,6 +2768,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-secret-provider",
  "serde_json",
  "tokio",
@@ -2785,9 +2794,12 @@ dependencies = [
  "lattice-cluster",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "lattice-move",
  "lattice-operator",
+ "lattice-render",
+ "lattice-template",
  "parking_lot",
  "rand 0.8.5",
  "reqwest",
@@ -2811,6 +2823,8 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
+ "lattice-render",
  "lattice-secret-provider",
  "serde_json",
  "tokio",
@@ -2842,6 +2856,7 @@ dependencies = [
  "lattice-cert-issuer",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "lattice-move",
  "lattice-proto",
@@ -2883,13 +2898,13 @@ dependencies = [
  "aws-lc-rs",
  "base64",
  "chrono",
- "criterion",
  "dashmap",
  "futures",
  "k8s-openapi",
  "kube",
  "lattice-core",
  "lattice-crd",
+ "lattice-graph",
  "lattice-template",
  "once_cell",
  "opentelemetry",
@@ -2917,7 +2932,10 @@ dependencies = [
 name = "lattice-core"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "k8s-openapi",
+ "schemars 1.2.1",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "yaml-rust2",
@@ -2932,6 +2950,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "serde",
  "serde_yaml",
  "thiserror 2.0.18",
@@ -2949,7 +2968,6 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-core",
- "lattice-template",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -2980,6 +2998,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-secret-provider",
  "serde_json",
  "tokio",
@@ -3008,6 +3027,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-graph"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "dashmap",
+ "lattice-core",
+ "lattice-crd",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-image-provider"
 version = "0.1.0"
 dependencies = [
@@ -3015,6 +3048,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-secret-provider",
  "serde_json",
  "tokio",
@@ -3032,6 +3066,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "pem",
  "rcgen",
  "rustls",
@@ -3063,8 +3098,12 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-cost",
+ "lattice-crd",
+ "lattice-graph",
  "lattice-quota",
+ "lattice-render",
  "lattice-secret-provider",
+ "lattice-template",
  "lattice-tetragon",
  "lattice-volcano",
  "lattice-workload",
@@ -3082,6 +3121,7 @@ name = "lattice-mesh-member"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "criterion",
  "futures",
  "k8s-openapi",
  "kube",
@@ -3089,6 +3129,9 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
+ "lattice-graph",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "tokio",
@@ -3112,6 +3155,7 @@ dependencies = [
  "lattice-core",
  "lattice-cost",
  "lattice-crd",
+ "lattice-graph",
  "lattice-quota",
  "lattice-secret-provider",
  "lattice-tetragon",
@@ -3183,7 +3227,9 @@ dependencies = [
  "lattice-common",
  "lattice-core",
  "lattice-cost",
+ "lattice-crd",
  "lattice-dns-provider",
+ "lattice-graph",
  "lattice-image-provider",
  "lattice-infra",
  "lattice-job",
@@ -3236,6 +3282,7 @@ dependencies = [
  "lattice-cache",
  "lattice-cedar",
  "lattice-common",
+ "lattice-crd",
  "lattice-secret-provider",
  "lattice-template",
  "serde",
@@ -3268,9 +3315,25 @@ dependencies = [
  "lattice-cache",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-render"
+version = "0.1.0"
+dependencies = [
+ "kube",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-graph",
+ "lattice-template",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
  "tracing",
 ]
 
@@ -3286,6 +3349,8 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
+ "lattice-render",
  "serde",
  "serde_json",
  "subtle",
@@ -3315,9 +3380,13 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-cost",
+ "lattice-crd",
+ "lattice-graph",
  "lattice-infra",
  "lattice-quota",
+ "lattice-render",
  "lattice-secret-provider",
+ "lattice-template",
  "lattice-tetragon",
  "lattice-volcano",
  "lattice-workload",
@@ -3338,7 +3407,8 @@ dependencies = [
 name = "lattice-template"
 version = "0.1.0"
 dependencies = [
- "schemars 1.2.1",
+ "criterion",
+ "lattice-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -3349,6 +3419,7 @@ name = "lattice-tetragon"
 version = "0.1.0"
 dependencies = [
  "lattice-common",
+ "lattice-crd",
  "serde_json",
 ]
 
@@ -3357,6 +3428,7 @@ name = "lattice-volcano"
 version = "0.1.0"
 dependencies = [
  "lattice-common",
+ "lattice-crd",
  "serde",
  "serde_json",
 ]
@@ -3371,6 +3443,7 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
  "lattice-infra",
  "rustls",
  "rustls-pemfile",
@@ -3390,8 +3463,12 @@ dependencies = [
  "lattice-cedar",
  "lattice-common",
  "lattice-core",
+ "lattice-crd",
+ "lattice-graph",
  "lattice-quota",
+ "lattice-render",
  "lattice-secret-provider",
+ "lattice-template",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

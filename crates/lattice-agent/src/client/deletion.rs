@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use crate::commands::apply_manifests::extract_manifest_info_bytes;
 use crate::kube_client::KubeClientProvider;
 use lattice_common::capi_namespace;
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 use lattice_proto::{agent_message::Payload, AgentMessage, ClusterDeleting, MoveObject};
 
 use super::config::{UNPIVOT_BASE_INTERVAL, UNPIVOT_MAX_INTERVAL};

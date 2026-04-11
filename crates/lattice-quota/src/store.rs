@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::LatticeQuota;
+use lattice_crd::crd::LatticeQuota;
 
 /// Resolve a `QuotaBudget` for a workload from pre-fetched quotas and namespace labels.
 ///

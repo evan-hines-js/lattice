@@ -8,6 +8,7 @@ description = "DNSProvider controller for Lattice - validates DNS provider confi
 [dependencies]
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
 lattice-secret-provider = { workspace = true }
 
 # Kubernetes

@@ -3,7 +3,7 @@
 //! Core types for the bootstrap protocol: responses, registrations,
 //! manifest generator trait, and bundle configuration.
 
-use lattice_common::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 use serde::{Deserialize, Serialize};
 
 /// Bootstrap response containing manifests for the agent
@@ -38,7 +38,7 @@ pub struct ClusterRegistration {
     /// Infrastructure provider (docker, aws, gcp, azure)
     pub provider: ProviderType,
     /// Bootstrap mechanism (kubeadm or rke2)
-    pub bootstrap: lattice_common::crd::BootstrapProvider,
+    pub bootstrap: lattice_crd::crd::BootstrapProvider,
     /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
     pub k8s_version: String,
     /// Whether any worker pool has autoscaling enabled (min/max set)

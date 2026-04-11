@@ -7,7 +7,7 @@ pub(crate) mod secrets;
 pub(crate) mod security;
 pub(crate) mod volumes;
 
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 
 /// How volume authorization behaves
 pub enum VolumeAuthorizationMode<'a> {

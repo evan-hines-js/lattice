@@ -12,8 +12,8 @@
 pub(crate) mod cilium;
 mod istio_ambient;
 
-use lattice_common::crd::EgressTarget;
-use lattice_common::graph::ServiceGraph;
+use lattice_crd::crd::EgressTarget;
+use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
@@ -172,7 +172,7 @@ impl<'a> PolicyCompiler<'a> {
     /// Cilium FQDN egress is handled separately in `compile_cilium_policy()`.
     fn compile_egress(
         &self,
-        service_node: &lattice_common::graph::ServiceNode,
+        service_node: &lattice_graph::ServiceNode,
         namespace: &str,
         output: &mut GeneratedPolicies,
     ) {
@@ -224,11 +224,11 @@ impl<'a> PolicyCompiler<'a> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::PolicyCompiler;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, DependencyDirection, EgressRule, EgressTarget, PortSpec, ResourceSpec,
         ServicePortsSpec, WorkloadSpec,
     };
-    use lattice_common::graph::ServiceGraph;
+    use lattice_graph::ServiceGraph;
     use lattice_common::mesh;
     use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
@@ -236,7 +236,7 @@ pub(crate) mod tests {
     pub(crate) fn make_service_spec(
         deps: Vec<&str>,
         callers: Vec<&str>,
-    ) -> lattice_common::crd::LatticeServiceSpec {
+    ) -> lattice_crd::crd::LatticeServiceSpec {
         let mut resources = BTreeMap::new();
         for dep in deps {
             resources.insert(
@@ -276,7 +276,7 @@ pub(crate) mod tests {
             },
         );
 
-        lattice_common::crd::LatticeServiceSpec {
+        lattice_crd::crd::LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers,
                 resources,
@@ -475,7 +475,7 @@ pub(crate) mod tests {
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec![("http", 8080, lattice_crd::crd::PeerAuth::Strict)],
             vec!["gateway"],
             vec![],
         );
@@ -579,7 +579,7 @@ pub(crate) mod tests {
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "api".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec![("http", 8080, lattice_crd::crd::PeerAuth::Strict)],
             vec!["gateway"],
             vec![],
         );
@@ -623,13 +623,13 @@ pub(crate) mod tests {
 
     fn make_mesh_member_spec(
         labels: std::collections::BTreeMap<String, String>,
-        ports: Vec<(&str, u16, lattice_common::crd::PeerAuth)>,
+        ports: Vec<(&str, u16, lattice_crd::crd::PeerAuth)>,
         callers: Vec<&str>,
         deps: Vec<&str>,
-    ) -> lattice_common::crd::LatticeMeshMemberSpec {
-        use lattice_common::crd::{MeshMemberPort, MeshMemberTarget, ServiceRef};
+    ) -> lattice_crd::crd::LatticeMeshMemberSpec {
+        use lattice_crd::crd::{MeshMemberPort, MeshMemberTarget, ServiceRef};
 
-        lattice_common::crd::LatticeMeshMemberSpec {
+        lattice_crd::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(labels),
             ports: ports
                 .into_iter()
@@ -653,7 +653,7 @@ pub(crate) mod tests {
 
     #[test]
     fn permissive_port_generates_peer_auth_and_authz() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
@@ -712,7 +712,7 @@ pub(crate) mod tests {
 
     #[test]
     fn webhook_port_generates_peer_auth_and_authz() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
@@ -749,7 +749,7 @@ pub(crate) mod tests {
 
     #[test]
     fn webhook_port_cilium_restricts_to_kube_apiserver() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
@@ -804,7 +804,7 @@ pub(crate) mod tests {
 
     #[test]
     fn permissive_port_cilium_allows_any_source() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "webhook-ns";
@@ -840,7 +840,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mixed_permissive_and_webhook_ports() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "mixed-ns";
@@ -936,13 +936,13 @@ pub(crate) mod tests {
 
     #[test]
     fn fqdn_egress_generates_service_entry_and_authz() {
-        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+        use lattice_crd::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
 
         // Put a mesh member with an FQDN egress rule
-        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+        let spec = lattice_crd::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
                 "api".to_string(),
@@ -951,7 +951,7 @@ pub(crate) mod tests {
                 port: 8080,
                 service_port: None,
                 name: "http".to_string(),
-                peer_auth: lattice_common::crd::PeerAuth::Strict,
+                peer_auth: lattice_crd::crd::PeerAuth::Strict,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
@@ -1008,12 +1008,12 @@ pub(crate) mod tests {
 
     #[test]
     fn udp_egress_generates_service_entry_with_udp_protocol() {
-        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+        use lattice_crd::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "media";
 
-        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+        let spec = lattice_crd::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
                 "nzbget".to_string(),
@@ -1022,7 +1022,7 @@ pub(crate) mod tests {
                 port: 6789,
                 service_port: None,
                 name: "http".to_string(),
-                peer_auth: lattice_common::crd::PeerAuth::Strict,
+                peer_auth: lattice_crd::crd::PeerAuth::Strict,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
@@ -1058,12 +1058,12 @@ pub(crate) mod tests {
 
     #[test]
     fn fqdn_egress_without_ports_generates_no_to_block() {
-        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+        use lattice_crd::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
-        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+        let spec = lattice_crd::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
                 "svc".to_string(),
@@ -1072,7 +1072,7 @@ pub(crate) mod tests {
                 port: 8080,
                 service_port: None,
                 name: "http".to_string(),
-                peer_auth: lattice_common::crd::PeerAuth::Strict,
+                peer_auth: lattice_crd::crd::PeerAuth::Strict,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
@@ -1104,12 +1104,12 @@ pub(crate) mod tests {
 
     #[test]
     fn fqdn_egress_cilium_gets_fqdn_rule() {
-        use lattice_common::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
+        use lattice_crd::crd::{EgressRule, EgressTarget, MeshMemberPort, MeshMemberTarget};
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "test-ns";
 
-        let spec = lattice_common::crd::LatticeMeshMemberSpec {
+        let spec = lattice_crd::crd::LatticeMeshMemberSpec {
             target: MeshMemberTarget::Selector(BTreeMap::from([(
                 "app".to_string(),
                 "svc".to_string(),
@@ -1118,7 +1118,7 @@ pub(crate) mod tests {
                 port: 8080,
                 service_port: None,
                 name: "http".to_string(),
-                peer_auth: lattice_common::crd::PeerAuth::Strict,
+                peer_auth: lattice_crd::crd::PeerAuth::Strict,
             }],
             allowed_callers: vec![],
             dependencies: vec![],
@@ -1156,7 +1156,7 @@ pub(crate) mod tests {
         let labels = BTreeMap::from([("app".to_string(), "worker".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![("master", 29500, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1201,7 +1201,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ambient_to_non_ambient_produces_direct_egress() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "kthena-system";
@@ -1303,7 +1303,7 @@ pub(crate) mod tests {
 
     #[test]
     fn mixed_ambient_and_non_ambient_callees_produce_both_rules() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "prod-ns";
@@ -1375,7 +1375,7 @@ pub(crate) mod tests {
 
     #[test]
     fn cross_namespace_non_ambient_callee_includes_namespace_label() {
-        use lattice_common::crd::{PeerAuth, ServiceRef};
+        use lattice_crd::crd::{PeerAuth, ServiceRef};
 
         let graph = ServiceGraph::new("lattice.test");
 
@@ -1457,7 +1457,7 @@ pub(crate) mod tests {
             BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![("master", 29500, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1492,7 +1492,7 @@ pub(crate) mod tests {
             BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![("master", 29500, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1535,7 +1535,7 @@ pub(crate) mod tests {
             BTreeMap::from([("lattice.dev/training-job".to_string(), "my-job".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("master", 29500, lattice_common::crd::PeerAuth::Strict)],
+            vec![("master", 29500, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1613,7 +1613,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_bilateral_caller_cross_namespace() {
-        use lattice_common::crd::{PeerAuth, ServiceRef};
+        use lattice_crd::crd::{PeerAuth, ServiceRef};
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "model-ns";
@@ -1677,7 +1677,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_bilateral_caller_ingress() {
-        use lattice_common::crd::PeerAuth;
+        use lattice_crd::crd::PeerAuth;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "model-ns";
@@ -1734,8 +1734,8 @@ pub(crate) mod tests {
         let mut spec = make_mesh_member_spec(
             labels,
             vec![
-                ("master", 29500, lattice_common::crd::PeerAuth::Strict),
-                ("metrics", 9090, lattice_common::crd::PeerAuth::Strict),
+                ("master", 29500, lattice_crd::crd::PeerAuth::Strict),
+                ("metrics", 9090, lattice_crd::crd::PeerAuth::Strict),
             ],
             vec![],
             vec![],
@@ -1748,7 +1748,7 @@ pub(crate) mod tests {
         let vmagent_labels = BTreeMap::from([("app".to_string(), "vmagent".to_string())]);
         let mut vmagent_spec = make_mesh_member_spec(
             vmagent_labels,
-            vec![("http", 8429, lattice_common::crd::PeerAuth::Strict)],
+            vec![("http", 8429, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1793,7 +1793,7 @@ pub(crate) mod tests {
         let labels = BTreeMap::from([("lattice.dev/name".to_string(), "etl-job".to_string())]);
         let mut spec = make_mesh_member_spec(
             labels,
-            vec![("http", 8080, lattice_common::crd::PeerAuth::Strict)],
+            vec![("http", 8080, lattice_crd::crd::PeerAuth::Strict)],
             vec![],
             vec![],
         );
@@ -1824,7 +1824,7 @@ pub(crate) mod tests {
 
     #[test]
     fn out_of_ambient_egress_rules_propagate() {
-        use lattice_common::crd::EgressRule;
+        use lattice_crd::crd::EgressRule;
 
         let graph = ServiceGraph::new("lattice.test");
         let ns = "training-ns";

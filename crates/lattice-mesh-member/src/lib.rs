@@ -7,7 +7,7 @@
 //! - **PeerAuthentication**: Port-level mTLS mode (STRICT/PERMISSIVE)
 //! - **ServiceEntry**: External service registration in the mesh
 //!
-//! The [`PolicyCompiler`] generates all policies from the [`ServiceGraph`](lattice_common::graph::ServiceGraph)
+//! The [`PolicyCompiler`] generates all policies from the [`ServiceGraph`](lattice_graph::ServiceGraph)
 //! based on bilateral agreements. The MeshMember controller watches `LatticeMeshMember` CRDs
 //! and applies the generated policies.
 

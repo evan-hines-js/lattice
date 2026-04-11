@@ -604,7 +604,7 @@ impl AgentRegistry {
     /// Collect health for all connected agents as ChildClusterHealth structs.
     ///
     /// Used by the cluster controller to populate children_health on the CRD status.
-    pub fn collect_children_health(&self) -> Vec<lattice_common::crd::ChildClusterHealth> {
+    pub fn collect_children_health(&self) -> Vec<lattice_crd::crd::ChildClusterHealth> {
         self.agents
             .iter()
             .filter(|r| r.connected)
@@ -629,7 +629,7 @@ impl AgentRegistry {
                 let pool_resources = if let Some(ref h) = agent.health {
                     h.pool_resources
                         .iter()
-                        .map(|p| lattice_common::crd::PoolResourceSummary {
+                        .map(|p| lattice_crd::crd::PoolResourceSummary {
                             pool_name: p.pool_name.clone(),
                             ready_nodes: p.ready_nodes as u32,
                             total_nodes: p.total_nodes as u32,
@@ -645,7 +645,7 @@ impl AgentRegistry {
                 } else {
                     vec![]
                 };
-                lattice_common::crd::ChildClusterHealth {
+                lattice_crd::crd::ChildClusterHealth {
                     name: agent.cluster_name.clone(),
                     ready_nodes,
                     total_nodes,

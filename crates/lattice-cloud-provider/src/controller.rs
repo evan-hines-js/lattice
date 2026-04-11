@@ -15,7 +15,7 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType,
 };
 use lattice_common::status_check;
@@ -177,8 +177,8 @@ async fn update_status(
 mod tests {
     use super::*;
     use kube::core::ObjectMeta;
-    use lattice_common::crd::{CredentialSpec, InfraProviderSpec};
-    use lattice_common::template::extract_secret_refs;
+    use lattice_crd::crd::{CredentialSpec, InfraProviderSpec};
+    use lattice_render::extract_secret_refs;
     use lattice_core::LATTICE_SYSTEM_NAMESPACE;
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;

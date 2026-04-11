@@ -14,7 +14,7 @@ use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::LatticeService;
+use lattice_crd::crd::LatticeService;
 use lattice_common::{ControllerContext, ReconcileError};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
@@ -79,7 +79,7 @@ pub async fn reconcile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{BackupRetentionSpec, LatticeServiceSpec, ServiceBackupSpec};
+    use lattice_crd::crd::{BackupRetentionSpec, LatticeServiceSpec, ServiceBackupSpec};
 
     #[test]
     fn test_service_without_schedule_is_noop() {

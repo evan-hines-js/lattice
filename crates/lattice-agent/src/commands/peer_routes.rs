@@ -10,7 +10,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use tracing::{debug, error, info, warn};
 
-use lattice_common::crd::{ClusterRoute, LatticeClusterRoutes};
+use lattice_crd::crd::{ClusterRoute, LatticeClusterRoutes};
 use lattice_common::PEER_ROUTES_LABEL;
 use lattice_proto::PeerRouteSync;
 
@@ -114,11 +114,11 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
     // Group peer routes by source cluster, validating names to prevent injection
     let mut by_cluster: HashMap<String, Vec<ClusterRoute>> = HashMap::new();
     for svc in &sync.peer_routes {
-        if let Err(e) = lattice_common::crd::validate_dns_label(&svc.cluster, "cluster") {
+        if let Err(e) = lattice_crd::crd::validate_dns_label(&svc.cluster, "cluster") {
             warn!(error = %e, "Skipping peer route with invalid cluster name");
             continue;
         }
-        if let Err(e) = lattice_common::crd::validate_dns_label(&svc.name, "service name") {
+        if let Err(e) = lattice_crd::crd::validate_dns_label(&svc.name, "service name") {
             warn!(error = %e, "Skipping peer route with invalid service name");
             continue;
         }

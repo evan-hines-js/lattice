@@ -21,11 +21,11 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CedarPolicy, ClusterConfig, LatticeCluster, LatticeClusterRoutes, LatticeJob,
     LatticeMeshMember, LatticeModel, LatticeService, MonitoringConfig, ProviderType,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 use lattice_common::{CrdRegistry, LeaderElector};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_cost::CostProvider;
@@ -244,7 +244,7 @@ async fn resolve_workload_params(
     // Each controller gets its own watch connections — no cross-pod state sharing.
     // All reads during reconciliation come from this cache; writes go to etcd directly.
     let cache = lattice_cache::ResourceCache::builder()
-        .watch(kube::Api::<lattice_common::crd::LatticeQuota>::namespaced(
+        .watch(kube::Api::<lattice_crd::crd::LatticeQuota>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
@@ -252,7 +252,7 @@ async fn resolve_workload_params(
             client.clone(),
         ))
         .watch(kube::Api::<LatticeMeshMember>::all(client.clone()))
-        .watch(kube::Api::<lattice_common::crd::ImageProvider>::namespaced(
+        .watch(kube::Api::<lattice_crd::crd::ImageProvider>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
@@ -406,7 +406,7 @@ pub fn build_cluster_controller(
                 LATTICE_SYSTEM_NAMESPACE,
             ),
         )
-        .watch(kube::Api::<lattice_common::crd::InfraProvider>::namespaced(
+        .watch(kube::Api::<lattice_crd::crd::InfraProvider>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
@@ -419,11 +419,11 @@ pub fn build_cluster_controller(
                 LATTICE_SYSTEM_NAMESPACE,
             ),
         )
-        .watch(kube::Api::<lattice_common::crd::CertIssuer>::namespaced(
+        .watch(kube::Api::<lattice_crd::crd::CertIssuer>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))
-        .watch(kube::Api::<lattice_common::crd::DNSProvider>::namespaced(
+        .watch(kube::Api::<lattice_crd::crd::DNSProvider>::namespaced(
             client.clone(),
             LATTICE_SYSTEM_NAMESPACE,
         ))

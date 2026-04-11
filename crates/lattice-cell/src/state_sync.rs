@@ -7,7 +7,7 @@ use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use tracing::{debug, warn};
 
-use lattice_common::crd::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus};
+use lattice_crd::crd::{LatticeCluster, LatticeClusterSpec, LatticeClusterStatus};
 use lattice_proto::StateSyncResponse;
 
 /// Handle a StateSyncResponse from a child agent.

@@ -18,11 +18,11 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
-use lattice_common::crd::{
+use lattice_crd::crd::{
     AppliedResourceRef, Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberSpec,
     LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberScope, MeshMemberTarget,
 };
-use lattice_common::graph::{compute_edge_hash, ServiceGraph};
+use lattice_graph::{compute_edge_hash, ServiceGraph};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::mesh;
 use lattice_common::status_check;
@@ -1136,8 +1136,8 @@ async fn patch_status_with_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{MeshMemberPort, MeshMemberTarget};
-    use lattice_common::graph::ServiceGraph;
+    use lattice_crd::crd::{MeshMemberPort, MeshMemberTarget};
+    use lattice_graph::ServiceGraph;
     use std::collections::BTreeMap;
 
     use crate::policy::tests::make_service_spec;
@@ -1145,13 +1145,13 @@ mod tests {
     fn make_test_member(name: &str) -> LatticeMeshMember {
         LatticeMeshMember::new(
             name,
-            lattice_common::crd::LatticeMeshMemberSpec {
+            lattice_crd::crd::LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::new()),
                 ports: vec![MeshMemberPort {
                     port: 8080,
                     service_port: None,
                     name: "http".to_string(),
-                    peer_auth: lattice_common::crd::PeerAuth::Strict,
+                    peer_auth: lattice_crd::crd::PeerAuth::Strict,
                 }],
                 allowed_callers: vec![],
                 dependencies: vec![],

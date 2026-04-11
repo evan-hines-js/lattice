@@ -1,7 +1,16 @@
 //! Criterion benchmarks for ServiceGraph
 //!
-//! These benchmarks measure the performance of common ServiceGraph operations
-//! that will be used during reconciliation and network policy generation.
+//! Measures performance of ServiceGraph operations used during reconciliation
+//! and network policy generation, scaled to find the ceiling for a 5000-node
+//! K8s cluster (10K–50K services).
+//!
+//! Benchmark groups:
+//! - Single operations (put, get, delete) up to 50K services
+//! - Dependency/dependent lookups at scale
+//! - Active edge computation (bilateral agreements) — the hot path
+//! - depends_all worst case (O(n²) scan)
+//! - Concurrent read/write under contention at scale
+//! - Full reconciliation pattern at scale
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -10,11 +19,12 @@ use std::thread;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
 
-use lattice_common::crd::{
-    ContainerSpec, DependencyDirection, LatticeServiceSpec, PortSpec, ResourceParams, ResourceSpec,
-    ResourceType, ServicePortsSpec, WorkloadSpec,
+use lattice_crd::crd::{
+    ContainerSpec, DependencyDirection, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberPort,
+    MeshMemberTarget, PeerAuth, PortSpec, ResourceParams, ResourceSpec, ResourceType,
+    ServicePortsSpec, WorkloadSpec,
 };
-use lattice_common::graph::ServiceGraph;
+use lattice_graph::ServiceGraph;
 
 // =============================================================================
 // Test Fixtures
@@ -90,23 +100,20 @@ fn simple_service_spec() -> LatticeServiceSpec {
 // Graph Setup Helpers
 // =============================================================================
 
-/// Create a chain topology: svc-0 → svc-1 → svc-2 → ... → svc-n
+/// Chain topology: svc-0 → svc-1 → ... → svc-n with bilateral agreements
 fn setup_chain_graph(n: usize) -> ServiceGraph {
     let graph = ServiceGraph::new("lattice.test");
 
     for i in 0..n {
-        // Each service depends on the next one
         let dep_name = format!("svc-{}", i + 1);
         let spec = if i < n - 1 {
             service_spec_with_deps(&[&dep_name], &[])
         } else {
             simple_service_spec()
         };
-
         graph.put_service("default", &format!("svc-{}", i), &spec);
     }
 
-    // Add allowed callers to make edges active
     for i in 1..n {
         let caller_name = format!("svc-{}", i - 1);
         let spec = service_spec_with_deps(&[], &[&caller_name]);
@@ -116,17 +123,15 @@ fn setup_chain_graph(n: usize) -> ServiceGraph {
     graph
 }
 
-/// Create a star topology: hub ← spoke-0, spoke-1, ..., spoke-n
+/// Star topology: hub ← spoke-0, spoke-1, ..., spoke-n
 fn setup_star_graph(n: usize) -> ServiceGraph {
     let graph = ServiceGraph::new("lattice.test");
 
-    // Hub service allows all spokes
     let caller_names: Vec<String> = (0..n).map(|i| format!("spoke-{}", i)).collect();
     let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
     let hub_spec = service_spec_with_deps(&[], &caller_refs);
     graph.put_service("default", "hub", &hub_spec);
 
-    // Each spoke depends on hub
     for i in 0..n {
         let spec = service_spec_with_deps(&["hub"], &[]);
         graph.put_service("default", &format!("spoke-{}", i), &spec);
@@ -135,32 +140,40 @@ fn setup_star_graph(n: usize) -> ServiceGraph {
     graph
 }
 
-/// Create a realistic microservices topology
+/// Realistic microservices topology with proper bilateral agreements
 fn setup_realistic_graph(n: usize) -> ServiceGraph {
     let graph = ServiceGraph::new("lattice.test");
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
-    // Create n services with random but realistic connectivity
-    // Average 2-3 dependencies per service
+    // First pass: compute deps
+    let mut all_deps: Vec<Vec<usize>> = Vec::with_capacity(n);
     for i in 0..n {
-        let num_deps = rng.gen_range(0..=4.min(n.saturating_sub(1)));
+        let max_deps = 4.min(n.saturating_sub(1));
+        let num_deps = if max_deps > 0 {
+            rng.gen_range(0..=max_deps)
+        } else {
+            0
+        };
         let dep_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
             .choose_multiple(&mut rng, num_deps);
+        all_deps.push(dep_indices);
+    }
 
-        let dep_names: Vec<String> = dep_indices.iter().map(|j| format!("svc-{}", j)).collect();
+    // Second pass: compute callers from deps
+    let mut all_callers: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, deps) in all_deps.iter().enumerate() {
+        for &dep in deps {
+            all_callers[dep].push(i);
+        }
+    }
+
+    // Third pass: register with bilateral agreements
+    for i in 0..n {
+        let dep_names: Vec<String> = all_deps[i].iter().map(|j| format!("svc-{}", j)).collect();
+        let caller_names: Vec<String> =
+            all_callers[i].iter().map(|j| format!("svc-{}", j)).collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
-
-        // Random callers (simulating bilateral agreements)
-        let num_callers = rng.gen_range(0..=3.min(n.saturating_sub(1)));
-        let caller_indices: Vec<usize> = (0..n)
-            .filter(|&j| j != i)
-            .choose_multiple(&mut rng, num_callers);
-
-        let caller_names: Vec<String> = caller_indices
-            .iter()
-            .map(|j| format!("svc-{}", j))
-            .collect();
         let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
 
         let spec = service_spec_with_deps(&dep_refs, &caller_refs);
@@ -170,14 +183,46 @@ fn setup_realistic_graph(n: usize) -> ServiceGraph {
     graph
 }
 
+/// Graph with some depends_all services (O(n²) worst case for active edges)
+fn setup_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
+    let graph = setup_realistic_graph(n);
+
+    for i in 0..num_depends_all {
+        let name = format!("svc-{}", i);
+        let mm_spec = LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                name.clone(),
+            )])),
+            ports: vec![MeshMemberPort {
+                port: 8080,
+                service_port: None,
+                name: "http".to_string(),
+                peer_auth: PeerAuth::Strict,
+            }],
+            allowed_callers: Vec::new(),
+            dependencies: Vec::new(),
+            egress: Vec::new(),
+            allow_peer_traffic: false,
+            depends_all: true,
+            ingress: None,
+            service_account: None,
+            ambient: true,
+        };
+        graph.put_mesh_member("default", &name, &mm_spec);
+    }
+
+    graph
+}
+
 // =============================================================================
-// Benchmarks: Single Operations
+// Benchmarks: Single Operations at Scale
 // =============================================================================
 
 fn bench_put_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("put_service");
 
-    for size in [10usize, 100, 500, 1000] {
+    for size in [10usize, 100, 1_000, 5_000, 10_000, 50_000] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("empty_graph", size), &size, |b, &size| {
             let graph = ServiceGraph::new("lattice.test");
@@ -189,20 +234,26 @@ fn bench_put_service(c: &mut Criterion) {
             });
         });
 
-        group.bench_with_input(
-            BenchmarkId::new("existing_graph", size),
-            &size,
-            |b, &size| {
-                let graph = setup_realistic_graph(size);
-                let spec = simple_service_spec();
-                let mut i = 0;
-                b.iter(|| {
-                    // Update existing service
-                    graph.put_service("default", &format!("svc-{}", i % size), black_box(&spec));
-                    i += 1;
-                });
-            },
-        );
+        // Only run existing_graph for sizes that don't take too long to set up
+        if size <= 10_000 {
+            group.bench_with_input(
+                BenchmarkId::new("existing_graph", size),
+                &size,
+                |b, &size| {
+                    let graph = setup_realistic_graph(size);
+                    let spec = simple_service_spec();
+                    let mut i = 0;
+                    b.iter(|| {
+                        graph.put_service(
+                            "default",
+                            &format!("svc-{}", i % size),
+                            black_box(&spec),
+                        );
+                        i += 1;
+                    });
+                },
+            );
+        }
     }
 
     group.finish();
@@ -211,11 +262,11 @@ fn bench_put_service(c: &mut Criterion) {
 fn bench_get_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_service");
 
-    for size in [10usize, 100, 500, 1000] {
+    for size in [10usize, 100, 1_000, 5_000, 10_000, 50_000] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("lookup", size), &size, |b, &size| {
             let graph = setup_realistic_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_service("default", &format!("svc-{}", idx)));
@@ -229,13 +280,12 @@ fn bench_get_service(c: &mut Criterion) {
 fn bench_delete_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("delete_service");
 
-    for size in [10usize, 100, 500] {
+    for size in [10usize, 100, 500, 5_000] {
         group.throughput(Throughput::Elements(1));
         group.bench_with_input(BenchmarkId::new("delete", size), &size, |b, &size| {
             b.iter_batched(
                 || setup_realistic_graph(size),
                 |graph| {
-                    // Delete a random service
                     let idx = size / 2;
                     graph.delete_service("default", &format!("svc-{}", idx));
                     black_box(graph)
@@ -248,26 +298,28 @@ fn bench_delete_service(c: &mut Criterion) {
     group.finish();
 }
 
+// =============================================================================
+// Benchmarks: Dependency/Dependent Lookups at Scale
+// =============================================================================
+
 fn bench_get_dependencies(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_dependencies");
 
-    for size in [10usize, 100, 500, 1000] {
+    for size in [10usize, 100, 1_000, 5_000, 10_000] {
         group.throughput(Throughput::Elements(1));
 
-        // Chain topology (single dependency each)
         group.bench_with_input(BenchmarkId::new("chain", size), &size, |b, &size| {
             let graph = setup_chain_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_dependencies("default", &format!("svc-{}", idx)));
             });
         });
 
-        // Star topology (hub has many dependents)
         group.bench_with_input(BenchmarkId::new("star", size), &size, |b, &size| {
             let graph = setup_star_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_dependencies("default", &format!("spoke-{}", idx)));
@@ -281,21 +333,19 @@ fn bench_get_dependencies(c: &mut Criterion) {
 fn bench_get_dependents(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_dependents");
 
-    for size in [10usize, 100, 500] {
+    for size in [10usize, 100, 500, 5_000, 10_000] {
         group.throughput(Throughput::Elements(1));
 
-        // Star topology - hub has many dependents
-        group.bench_with_input(BenchmarkId::new("star_hub", size), &size, |b, &size| {
+        group.bench_with_input(BenchmarkId::new("star_hub", size), &size, |b, _| {
             let graph = setup_star_graph(size);
             b.iter(|| {
                 black_box(graph.get_dependents("default", "hub"));
             });
         });
 
-        // Realistic topology
         group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
             let graph = setup_realistic_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_dependents("default", &format!("svc-{}", idx)));
@@ -307,43 +357,90 @@ fn bench_get_dependents(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Active Edge Operations (for Network Policy)
+// Benchmarks: Active Edge Operations (the hot path for mesh policy)
 // =============================================================================
 
 fn bench_get_active_edges(c: &mut Criterion) {
     let mut group = c.benchmark_group("active_edges");
 
-    for size in [10usize, 100, 500] {
+    for size in [10usize, 100, 500, 5_000, 10_000, 50_000] {
         group.throughput(Throughput::Elements(1));
 
-        // Inbound edges
         group.bench_with_input(BenchmarkId::new("inbound", size), &size, |b, &size| {
             let graph = setup_realistic_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_active_inbound_edges("default", &format!("svc-{}", idx)));
             });
         });
 
-        // Outbound edges
         group.bench_with_input(BenchmarkId::new("outbound", size), &size, |b, &size| {
             let graph = setup_realistic_graph(size);
-            let mut rng = rand::thread_rng();
+            let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
                 let idx = rng.gen_range(0..size);
                 black_box(graph.get_active_outbound_edges("default", &format!("svc-{}", idx)));
             });
         });
 
-        // Star hub (many inbound)
+        // Star hub: one service with N inbound edges
+        if size <= 10_000 {
+            group.bench_with_input(
+                BenchmarkId::new("star_hub_inbound", size),
+                &size,
+                |b, _| {
+                    let graph = setup_star_graph(size);
+                    b.iter(|| {
+                        black_box(graph.get_active_inbound_edges("default", "hub"));
+                    });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// Benchmarks: depends_all — O(n²) worst case
+// =============================================================================
+
+fn bench_depends_all_edges(c: &mut Criterion) {
+    let mut group = c.benchmark_group("active_edges_depends_all");
+
+    // (total, depends_all count)
+    for (total, da_count) in [
+        (100, 10),
+        (500, 50),
+        (1_000, 100),
+        (5_000, 500),
+        (10_000, 1_000),
+    ] {
+        group.throughput(Throughput::Elements(1));
+
+        // Bench a depends_all service (scans all vertices)
         group.bench_with_input(
-            BenchmarkId::new("star_hub_inbound", size),
-            &size,
-            |b, &size| {
-                let graph = setup_star_graph(size);
+            BenchmarkId::new("da_outbound", format!("{}total_{}da", total, da_count)),
+            &(),
+            |b, _| {
+                let graph = setup_depends_all_graph(total, da_count);
                 b.iter(|| {
-                    black_box(graph.get_active_inbound_edges("default", "hub"));
+                    black_box(graph.get_active_outbound_edges("default", "svc-0"));
+                });
+            },
+        );
+
+        // Bench inbound edges for a normal service when depends_all services exist
+        // (depends_all services appear as extra callers)
+        group.bench_with_input(
+            BenchmarkId::new("normal_inbound", format!("{}total_{}da", total, da_count)),
+            &total,
+            |b, &total| {
+                let graph = setup_depends_all_graph(total, da_count);
+                b.iter(|| {
+                    let idx = total - 1;
+                    black_box(graph.get_active_inbound_edges("default", &format!("svc-{}", idx)));
                 });
             },
         );
@@ -353,14 +450,14 @@ fn bench_get_active_edges(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Concurrent Operations
+// Benchmarks: Concurrent Operations at Scale
 // =============================================================================
 
 fn bench_concurrent_reads(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_reads");
 
-    for size in [100usize, 500] {
-        group.throughput(Throughput::Elements(4)); // 4 threads
+    for size in [100usize, 500, 5_000, 10_000] {
+        group.throughput(Throughput::Elements(4));
 
         group.bench_with_input(BenchmarkId::new("parallel_get", size), &size, |b, &size| {
             let graph = Arc::new(setup_realistic_graph(size));
@@ -391,8 +488,8 @@ fn bench_concurrent_reads(c: &mut Criterion) {
 fn bench_concurrent_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_mixed");
 
-    for size in [100usize, 500] {
-        group.throughput(Throughput::Elements(4)); // 4 threads
+    for size in [100usize, 500, 5_000] {
+        group.throughput(Throughput::Elements(4));
 
         group.bench_with_input(
             BenchmarkId::new("read_write_mix", size),
@@ -411,13 +508,16 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
                                     for i in 0..25 {
                                         let idx = (t * 25 + i) % size;
                                         if i % 5 == 0 {
-                                            // 20% writes
-                                            g.put_service("default", &format!("svc-{}", idx), &s);
-                                        } else {
-                                            // 80% reads
-                                            black_box(
-                                                g.get_service("default", &format!("svc-{}", idx)),
+                                            g.put_service(
+                                                "default",
+                                                &format!("svc-{}", idx),
+                                                &s,
                                             );
+                                        } else {
+                                            black_box(g.get_service(
+                                                "default",
+                                                &format!("svc-{}", idx),
+                                            ));
                                         }
                                     }
                                 })
@@ -440,43 +540,60 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
 }
 
 // =============================================================================
-// Benchmarks: Reconciliation Patterns
+// Benchmarks: Full Reconciliation Pattern at Scale
 // =============================================================================
 
 fn bench_reconcile_pattern(c: &mut Criterion) {
     let mut group = c.benchmark_group("reconcile_pattern");
 
-    for size in [100usize, 500] {
+    for size in [100usize, 500, 5_000, 10_000, 50_000] {
         group.throughput(Throughput::Elements(1));
 
-        // Typical reconcile: get service, update, check deps, get edges
         group.bench_with_input(
             BenchmarkId::new("full_reconcile", size),
             &size,
             |b, &size| {
                 let graph = setup_realistic_graph(size);
                 let spec = simple_service_spec();
-                let mut rng = rand::thread_rng();
+                let mut rng = StdRng::seed_from_u64(99);
 
                 b.iter(|| {
                     let idx = rng.gen_range(0..size);
                     let name = format!("svc-{}", idx);
 
-                    // 1. Get current state
                     let _ = black_box(graph.get_service("default", &name));
-
-                    // 2. Update service
                     graph.put_service("default", &name, &spec);
 
-                    // 3. Check dependencies exist
                     let deps = graph.get_dependencies("default", &name);
                     for dep in &deps {
                         black_box(graph.get_service("default", dep));
                     }
 
-                    // 4. Get active edges for network policy
                     let _ = black_box(graph.get_active_inbound_edges("default", &name));
                     let _ = black_box(graph.get_active_outbound_edges("default", &name));
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// Benchmarks: Graph construction time (matters for operator restart at scale)
+// =============================================================================
+
+fn bench_graph_construction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph_construction");
+    group.sample_size(10);
+
+    for size in [100usize, 1_000, 5_000, 10_000, 25_000, 50_000] {
+        group.bench_with_input(
+            BenchmarkId::new("realistic", size),
+            &size,
+            |b, &size| {
+                b.iter(|| {
+                    black_box(setup_realistic_graph(size));
                 });
             },
         );
@@ -497,9 +614,11 @@ criterion_group!(
     bench_get_dependencies,
     bench_get_dependents,
     bench_get_active_edges,
+    bench_depends_all_edges,
     bench_concurrent_reads,
     bench_concurrent_mixed,
     bench_reconcile_pattern,
+    bench_graph_construction,
 );
 
 criterion_main!(benches);

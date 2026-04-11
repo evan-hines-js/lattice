@@ -13,7 +13,7 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_cache::ResourceCache;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus, LatticeService,
     QuotaPrincipal,
 };

@@ -14,6 +14,8 @@ lattice-cache = { workspace = true }
 lattice-cedar = { workspace = true }
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+lattice-graph = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
@@ -33,3 +35,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "policy"
+harness = false

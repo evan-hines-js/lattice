@@ -7,6 +7,7 @@ description = "Volcano VCJob compiler for Lattice batch workloads"
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-crd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

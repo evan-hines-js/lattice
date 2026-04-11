@@ -9,6 +9,7 @@ description = "Infrastructure components for Lattice (PKI, bootstrap manifests)"
 # Internal
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

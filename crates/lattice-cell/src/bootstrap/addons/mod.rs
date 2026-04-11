@@ -10,7 +10,7 @@ mod aws;
 mod local_path_provisioner;
 
 use lattice_common::capi_namespace;
-use lattice_common::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 
 /// Generate provider-specific addon manifests for a cluster.
 ///

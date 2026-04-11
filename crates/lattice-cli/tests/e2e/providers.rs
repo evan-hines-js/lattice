@@ -5,7 +5,7 @@
 
 #![cfg(feature = "provider-e2e")]
 
-use lattice_common::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 
 /// Supported infrastructure providers
 ///

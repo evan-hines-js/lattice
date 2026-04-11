@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use lattice_common::crd::{has_unknown_binary_entrypoint, Probe, RuntimeSpec, WorkloadSpec};
+use lattice_crd::crd::{has_unknown_binary_entrypoint, Probe, RuntimeSpec, WorkloadSpec};
 use lattice_common::policy::tetragon::{
     KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
     TracingPolicySpec,
@@ -192,7 +192,7 @@ fn collect_entrypoints(
 mod tests {
     use std::collections::BTreeMap;
 
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         ContainerSpec, ExecProbe, Probe, RuntimeSpec, SecurityContext, SidecarSpec, WorkloadSpec,
     };
 

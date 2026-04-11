@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lattice_common::crd::ProviderType;
+use lattice_crd::crd::ProviderType;
 use lattice_infra::pki::{
     CertificateAuthority, CertificateAuthorityBundle, DEFAULT_CERT_VALIDITY_HOURS,
 };
@@ -76,7 +76,7 @@ pub async fn register_test_cluster<G: ManifestGenerator>(
                 cluster_manifest,
                 lb_cidr: None,
                 provider: ProviderType::Docker,
-                bootstrap: lattice_common::crd::BootstrapProvider::default(),
+                bootstrap: lattice_crd::crd::BootstrapProvider::default(),
                 k8s_version: "1.32.0".to_string(),
                 autoscaling_enabled: false,
             },

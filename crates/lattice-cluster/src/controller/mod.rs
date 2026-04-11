@@ -37,7 +37,7 @@ use kube::{Resource, ResourceExt};
 use tracing::{debug, error, info, instrument, warn};
 
 use kube::runtime::events::EventType;
-use lattice_common::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus};
 
 use lattice_common::events::{actions, reasons};
 use lattice_common::metrics::{self, ReconcileTimer};
@@ -305,7 +305,7 @@ mod tests {
     use lattice_capi::installer::CapiInstaller;
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
-    use lattice_common::crd::{
+    use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, Condition, ConditionStatus, ControlPlaneSpec,
         EndpointsSpec, InfraProvider, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
         NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
@@ -409,7 +409,7 @@ mod tests {
 
     /// Create a sample Docker InfraProvider for testing
     fn sample_docker_provider() -> InfraProvider {
-        use lattice_common::crd::{InfraProviderSpec, InfraProviderType};
+        use lattice_crd::crd::{InfraProviderSpec, InfraProviderType};
 
         InfraProvider::new(
             "test-provider",

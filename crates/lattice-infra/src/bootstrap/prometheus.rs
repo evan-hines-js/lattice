@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_common::crd::{
+use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };

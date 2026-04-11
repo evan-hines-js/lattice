@@ -13,7 +13,7 @@ use super::{
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use crate::constants::{AWS_API_VERSION, INFRASTRUCTURE_API_GROUP};
-use lattice_common::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
+use lattice_crd::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
 
 /// Configuration for generating an AWS machine template
@@ -319,8 +319,8 @@ impl Provider for AwsProvider {
 mod tests {
     use super::*;
     use kube::api::ObjectMeta;
-    use lattice_common::crd::LatticeClusterSpec;
-    use lattice_common::crd::{
+    use lattice_crd::crd::LatticeClusterSpec;
+    use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
         MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
     };

@@ -14,11 +14,11 @@ mod directive;
 mod error;
 mod expand;
 mod inline;
-mod types;
-
 pub use context::{TemplateContext, TemplateContextBuilder};
 pub use directive::{DirectiveKeyMapping, SecretDirective};
 pub use error::TemplateError;
 pub use expand::{expand, ExpandOptions, Expansion, SecretMode};
 pub use inline::InlineSecretRef;
-pub use types::{has_template_syntax, StaticString, StaticStringError, TemplateString};
+pub use lattice_core::template_types::{
+    has_template_syntax, StaticString, StaticStringError, TemplateString,
+};

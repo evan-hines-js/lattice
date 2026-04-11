@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use lattice_template::TemplateString;
+use crate::template_types::TemplateString;
 
 use super::resources::ResourceRequirements;
 
@@ -587,7 +587,7 @@ mod tests {
     use crate::crd::workload::resources::{
         validate_cpu_quantity, validate_memory_quantity, ResourceQuantity, ResourceRequirements,
     };
-    use lattice_template::TemplateString;
+    use crate::template_types::TemplateString;
 
     #[test]
     fn test_valid_cpu_quantities() {

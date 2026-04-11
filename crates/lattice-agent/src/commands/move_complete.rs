@@ -11,7 +11,7 @@ use tracing::{error, info, warn};
 use crate::distributable_resources_from_proto;
 use crate::kube_client::KubeClientProvider;
 use crate::pivot::{apply_distributed_resources, patch_kubeconfig_for_self_management};
-use lattice_common::crd::LatticeCluster;
+use lattice_crd::crd::LatticeCluster;
 
 use super::apply_manifests::apply_manifests;
 use super::CommandContext;

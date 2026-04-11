@@ -23,10 +23,10 @@ use std::collections::BTreeMap;
 use futures::future::try_join_all;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::Api;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     LatticeService, LatticeServiceSpec, ResourceSpec, RuntimeSpec, WorkloadSpec,
 };
-use lattice_common::template::TemplateString;
+use lattice_template::TemplateString;
 use tracing::info;
 
 use super::super::helpers::{

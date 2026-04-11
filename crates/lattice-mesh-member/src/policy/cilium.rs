@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{derived_name, EgressTarget, NetworkProtocol};
-use lattice_common::graph::{ActiveEdge, ServiceNode};
+use lattice_crd::crd::{derived_name, EgressTarget, NetworkProtocol};
+use lattice_graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::cilium::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,

@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lattice_cedar::{PolicyEngine, SecretAuthzRequest};
-use lattice_common::crd::ResourceSpec;
+use lattice_crd::crd::ResourceSpec;
 use lattice_secret_provider::eso::{self, ExternalSecret, ExternalSecretData, RemoteRef};
 use lattice_template::SecretDirective;
 
@@ -192,7 +192,7 @@ pub fn generate_external_secrets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::{ResourceParams, ResourceType, SecretParams};
+    use lattice_crd::crd::{ResourceParams, ResourceType, SecretParams};
     use lattice_template::DirectiveKeyMapping;
 
     fn make_secret_resource(provider: &str, id: &str, keys: &[&str]) -> ResourceSpec {

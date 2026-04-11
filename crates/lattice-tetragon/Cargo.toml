@@ -7,6 +7,7 @@ description = "Tetragon runtime enforcement policy compiler for Lattice"
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-crd = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

@@ -13,7 +13,7 @@ use kube::{Client, ResourceExt};
 use lattice_cedar::PolicyEngine;
 use tracing::{debug, info, warn};
 
-use lattice_common::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
+use lattice_crd::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
 use lattice_common::{ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
@@ -163,7 +163,7 @@ fn validate_policy(policy: &CedarPolicy, generation: Option<i64>) -> CedarPolicy
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::CedarPolicySpec;
+    use lattice_crd::crd::CedarPolicySpec;
 
     fn make_policy(name: &str, policies: &str, enabled: bool) -> CedarPolicy {
         let mut cp = CedarPolicy::new(

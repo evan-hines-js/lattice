@@ -31,7 +31,7 @@ use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::{distributable_resources_to_proto, fetch_distributable_resources};
 use crate::server::AgentServer;
-use lattice_common::crd::{
+use lattice_crd::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
 use lattice_common::DistributableResources;
@@ -934,7 +934,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
 mod tests {
     use super::*;
     use crate::bootstrap::ManifestGenerator;
-    use lattice_common::crd::ProviderType;
+    use lattice_crd::crd::ProviderType;
 
     /// Mock manifest generator for testing
     struct MockManifestGenerator;

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_common::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
+use lattice_crd::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::mesh;
 use lattice_common::network::gateway_api::{
@@ -154,7 +154,7 @@ fn compile_model_route(
     model: &LatticeModel,
     routing: &ModelRoutingSpec,
     route_name: &str,
-    route_spec: &lattice_common::crd::ModelRouteSpec,
+    route_spec: &lattice_crd::crd::ModelRouteSpec,
 ) -> KthenaModelRoute {
     let name = model.metadata.name.as_deref().unwrap_or_default();
     let namespace = model.metadata.namespace.as_deref().unwrap_or("default");
@@ -272,7 +272,7 @@ fn detect_pd_group(model: &LatticeModel, routing: &ModelRoutingSpec) -> Option<P
 }
 
 /// Check whether a model has PD disaggregation roles (exactly "prefill" + "decode").
-pub fn has_pd_roles(roles: &BTreeMap<String, lattice_common::crd::ModelRoleSpec>) -> bool {
+pub fn has_pd_roles(roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>) -> bool {
     roles.contains_key(PD_ROLE_PREFILL) && roles.contains_key(PD_ROLE_DECODE)
 }
 
@@ -380,8 +380,8 @@ pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_common::crd::workload::ingress::{CertIssuerRef, IngressTls};
-    use lattice_common::crd::{
+    use lattice_crd::crd::workload::ingress::{CertIssuerRef, IngressTls};
+    use lattice_crd::crd::{
         HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModelSpec,
         ModelIngressSpec, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule,
         ModelRouteSpec, ModelRoutingSpec, RateLimit, RateLimitUnit, RuntimeSpec, TargetModel,
@@ -691,7 +691,7 @@ mod tests {
             port: None,
             protocol: None,
             traffic_policy: Some(TrafficPolicy {
-                retry: Some(lattice_common::crd::RetryPolicy { attempts: Some(3) }),
+                retry: Some(lattice_crd::crd::RetryPolicy { attempts: Some(3) }),
             }),
             kv_connector: None,
             routes: BTreeMap::from([(

@@ -26,6 +26,8 @@ provider-e2e = []
 [dependencies]
 lattice-common.workspace = true
 lattice-core.workspace = true
+lattice-crd.workspace = true
+lattice-graph.workspace = true
 lattice-proto.workspace = true
 lattice-infra.workspace = true
 lattice-capi.workspace = true

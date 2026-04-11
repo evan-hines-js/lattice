@@ -8,6 +8,8 @@ description = "SecretProvider controller for Lattice - manages Vault integration
 [dependencies]
 lattice-common = { workspace = true }
 lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+lattice-render = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }
