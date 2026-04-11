@@ -54,7 +54,7 @@ pub use dns_provider::{
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use image_provider::{
     EcrConfig, ImageProvider, ImageProviderPhase, ImageProviderSpec, ImageProviderStatus,
-    ImageProviderType,
+    ImageProviderType, ImageTrustPolicy, VerificationAuthority,
 };
 pub use infra_provider::{
     AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,

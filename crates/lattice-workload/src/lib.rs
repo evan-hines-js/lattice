@@ -29,7 +29,7 @@ mod pipeline;
 
 pub use authorization::VolumeAuthorizationMode;
 pub use compiled::{CompiledConfig, CompiledWorkload};
-pub use compiler::WorkloadCompiler;
+pub use compiler::{ImageTrustEntry, WorkloadCompiler};
 pub use error::CompilationError;
 pub use pipeline::pod_template::CompiledPodTemplate;
 pub use pipeline::secrets::SecretRef;

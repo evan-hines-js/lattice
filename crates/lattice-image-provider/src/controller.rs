@@ -102,8 +102,44 @@ pub async fn reconcile(
         }
     }
 
+    // Sync trust authority cosign public keys via ESO
+    if let Some(ref trust) = ip.spec.trust {
+        for authority in &trust.authorities {
+            let key_secret_name = format!("{}-trust-{}", name, authority.name);
+            if let Err(e) = lattice_secret_provider::credentials::reconcile_credentials(
+                client,
+                &lattice_secret_provider::credentials::ProviderCredentialConfig {
+                    provider_name: &key_secret_name,
+                    credentials: &authority.key,
+                    credential_data: None,
+                    target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                    field_manager: FIELD_MANAGER,
+                },
+            )
+            .await
+            {
+                let msg = format!(
+                    "Failed to sync trust authority '{}' key: {e}",
+                    authority.name
+                );
+                warn!(image_provider = %name, error = %msg);
+                update_status(
+                    client,
+                    &ip,
+                    ImageProviderPhase::Failed,
+                    Some(msg),
+                    Some(generation),
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
+            }
+        }
+    }
+
     let status_msg = if ip.spec.credentials.is_some() {
         "Credentials synced"
+    } else if ip.spec.trust.is_some() {
+        "Trust policy configured"
     } else {
         "Ready (no credentials configured)"
     };

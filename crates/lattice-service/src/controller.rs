@@ -123,6 +123,15 @@ pub trait ServiceKubeClient: Send + Sync {
         &self,
         snapshots: &[lattice_quota::QuotaSnapshot],
     ) -> Result<bool, Error>;
+
+    /// Read a Secret's data by name and namespace.
+    ///
+    /// Returns the secret data as a map of key → bytes, or None if not found.
+    async fn get_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, Vec<u8>>>, Error>;
 }
 
 /// Real Kubernetes client implementation
@@ -457,6 +466,27 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             ..Default::default()
         };
         Ok(budget.verify_freshness(&self.client).await?)
+    }
+
+    async fn get_secret(
+        &self,
+        name: &str,
+        namespace: &str,
+    ) -> Result<Option<std::collections::BTreeMap<String, Vec<u8>>>, Error> {
+        use k8s_openapi::api::core::v1::Secret;
+        let api: kube::Api<Secret> = kube::Api::namespaced(self.client.clone(), namespace);
+        match api.get_opt(name).await? {
+            Some(secret) => {
+                let data = secret
+                    .data
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(k, v)| (k, v.0))
+                    .collect();
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -921,6 +951,9 @@ async fn compile_and_apply(
         .cache
         .resolve_image_providers(&service.spec.runtime.image_pull_secrets);
 
+    // Resolve image trust policies and fetch cosign public keys from Secrets
+    let image_trust = resolve_image_trust(&ctx.cache, ctx.kube.as_ref()).await;
+
     let compiler = ServiceCompiler::new(
         &ctx.graph,
         &ctx.cluster_name,
@@ -931,7 +964,8 @@ async fn compile_and_apply(
     .with_phases(&ctx.extension_phases)
     .with_eso_content_hash(eso_content_hash.to_string())
     .with_quota_budget(quota_budget)
-    .with_image_providers(image_providers);
+    .with_image_providers(image_providers)
+    .with_image_trust(image_trust);
     let compiled = match compiler.compile(service).await {
         Ok(compiled) => compiled,
         Err(e) => {
@@ -1136,6 +1170,76 @@ async fn transition_to_failed(
         .apply(ctx.kube.as_ref(), service)
         .await?;
     Ok(())
+}
+
+// =============================================================================
+// Image trust policy resolution
+// =============================================================================
+
+/// Resolve image trust policies from ImageProvider CRDs and fetch cosign
+/// public keys from K8s Secrets (ESO-synced).
+///
+/// Returns a map of registry prefix → ImageTrustEntry with key material
+/// ready for cosign verification.
+async fn resolve_image_trust(
+    cache: &lattice_cache::ResourceCache,
+    kube: &dyn ServiceKubeClient,
+) -> std::collections::BTreeMap<String, lattice_workload::ImageTrustEntry> {
+    let mut result = std::collections::BTreeMap::new();
+
+    for (provider_name, registry, trust_policy) in cache.resolve_image_trust_policies() {
+        let mut authorities = Vec::new();
+
+        for authority in &trust_policy.authorities {
+            // Secret name: {provider_name}-trust-{authority_name}-credentials
+            // (set by ImageProvider controller via reconcile_credentials)
+            let secret_name = format!("{}-trust-{}-credentials", provider_name, authority.name);
+            match kube
+                .get_secret(&secret_name, "lattice-system")
+                .await
+            {
+                Ok(Some(secret_data)) => {
+                    if let Some(key_bytes) = secret_data.values().next() {
+                        authorities.push((authority.name.clone(), key_bytes.clone()));
+                    } else {
+                        tracing::warn!(
+                            authority = %authority.name,
+                            registry = %registry,
+                            "cosign key secret is empty"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        authority = %authority.name,
+                        registry = %registry,
+                        secret = %secret_name,
+                        "cosign key secret not found (ESO may not have synced yet)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        authority = %authority.name,
+                        registry = %registry,
+                        error = %e,
+                        "failed to read cosign key secret"
+                    );
+                }
+            }
+        }
+
+        if !authorities.is_empty() {
+            result.insert(
+                registry,
+                lattice_workload::ImageTrustEntry {
+                    enforce: trust_policy.enforce,
+                    authorities,
+                },
+            );
+        }
+    }
+
+    result
 }
 
 // =============================================================================
@@ -1413,6 +1517,7 @@ mod tests {
         mock.expect_delete_revoked_external_secrets()
             .returning(|_, _| Ok(()));
         mock.expect_verify_quota_freshness().returning(|_| Ok(true));
+        mock.expect_get_secret().returning(|_, _| Ok(None));
         mock
     }
 

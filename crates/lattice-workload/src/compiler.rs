@@ -63,6 +63,7 @@ pub struct WorkloadCompiler<'a> {
 }
 
 /// Pre-resolved trust policy for a registry, with key material ready to verify.
+#[derive(Clone)]
 pub struct ImageTrustEntry {
     /// Whether verification is enforced.
     pub enforce: bool,

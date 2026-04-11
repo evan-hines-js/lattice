@@ -145,6 +145,8 @@ pub struct ServiceCompiler<'a> {
     /// ImageProvider credentials keyed by provider name.
     /// Passed through to WorkloadCompiler for imagePullSecrets injection.
     image_providers: BTreeMap<String, lattice_crd::crd::CredentialSpec>,
+    /// Pre-resolved image trust policies keyed by registry prefix.
+    image_trust: BTreeMap<String, lattice_workload::ImageTrustEntry>,
 }
 
 impl<'a> ServiceCompiler<'a> {
@@ -173,6 +175,7 @@ impl<'a> ServiceCompiler<'a> {
             eso_content_hash: String::new(),
             quota_budget: None,
             image_providers: BTreeMap::new(),
+            image_trust: BTreeMap::new(),
         }
     }
 
@@ -204,6 +207,15 @@ impl<'a> ServiceCompiler<'a> {
         providers: BTreeMap<String, lattice_crd::crd::CredentialSpec>,
     ) -> Self {
         self.image_providers = providers;
+        self
+    }
+
+    /// Set pre-resolved image trust policies for signature verification.
+    pub fn with_image_trust(
+        mut self,
+        trust: BTreeMap<String, lattice_workload::ImageTrustEntry>,
+    ) -> Self {
+        self.image_trust = trust;
         self
     }
 
@@ -257,7 +269,8 @@ impl<'a> ServiceCompiler<'a> {
         .with_ingress(service.spec.ingress.clone())
         .with_advertise(service.spec.advertise.clone())
         .with_eso_content_hash(self.eso_content_hash.clone())
-        .with_image_providers(self.image_providers.clone());
+        .with_image_providers(self.image_providers.clone())
+        .with_image_trust(self.image_trust.clone());
 
         if let Some(ref budget) = self.quota_budget {
             compiler = compiler.with_quota_budget(budget.clone(), service.spec.replicas);

@@ -299,6 +299,32 @@ impl ResourceCache {
         result
     }
 
+    /// Resolve image trust policies from all ImageProvider CRDs with trust.enforce: true.
+    ///
+    /// Returns (provider_name, registry, trust_policy) tuples. The provider name is
+    /// needed to construct ESO secret names for cosign key resolution.
+    pub fn resolve_image_trust_policies(
+        &self,
+    ) -> Vec<(String, String, lattice_crd::crd::ImageTrustPolicy)> {
+        use lattice_crd::crd::ImageProvider;
+
+        let mut result = Vec::new();
+        let store = match self.typed_store::<ImageProvider>() {
+            Some(s) => s,
+            None => return result,
+        };
+
+        for item in store.state() {
+            if let Some(ref trust) = item.spec.trust {
+                if trust.enforce {
+                    let name = item.metadata.name.clone().unwrap_or_default();
+                    result.push((name, item.spec.registry.clone(), trust.clone()));
+                }
+            }
+        }
+        result
+    }
+
     // -- Internal --
 
     fn typed_store<K>(&self) -> Option<Store<K>>
