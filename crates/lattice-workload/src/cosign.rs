@@ -5,7 +5,7 @@
 
 use sigstore::cosign::verification_constraint::PublicKeyVerifier;
 use sigstore::cosign::CosignCapabilities;
-use sigstore::registry::{Auth, OciReference};
+use sigstore::registry::{Auth, ClientConfig, ClientProtocol, OciReference};
 use tracing::{debug, info, warn};
 
 /// Result of verifying a single image.
@@ -26,7 +26,17 @@ pub async fn verify_image(image: &str, key_pem: &[u8]) -> VerifyResult {
         Err(e) => return VerifyResult::Error(format!("invalid image reference '{image}': {e}")),
     };
 
-    let mut client = match sigstore::cosign::ClientBuilder::default().build() {
+    // Use HTTP for registries that don't support TLS (IP:port, localhost, etc.)
+    let mut oci_config = ClientConfig::default();
+    let registry = oci_ref.registry();
+    if is_insecure_registry(registry) {
+        oci_config.protocol = ClientProtocol::Http;
+    }
+
+    let mut client = match sigstore::cosign::ClientBuilder::default()
+        .with_oci_client_config(oci_config)
+        .build()
+    {
         Ok(c) => c,
         Err(e) => return VerifyResult::Error(format!("failed to build cosign client: {e}")),
     };
@@ -78,6 +88,29 @@ pub async fn verify_image(image: &str, key_pem: &[u8]) -> VerifyResult {
             ))
         }
     }
+}
+
+/// Detect registries that use HTTP instead of HTTPS.
+///
+/// Registries accessed by IP address, with non-standard ports, or on localhost
+/// are typically insecure (no TLS). Standard registries (ghcr.io, docker.io,
+/// quay.io, etc.) use HTTPS.
+fn is_insecure_registry(registry: &str) -> bool {
+    // Localhost is always insecure
+    if registry.starts_with("localhost") || registry.starts_with("127.0.0.1") {
+        return true;
+    }
+    // IP address with port (e.g., 10.0.0.131:5557)
+    if let Some((host, _port)) = registry.rsplit_once(':') {
+        if host.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            return true;
+        }
+    }
+    // Bare IP without port
+    if registry.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
