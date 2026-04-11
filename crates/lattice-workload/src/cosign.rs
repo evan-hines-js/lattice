@@ -6,7 +6,7 @@
 use sigstore::cosign::verification_constraint::PublicKeyVerifier;
 use sigstore::cosign::CosignCapabilities;
 use sigstore::registry::{Auth, ClientConfig, ClientProtocol, OciReference};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Result of verifying a single image.
 #[derive(Debug)]

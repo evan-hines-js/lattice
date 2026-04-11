@@ -18,7 +18,6 @@ use super::super::helpers::cedar::{apply_cedar_policy_crd, apply_yaml};
 use super::super::helpers::docker::run_kubectl;
 use super::super::helpers::{
     ensure_namespace, wait_for_resource_phase, wait_for_service_phase, DEFAULT_TIMEOUT,
-    POLL_INTERVAL,
 };
 
 const SIG_TEST_NS: &str = "image-sig-test";

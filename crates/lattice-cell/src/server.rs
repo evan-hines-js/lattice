@@ -125,7 +125,7 @@ fn extract_delta_changes(
 async fn handle_service_lookup(
     client: &Client,
     req: &lattice_proto::ServiceLookupRequest,
-    requesting_cluster: &str,
+    _requesting_cluster: &str,
 ) -> lattice_proto::ServiceLookupResponse {
     let api: Api<LatticeClusterRoutes> = Api::all(client.clone());
 
