@@ -255,6 +255,7 @@ impl<'a> ServiceCompiler<'a> {
         })
         .with_annotations(&service.metadata.annotations.clone().unwrap_or_default())
         .with_ingress(service.spec.ingress.clone())
+        .with_advertise(service.spec.advertise.clone())
         .with_eso_content_hash(self.eso_content_hash.clone())
         .with_image_providers(self.image_providers.clone());
 

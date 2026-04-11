@@ -52,6 +52,7 @@ pub struct WorkloadCompiler<'a> {
     renderer: TemplateRenderer,
     graph: Option<&'a ServiceGraph>,
     ingress: Option<IngressSpec>,
+    advertise: Option<lattice_crd::crd::workload::ingress::AdvertiseConfig>,
     owner_references: Vec<OwnerReference>,
     has_topology: bool,
     eso_content_hash: String,
@@ -89,6 +90,7 @@ impl<'a> WorkloadCompiler<'a> {
             renderer: TemplateRenderer::new(),
             graph: None,
             ingress: None,
+            advertise: None,
             owner_references: Vec::new(),
             has_topology: false,
             eso_content_hash: String::new(),
@@ -125,6 +127,15 @@ impl<'a> WorkloadCompiler<'a> {
     /// Set ingress configuration for the mesh member.
     pub fn with_ingress(mut self, ingress: Option<IngressSpec>) -> Self {
         self.ingress = ingress;
+        self
+    }
+
+    /// Set advertise configuration for cross-cluster discovery.
+    pub fn with_advertise(
+        mut self,
+        advertise: Option<lattice_crd::crd::workload::ingress::AdvertiseConfig>,
+    ) -> Self {
+        self.advertise = advertise;
         self
     }
 
@@ -674,7 +685,7 @@ impl<'a> WorkloadCompiler<'a> {
                 ingress: self.ingress,
                 service_account: None,
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true, advertise: self.advertise,
             },
         ));
 
