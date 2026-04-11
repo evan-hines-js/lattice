@@ -483,100 +483,108 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
     let resolver = pihole_resolver();
     let pihole = pihole_url();
 
-    // The operator should have created a coredns-custom ConfigMap with a
-    // forward block for the e2e.local zone pointing at PiHole.
-    let cm_data = run_kubectl(&[
+    // The operator patches the CoreDNS Corefile with a forward block for
+    // the private zone. Verify the Corefile contains our zone + resolver.
+    // The ConfigMap name varies by distribution (kubeadm vs RKE2), so list
+    // by label and find the one with a Corefile key.
+    let corefile = run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
         "get",
         "configmap",
-        "coredns-custom",
         "-n",
         "kube-system",
+        "-l",
+        "k8s-app=kube-dns",
         "-o",
-        "jsonpath={.data}",
+        "jsonpath={.items[0].data.Corefile}",
     ])
-    .await;
+    .await?;
 
-    match cm_data {
-        Ok(data) if data.contains(TEST_ZONE) && data.contains(&resolver) => {
-            info!(
-                "[DNS] CoreDNS custom ConfigMap has forward block for {} -> {}",
-                TEST_ZONE, resolver
-            );
-        }
-        Ok(data) => {
-            return Err(format!(
-                "CoreDNS custom ConfigMap missing zone/resolver: expected {} -> {}, got: {}",
-                TEST_ZONE, resolver, data
-            ));
-        }
-        Err(e) => {
-            return Err(format!("CoreDNS custom ConfigMap not found: {e}"));
-        }
+    if !corefile.contains(TEST_ZONE) || !corefile.contains(&resolver) {
+        return Err(format!(
+            "CoreDNS Corefile missing forwarding for {} -> {}, got:\n{}",
+            TEST_ZONE,
+            resolver,
+            super::super::helpers::truncate(&corefile, 500)
+        ));
     }
 
-    // Add a test record to PiHole via its API, then verify CoreDNS resolves it.
-    let add_record_result = run_kubectl(&[
+    info!(
+        "[DNS] CoreDNS Corefile has forward block for {} -> {}",
+        TEST_ZONE, resolver
+    );
+
+    // Add a test record to PiHole via its API
+    // Run ephemeral pods in kube-system to bypass Cilium default-deny policies.
+    let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
-        "run", "dns-test", "--rm", "-i", "--restart=Never",
+        "delete", "pod", "-n", "kube-system", "dns-test", "--ignore-not-found",
+    ]).await;
+
+    let add_result = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "run", "dns-test", "-n", "kube-system", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
-        "--", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+        "--", "curl", "-s", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}",
         &format!(
             "{pihole}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
         ),
+    ]).await?;
+
+    // kubectl run --rm appends 'pod "name" deleted' to stdout; check prefix
+    if !add_result.starts_with("200") {
+        return Err(format!(
+            "PiHole API returned {} (expected 200) when adding test record",
+            add_result.trim()
+        ));
+    }
+    info!("[DNS] Added test record test-svc.{TEST_ZONE} -> 10.99.99.99 in PiHole");
+
+    // Wait for CoreDNS to reload the patched Corefile, then verify resolution.
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "delete", "pod", "-n", "kube-system", "dns-resolve-test", "--ignore-not-found",
     ]).await;
 
-    match add_record_result {
-        Ok(code) if code.trim() == "200" => {
-            info!(
-                "[DNS] Added test record test-svc.{} -> 10.99.99.99 in PiHole",
-                TEST_ZONE
-            );
-        }
-        Ok(code) => {
-            info!(
-                "[DNS] PiHole API returned {}, record may already exist",
-                code.trim()
-            );
-        }
-        Err(e) => {
-            info!("[DNS] Could not add PiHole record (non-fatal): {e}");
-        }
-    }
+    let kc = kubeconfig.to_string();
+    let resolve_ok = wait_for_condition(
+        &format!("DNS resolution of test-svc.{TEST_ZONE}"),
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
+        || {
+            let kc = kc.clone();
+            async move {
+                let _ = run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "delete", "pod", "-n", "kube-system", "dns-resolve-test", "--ignore-not-found",
+                ]).await;
 
-    // Now test resolution from within the cluster
-    let resolve_result = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "run",
-        "dns-resolve-test",
-        "--rm",
-        "-i",
-        "--restart=Never",
-        "--image=busybox:1.36",
-        "--",
-        "nslookup",
-        &format!("test-svc.{TEST_ZONE}"),
-    ])
+                let result = run_kubectl(&[
+                    "--kubeconfig", &kc,
+                    "run", "dns-resolve-test", "-n", "kube-system", "--rm", "-i", "--restart=Never",
+                    "--image=busybox:1.36",
+                    "--", "nslookup", &format!("test-svc.{TEST_ZONE}"),
+                ]).await;
+
+                match result {
+                    Ok(output) if output.contains("10.99.99.99") => Ok(true),
+                    Ok(_) => Ok(false),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
     .await;
 
-    match resolve_result {
-        Ok(output) if output.contains("10.99.99.99") => {
-            info!(
-                "[DNS] CoreDNS resolved test-svc.{} -> 10.99.99.99 successfully",
-                TEST_ZONE
-            );
-        }
-        Ok(output) => {
-            // Non-fatal — CoreDNS may need time to pick up the custom config
-            info!(
-                "[DNS] DNS resolution returned unexpected result (may need time): {}",
-                super::super::helpers::truncate(&output, 200)
-            );
+    match resolve_ok {
+        Ok(()) => {
+            info!("[DNS] CoreDNS resolved test-svc.{TEST_ZONE} -> 10.99.99.99");
         }
         Err(e) => {
-            info!("[DNS] DNS resolution test inconclusive (non-fatal): {e}");
+            return Err(format!(
+                "DNS resolution failed for test-svc.{TEST_ZONE}: {e}"
+            ));
         }
     }
 
@@ -700,13 +708,19 @@ async fn cleanup_test_resources(kubeconfig: &str) {
     ])
     .await;
 
-    // Clean up PiHole test record
+    // Clean up PiHole test record and leftover pods
     let pihole = pihole_url();
     let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
-        "run", "dns-cleanup", "--rm", "-i", "--restart=Never",
+        "delete", "pod", "-n", "kube-system",
+        "dns-test", "dns-resolve-test", "dns-cleanup",
+        "--ignore-not-found",
+    ]).await;
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "run", "dns-cleanup", "-n", "kube-system", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
-        "--", "curl", "-s",
+        "--", "curl", "-s", "-m", "10",
         &format!(
             "{pihole}/admin/api.php?customdns&action=delete&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_PASSWORD}"
         ),

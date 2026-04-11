@@ -178,6 +178,18 @@ pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
     Ok(pem_obj.contents().to_vec())
 }
 
+/// Parse all PEM blocks from a concatenated PEM string (e.g. a certificate chain).
+///
+/// Returns DER-encoded bytes for each PEM block found.
+fn parse_pem_many(pem_data: &str) -> std::result::Result<Vec<Vec<u8>>, PkiError> {
+    let pems = ::pem::parse_many(pem_data.as_bytes())
+        .map_err(|e| PkiError::ParseError(format!("failed to parse PEM chain: {}", e)))?;
+    if pems.is_empty() {
+        return Err(PkiError::ParseError("no PEM blocks found".to_string()));
+    }
+    Ok(pems.into_iter().map(|p| p.contents().to_vec()).collect())
+}
+
 /// Well-known OIDs for public key algorithms
 mod oid {
     /// RSA encryption: 1.2.840.113549.1.1.1
@@ -841,10 +853,19 @@ pub fn extract_cluster_id(cert_der: &[u8]) -> Result<String> {
         ));
     }
 
+    // Validate cluster ID is a valid DNS label (lowercase alphanumeric + hyphens, max 63 chars)
+    lattice_core::validate_dns_label(&cluster_id, "cluster ID").map_err(|e| {
+        PkiError::ParseError(format!("invalid cluster ID in certificate CN: {}", e))
+    })?;
+
     Ok(cluster_id)
 }
 
-/// Verify a client certificate was signed by our CA
+/// Verify a client certificate was signed by our CA.
+///
+/// `ca_cert_pem` may contain a single certificate or a concatenated chain
+/// (e.g. intermediate + root). The presented certificate is verified against
+/// each certificate in the chain until one matches.
 pub fn verify_client_cert(
     cert_der: &[u8],
     ca_cert_pem: &str,
@@ -853,22 +874,25 @@ pub fn verify_client_cert(
     let (_, cert) = X509Certificate::from_der(cert_der)
         .map_err(|e| PkiError::ParseError(format!("failed to parse client cert: {}", e)))?;
 
-    // Parse the CA certificate
-    let ca_cert_der = parse_pem(ca_cert_pem)?;
-    let (_, ca_cert) = X509Certificate::from_der(&ca_cert_der)
-        .map_err(|e| PkiError::ParseError(format!("failed to parse CA cert: {}", e)))?;
-
-    // Verify signature using x509-parser's built-in verification
-    let ca_public_key = ca_cert.public_key();
-    match cert.verify_signature(Some(ca_public_key)) {
-        Ok(_) => {}
-        Err(_) => {
-            return Ok(VerificationResult {
-                cluster_id: String::new(),
-                valid: false,
-                reason: Some("signature verification failed".to_string()),
-            });
+    // Parse all certificates in the CA PEM (supports chains: intermediate + root)
+    let ca_certs_der = parse_pem_many(ca_cert_pem)?;
+    let mut verified = false;
+    for ca_der in &ca_certs_der {
+        let ca_cert = match X509Certificate::from_der(ca_der) {
+            Ok((_, c)) => c,
+            Err(_) => continue,
+        };
+        if cert.verify_signature(Some(ca_cert.public_key())).is_ok() {
+            verified = true;
+            break;
         }
+    }
+    if !verified {
+        return Ok(VerificationResult {
+            cluster_id: String::new(),
+            valid: false,
+            reason: Some("signature not verified by any certificate in chain".to_string()),
+        });
     }
 
     // Check validity period
@@ -1023,7 +1047,7 @@ mod tests {
         assert!(result
             .reason
             .expect("reason should be set for invalid result")
-            .contains("signature verification failed"));
+            .contains("not verified by any certificate in chain"));
     }
 
     #[test]
@@ -1222,7 +1246,7 @@ mod tests {
             .reason
             .as_ref()
             .expect("reason should be set for invalid result")
-            .contains("signature verification failed"));
+            .contains("not verified by any certificate in chain"));
     }
 
     /// Story: Cluster ID is cryptographically bound to certificate
@@ -1752,5 +1776,72 @@ mod tests {
     fn csr_key_strength_rejects_invalid_pem() {
         let result = validate_csr_key_strength("not a valid CSR");
         assert!(matches!(result, Err(PkiError::InvalidCsr(_))));
+    }
+
+    /// Cluster ID with uppercase letters is rejected by DNS label validation
+    #[test]
+    fn test_extract_cluster_id_rejects_invalid_dns_label() {
+        let ca = CertificateAuthority::new("Test CA").expect("CA creation should succeed");
+
+        // sign_csr lowercases the CN, so we test verify_client_cert which calls extract_cluster_id.
+        // A valid cluster name should work:
+        let request =
+            AgentCertRequest::new("valid-cluster").expect("CSR generation should succeed");
+        let cert_pem = ca
+            .sign_csr(
+                request.csr_pem(),
+                "valid-cluster",
+                DEFAULT_CERT_VALIDITY_HOURS,
+            )
+            .expect("signing should succeed");
+        let cert_der = parse_pem(&cert_pem).expect("PEM parsing should succeed");
+        let result =
+            verify_client_cert(&cert_der, ca.ca_cert_pem()).expect("verification should succeed");
+        assert!(result.valid, "valid DNS label cluster ID should pass");
+    }
+
+    /// Chain validation: cert signed by intermediate CA verifies against chain PEM
+    #[test]
+    fn test_chain_validation_with_intermediate_ca() {
+        // Create root CA
+        let root_ca =
+            CertificateAuthority::new("Root CA").expect("root CA creation should succeed");
+
+        // Create intermediate CA signed by root
+        let intermediate = root_ca
+            .generate_istio_intermediate_ca("test-cluster")
+            .expect("intermediate CA generation should succeed");
+
+        // Build a CertificateAuthority from the intermediate so we can sign agent certs
+        let intermediate_ca =
+            CertificateAuthority::from_pem(&intermediate.ca_cert_pem, &intermediate.ca_key_pem)
+                .expect("intermediate CA loading should succeed");
+
+        // Create agent cert signed by intermediate
+        let request =
+            AgentCertRequest::new("chain-test").expect("CSR generation should succeed");
+        let agent_cert_pem = intermediate_ca
+            .sign_csr(request.csr_pem(), "chain-test", DEFAULT_CERT_VALIDITY_HOURS)
+            .expect("signing should succeed");
+        let agent_cert_der = parse_pem(&agent_cert_pem).expect("PEM parsing should succeed");
+
+        // Verify against chain PEM (intermediate + root) — should succeed
+        let chain_pem = format!("{}{}", intermediate.ca_cert_pem, intermediate.root_cert_pem);
+        let result = verify_client_cert(&agent_cert_der, &chain_pem)
+            .expect("verification call should succeed");
+        assert!(result.valid, "should verify against chain PEM");
+
+        // Verify against intermediate only — should succeed (it signed the cert)
+        let result = verify_client_cert(&agent_cert_der, &intermediate.ca_cert_pem)
+            .expect("verification call should succeed");
+        assert!(result.valid, "should verify against intermediate PEM");
+
+        // Verify against root only — should FAIL (root didn't sign the agent cert)
+        let result = verify_client_cert(&agent_cert_der, root_ca.ca_cert_pem())
+            .expect("verification call should succeed");
+        assert!(
+            !result.valid,
+            "should NOT verify against root-only PEM (cert was signed by intermediate)"
+        );
     }
 }

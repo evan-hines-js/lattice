@@ -647,10 +647,10 @@ async fn reconcile_issuers(
 
 /// Reconcile CoreDNS forwarding for DNS zones defined via DNSProvider CRDs.
 ///
-/// For each DNS provider in the cluster's `spec.dns.providers` map, fetches the
-/// DNSProvider CRD and (for PiHole providers) adds a conditional forward block to
-/// a `coredns-custom` ConfigMap. CoreDNS's `import` directive picks up custom
-/// zone files automatically.
+/// For each DNS provider with a `resolver` field (private zones like PiHole),
+/// injects a server block into the CoreDNS Corefile. The Corefile ConfigMap
+/// name varies by distribution (kubeadm: `coredns`, RKE2: `rke2-coredns-rke2-coredns`),
+/// so we discover it by label `k8s-app=kube-dns`.
 ///
 /// Cloud providers (Route53, Cloudflare, etc.) don't need CoreDNS forwarding —
 /// they're authoritative DNS managed by external-dns, resolved via public DNS.
@@ -693,38 +693,124 @@ async fn reconcile_dns_forwarding(
         return Ok(());
     }
 
-    // Build the coredns-custom ConfigMap with all forward blocks
-    let corefile_custom = custom_blocks.join("\n\n");
-    let configmap = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": "coredns-custom",
-            "namespace": "kube-system",
-            "labels": {
-                LATTICE_MANAGED_BY_LABEL: LATTICE_MANAGED_BY_VALUE,
-            }
-        },
+    let cm_api: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(client.clone(), "kube-system");
+
+    // Discover the CoreDNS ConfigMap by label. Works for kubeadm (`coredns`),
+    // RKE2 (`rke2-coredns-rke2-coredns`), and any other distribution.
+    let label_selector = "k8s-app=kube-dns";
+    let cms = cm_api
+        .list(&kube::api::ListParams::default().labels(label_selector))
+        .await
+        .map_err(|e| {
+            Error::internal(format!("failed to list CoreDNS ConfigMaps: {e}"))
+        })?;
+
+    let coredns_cm = cms.items.iter().find(|cm| {
+        cm.data
+            .as_ref()
+            .is_some_and(|d| d.contains_key("Corefile"))
+    });
+
+    let Some(coredns_cm) = coredns_cm else {
+        return Err(Error::internal(
+            "no ConfigMap with Corefile found (label: k8s-app=kube-dns)".to_string(),
+        ));
+    };
+
+    let cm_name = coredns_cm
+        .metadata
+        .name
+        .as_deref()
+        .ok_or_else(|| Error::internal("CoreDNS ConfigMap has no name".to_string()))?;
+
+    let corefile = coredns_cm
+        .data
+        .as_ref()
+        .and_then(|d| d.get("Corefile"))
+        .ok_or_else(|| Error::internal("CoreDNS ConfigMap has no Corefile key".to_string()))?;
+
+    // Strip any previously injected Lattice blocks, then append the new ones.
+    let marker_start = "# --- lattice-dns-start ---";
+    let marker_end = "# --- lattice-dns-end ---";
+
+    let base_corefile = if let Some(start) = corefile.find(marker_start) {
+        let before = &corefile[..start];
+        let after = corefile
+            .find(marker_end)
+            .map(|end| &corefile[end + marker_end.len()..])
+            .unwrap_or("");
+        format!("{}{}", before.trim_end(), after)
+    } else {
+        corefile.clone()
+    };
+
+    let lattice_block = format!(
+        "\n{marker_start}\n{}\n{marker_end}",
+        custom_blocks.join("\n")
+    );
+
+    let new_corefile = format!("{base_corefile}{lattice_block}\n");
+
+    // Skip if the Corefile already has the correct content (idempotent)
+    if *corefile == new_corefile {
+        debug!("CoreDNS Corefile already up to date, skipping patch");
+        return Ok(());
+    }
+
+    // Patch the Corefile
+    let patch = serde_json::json!({
         "data": {
-            "lattice-dns.server": corefile_custom,
+            "Corefile": new_corefile,
         }
     });
 
-    // Apply via SSA
-    let cm_api: Api<k8s_openapi::api::core::v1::ConfigMap> =
-        Api::namespaced(client.clone(), "kube-system");
     cm_api
-        .patch(
-            "coredns-custom",
-            &PatchParams::apply("lattice-cluster-controller"),
-            &Patch::Apply(&configmap),
-        )
+        .patch(cm_name, &PatchParams::apply("lattice-dns"), &Patch::Merge(&patch))
         .await
-        .map_err(|e| Error::internal(format!("failed to apply coredns-custom ConfigMap: {e}")))?;
+        .map_err(|e| {
+            Error::internal(format!("failed to patch CoreDNS ConfigMap '{cm_name}': {e}"))
+        })?;
+
+    // Restart CoreDNS pods to pick up the new Corefile. The `reload` plugin
+    // watches the Corefile on disk, but kubelet's ConfigMap sync delay (60-120s)
+    // plus RKE2 Helm-managed CoreDNS may not hot-reload reliably.
+    // A rollout restart via annotation bump is the safest path.
+    let deploy_api: Api<k8s_openapi::api::apps::v1::Deployment> =
+        Api::namespaced(client.clone(), "kube-system");
+
+    // Find the CoreDNS deployment by the same label
+    let deploys = deploy_api
+        .list(&kube::api::ListParams::default().labels(label_selector))
+        .await
+        .map_err(|e| Error::internal(format!("failed to list CoreDNS deployments: {e}")))?;
+
+    for deploy in &deploys.items {
+        let deploy_name = deploy.metadata.name.as_deref().unwrap_or("");
+        let restart_patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "lattice.dev/corefile-restart": chrono::Utc::now().to_rfc3339()
+                        }
+                    }
+                }
+            }
+        });
+        deploy_api
+            .patch(deploy_name, &PatchParams::apply("lattice-dns"), &Patch::Merge(&restart_patch))
+            .await
+            .map_err(|e| {
+                Error::internal(format!("failed to restart CoreDNS deployment '{deploy_name}': {e}"))
+            })?;
+        info!(deployment = deploy_name, "Restarted CoreDNS to pick up Corefile changes");
+    }
 
     info!(
+        cm = cm_name,
         zones = custom_blocks.len(),
-        "CoreDNS custom forwarding ConfigMap applied"
+        "CoreDNS Corefile patched with DNS forwarding zones"
     );
 
     Ok(())
