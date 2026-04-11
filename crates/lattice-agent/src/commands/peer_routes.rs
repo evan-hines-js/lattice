@@ -21,44 +21,7 @@ const PROXY_CREDENTIALS_SECRET: &str = "lattice-peer-proxy-credentials";
 /// Namespace for proxy credentials
 const CREDENTIALS_NAMESPACE: &str = "lattice-system";
 
-/// Compute a deterministic hash from the per-cluster route hashes.
-///
-/// The `BTreeMap` ensures consistent ordering. Each entry's key (cluster name)
-/// and value (route content hash) are fed into SHA-256.
-fn hash_peer_state(per_cluster: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for (name, route_hash) in per_cluster {
-        buf.extend_from_slice(name.as_bytes());
-        buf.extend_from_slice(route_hash);
-    }
-    lattice_common::kube_utils::sha256(&buf)
-}
-
-/// Hash the content of a set of routes for one cluster.
-fn hash_routes(routes: &[ClusterRoute]) -> Vec<u8> {
-    let mut sorted: Vec<_> = routes.iter().collect();
-    sorted.sort_by(|a, b| {
-        (&a.service_namespace, &a.service_name).cmp(&(&b.service_namespace, &b.service_name))
-    });
-    let mut buf = Vec::new();
-    for r in sorted {
-        buf.extend_from_slice(r.service_name.as_bytes());
-        buf.extend_from_slice(r.service_namespace.as_bytes());
-        buf.extend_from_slice(r.hostname.as_bytes());
-        buf.extend_from_slice(r.address.as_bytes());
-        buf.extend_from_slice(&r.port.to_le_bytes());
-        buf.extend_from_slice(r.protocol.as_bytes());
-        for allowed in &r.allowed_services {
-            buf.extend_from_slice(allowed.as_bytes());
-        }
-        // BTreeMap iteration is sorted by key
-        for (name, port) in &r.service_ports {
-            buf.extend_from_slice(name.as_bytes());
-            buf.extend_from_slice(&port.to_le_bytes());
-        }
-    }
-    lattice_common::kube_utils::sha256(&buf)
-}
+use lattice_core::{combine_cluster_hashes, hash_routes};
 
 /// Compute the initial peer routes hash from existing peer-labeled CRDs.
 ///
@@ -85,7 +48,7 @@ pub async fn compute_initial_hash(client: &Client) -> Vec<u8> {
         per_cluster.insert(name, hash_routes(&cr.spec.routes));
     }
 
-    hash_peer_state(&per_cluster)
+    combine_cluster_hashes(&per_cluster)
 }
 
 /// Handle a PeerRouteSync command from the parent.
@@ -214,9 +177,9 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
     // Update the peer routes hash
     let mut per_cluster: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for (name, routes) in &by_cluster {
-        per_cluster.insert(name.clone(), hash_routes(routes));
+        per_cluster.insert(name.clone(), hash_routes(routes.as_slice()));
     }
-    let _ = ctx.peer_routes_hash_tx.send(hash_peer_state(&per_cluster));
+    let _ = ctx.peer_routes_hash_tx.send(combine_cluster_hashes(&per_cluster));
 }
 
 /// Store the parent's proxy credentials in a Secret for the remote secret controller.

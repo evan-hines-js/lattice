@@ -8,11 +8,16 @@
 //! route table changes. Per-heartbeat hash checks are O(clusters) instead of
 //! O(routes). The index is rebuilt by the caller when the watch channel signals
 //! a route table change.
+//!
+//! Route hashing uses `lattice_core::RouteHashable` — the same trait implemented
+//! by both `SubtreeService` (proto, cell-side) and `ClusterRoute` (CRD, agent-side)
+//! — so hashes are guaranteed identical without duplicated serialization code.
 
 use std::collections::BTreeMap;
 
 use kube::Client;
-use lattice_common::kube_utils::{request_proxy_token, sha256};
+use lattice_common::kube_utils::request_proxy_token;
+use lattice_core::{combine_cluster_hashes, hash_routes, RouteHashable};
 use tracing::{debug, error, info, warn};
 
 use lattice_proto::cell_command::Command;
@@ -20,6 +25,24 @@ use lattice_proto::{CellCommand, PeerRouteSync, SubtreeService};
 
 use crate::route_reconciler::TaggedRoute;
 use crate::SharedAgentRegistry;
+
+// =============================================================================
+// RouteHashable impl for SubtreeService (proto type)
+// =============================================================================
+
+impl RouteHashable for SubtreeService {
+    fn route_name(&self) -> &str { &self.name }
+    fn route_namespace(&self) -> &str { &self.namespace }
+    fn route_hostname(&self) -> &str { &self.hostname }
+    fn route_address(&self) -> &str { &self.address }
+    fn route_port(&self) -> u16 { self.port as u16 }
+    fn route_protocol(&self) -> &str { &self.protocol }
+    fn route_allowed_services(&self) -> &[String] { &self.allowed_services }
+    fn route_service_ports(&self) -> Vec<(&str, u16)> {
+        // BTreeMap — iteration is sorted by key
+        self.service_ports.iter().map(|(k, &v)| (k.as_str(), v as u16)).collect()
+    }
+}
 
 // =============================================================================
 // PeerRouteIndex
@@ -31,9 +54,7 @@ use crate::SharedAgentRegistry;
 /// operations are O(clusters) instead of O(routes).
 #[derive(Clone, Debug)]
 pub struct PeerRouteIndex {
-    /// Proto routes grouped by cluster, sorted within each cluster.
     by_cluster: BTreeMap<String, Vec<SubtreeService>>,
-    /// Per-cluster content hash (SHA-256 of sorted routes).
     cluster_hashes: BTreeMap<String, Vec<u8>>,
 }
 
@@ -51,7 +72,7 @@ impl PeerRouteIndex {
         let mut cluster_hashes = BTreeMap::new();
         for (cluster, svcs) in &mut by_cluster {
             svcs.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-            cluster_hashes.insert(cluster.clone(), hash_sorted_routes(svcs));
+            cluster_hashes.insert(cluster.clone(), hash_routes(svcs.as_slice()));
         }
 
         Self {
@@ -63,17 +84,13 @@ impl PeerRouteIndex {
     /// Compute the expected hash for a child, excluding its own cluster's routes.
     /// O(clusters) — combines pre-computed per-cluster hashes.
     pub fn hash_excluding(&self, exclude_cluster: &str) -> Vec<u8> {
-        let mut buf = Vec::new();
-        for (name, h) in &self.cluster_hashes {
-            if name != exclude_cluster {
-                buf.extend_from_slice(name.as_bytes());
-                buf.extend_from_slice(h);
-            }
-        }
-        if buf.is_empty() {
-            return Vec::new();
-        }
-        sha256(&buf)
+        let filtered: BTreeMap<String, Vec<u8>> = self
+            .cluster_hashes
+            .iter()
+            .filter(|(name, _)| name.as_str() != exclude_cluster)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        combine_cluster_hashes(&filtered)
     }
 
     /// Get the peer routes for a child (everything except its own cluster).
@@ -95,10 +112,9 @@ impl PeerRouteIndex {
 }
 
 // =============================================================================
-// Hashing helpers
+// Proto conversion
 // =============================================================================
 
-/// Convert a single tagged route to proto format.
 fn tagged_route_to_proto(
     cluster: &str,
     r: &lattice_crd::crd::ClusterRoute,
@@ -122,37 +138,10 @@ fn tagged_route_to_proto(
     }
 }
 
-/// Hash a slice of proto routes that are already sorted by (namespace, name).
-///
-/// The byte layout must match the agent-side `hash_routes` in
-/// `lattice-agent/src/commands/peer_routes.rs` — both serialize fields
-/// in the same order with the same byte representations.
-fn hash_sorted_routes(sorted_svcs: &[SubtreeService]) -> Vec<u8> {
-    let mut buf = Vec::new();
-    for s in sorted_svcs {
-        buf.extend_from_slice(s.name.as_bytes());
-        buf.extend_from_slice(s.namespace.as_bytes());
-        buf.extend_from_slice(s.hostname.as_bytes());
-        buf.extend_from_slice(s.address.as_bytes());
-        buf.extend_from_slice(&(s.port as u16).to_le_bytes());
-        buf.extend_from_slice(s.protocol.as_bytes());
-        for allowed in &s.allowed_services {
-            buf.extend_from_slice(allowed.as_bytes());
-        }
-        for (name, port) in &s.service_ports {
-            buf.extend_from_slice(name.as_bytes());
-            buf.extend_from_slice(&(*port as u16).to_le_bytes());
-        }
-    }
-    sha256(&buf)
-}
-
 // =============================================================================
 // Heartbeat check
 // =============================================================================
 
-/// Max age before forcing a peer route resync for token refresh.
-/// Set to 25 minutes — well under the 1-hour token lifetime.
 const PEER_SYNC_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(25 * 60);
 
 /// Check if a child's peer routes are stale and send a full sync if needed.

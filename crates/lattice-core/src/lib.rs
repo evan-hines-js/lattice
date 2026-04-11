@@ -146,6 +146,74 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
 }
 
 // ============================================================================
+// Route hashing
+// ============================================================================
+
+/// Trait for types that can be hashed as a service route.
+///
+/// Implemented by both `SubtreeService` (proto, cell-side) and `ClusterRoute`
+/// (CRD, agent-side). A single `hash_routes` function uses this trait so both
+/// sides produce identical hashes. If either type's field layout changes, the
+/// compiler forces both impls to be updated.
+pub trait RouteHashable {
+    fn route_name(&self) -> &str;
+    fn route_namespace(&self) -> &str;
+    fn route_hostname(&self) -> &str;
+    fn route_address(&self) -> &str;
+    fn route_port(&self) -> u16;
+    fn route_protocol(&self) -> &str;
+    fn route_allowed_services(&self) -> &[String];
+    /// Iterate service ports in deterministic (sorted) order.
+    fn route_service_ports(&self) -> Vec<(&str, u16)>;
+}
+
+/// Hash a slice of routes. Sorts by (namespace, name) then serializes each
+/// route's fields into a deterministic byte buffer and SHA-256s the result.
+///
+/// Used by both cell and agent to compute per-cluster route hashes.
+pub fn hash_routes(routes: &[impl RouteHashable]) -> Vec<u8> {
+    let mut sorted: Vec<usize> = (0..routes.len()).collect();
+    sorted.sort_by(|&a, &b| {
+        let (ra, rb) = (&routes[a], &routes[b]);
+        (ra.route_namespace(), ra.route_name()).cmp(&(rb.route_namespace(), rb.route_name()))
+    });
+
+    let mut buf = Vec::new();
+    for &idx in &sorted {
+        let r = &routes[idx];
+        buf.extend_from_slice(r.route_name().as_bytes());
+        buf.extend_from_slice(r.route_namespace().as_bytes());
+        buf.extend_from_slice(r.route_hostname().as_bytes());
+        buf.extend_from_slice(r.route_address().as_bytes());
+        buf.extend_from_slice(&r.route_port().to_le_bytes());
+        buf.extend_from_slice(r.route_protocol().as_bytes());
+        for allowed in r.route_allowed_services() {
+            buf.extend_from_slice(allowed.as_bytes());
+        }
+        for (name, port) in r.route_service_ports() {
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(&port.to_le_bytes());
+        }
+    }
+    sha256(&buf)
+}
+
+/// Combine per-cluster route hashes into a single deterministic hash.
+///
+/// Used by both cell (`PeerRouteIndex::hash_excluding`) and agent.
+pub fn combine_cluster_hashes(hashes: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (name, h) in hashes {
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(h);
+    }
+    if buf.is_empty() {
+        return Vec::new();
+    }
+    sha256(&buf)
+}
+
+// ============================================================================
 // DNS utilities
 // ============================================================================
 
