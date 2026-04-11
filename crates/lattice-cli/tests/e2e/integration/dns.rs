@@ -174,7 +174,12 @@ async fn test_dns_end_to_end(kubeconfig: &str) -> Result<(), String> {
     info!("[DNS] Testing end-to-end: LatticeService → external-dns → PiHole → CoreDNS...");
 
     let resolver = pihole_resolver();
-    let dns_hostname = format!("dns-e2e-svc.{TEST_ZONE}");
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() % 100_000;
+    let svc_name = format!("dns-{suffix}");
+    let dns_hostname = format!("{svc_name}.{TEST_ZONE}");
 
     // Verify CoreDNS Corefile has the forward block
     let corefile = run_kubectl(&[
@@ -198,7 +203,7 @@ async fn test_dns_end_to_end(kubeconfig: &str) -> Result<(), String> {
         r#"apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
 metadata:
-  name: dns-e2e-svc
+  name: {svc_name}
   namespace: {DNS_TEST_NAMESPACE}
 spec:
   workload:
@@ -228,7 +233,7 @@ spec:
         kubeconfig,
         "latticeservice",
         DNS_TEST_NAMESPACE,
-        "dns-e2e-svc",
+        &svc_name,
         "Ready",
         DEFAULT_TIMEOUT,
     ).await?;
@@ -282,12 +287,6 @@ spec:
 
 async fn cleanup(kubeconfig: &str) {
     info!("[DNS/Cleanup] Cleaning up DNS test resources...");
-
-    let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "latticeservice", "dns-e2e-svc",
-        "-n", DNS_TEST_NAMESPACE, "--ignore-not-found",
-    ]).await;
 
     let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
