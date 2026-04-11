@@ -7,7 +7,7 @@
 use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, ResourceExt};
 use serde_json::{json, Value};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use lattice_common::{Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
 use lattice_core::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
