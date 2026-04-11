@@ -49,7 +49,6 @@ pub const REQUEUE_ERROR_SECS: u64 = 60;
 /// Default port for the admission webhook server (K8s convention)
 pub const DEFAULT_WEBHOOK_PORT: u16 = 9443;
 
-
 /// Default port for the authenticated K8s API proxy (user/service access with Cedar)
 pub const DEFAULT_AUTH_PROXY_PORT: u16 = 8082;
 
@@ -108,7 +107,11 @@ pub fn lattice_svc_dns(service: &str) -> String {
 ///
 /// Returns `{service}.{LATTICE_SYSTEM_NAMESPACE}.svc.cluster.local`
 pub fn lattice_svc_dns_fqdn(service: &str) -> String {
-    format!("{}.{}.svc.cluster.local", service, lattice_core::LATTICE_SYSTEM_NAMESPACE)
+    format!(
+        "{}.{}.svc.cluster.local",
+        service,
+        lattice_core::LATTICE_SYSTEM_NAMESPACE
+    )
 }
 
 /// Environment variable to indicate this is a bootstrap cluster
@@ -390,4 +393,3 @@ pub fn is_inherited_resource(metadata: &kube::api::ObjectMeta) -> bool {
 pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
     !is_inherited_resource(metadata)
 }
-

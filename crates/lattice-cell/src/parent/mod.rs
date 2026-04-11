@@ -31,14 +31,14 @@ use crate::capi_proxy::{start_capi_proxy, CapiProxyConfig};
 use crate::connection::{AgentRegistry, SharedAgentRegistry};
 use crate::resources::{distributable_resources_to_proto, fetch_distributable_resources};
 use crate::server::AgentServer;
-use lattice_crd::crd::{
-    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
-};
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_SERVICE_NAME,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{
+    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
+};
 use lattice_infra::pki::{CertificateAuthority, CertificateAuthorityBundle};
 use lattice_infra::ServerMtlsConfig;
 use lattice_proto::{cell_command, CellCommand, SyncDistributedResourcesCommand};

@@ -12,12 +12,12 @@
 pub(crate) mod cilium;
 mod istio_ambient;
 
-use lattice_crd::crd::EgressTarget;
-use lattice_graph::ServiceGraph;
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::policy::cilium::CiliumNetworkPolicy;
 use lattice_common::policy::istio::{AuthorizationPolicy, PeerAuthentication};
 use lattice_common::policy::service_entry::ServiceEntry;
+use lattice_crd::crd::EgressTarget;
+use lattice_graph::ServiceGraph;
 
 // =============================================================================
 // Generated Policies Container
@@ -224,13 +224,13 @@ impl<'a> PolicyCompiler<'a> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::PolicyCompiler;
+    use lattice_common::mesh;
+    use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use lattice_crd::crd::{
         ContainerSpec, DependencyDirection, EgressRule, EgressTarget, PortSpec, ResourceSpec,
         ServicePortsSpec, WorkloadSpec,
     };
     use lattice_graph::ServiceGraph;
-    use lattice_common::mesh;
-    use lattice_common::policy::cilium::{CiliumEgressRule, FqdnSelector};
     use std::collections::BTreeMap;
 
     pub(crate) fn make_service_spec(

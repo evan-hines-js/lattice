@@ -38,8 +38,8 @@ use crate::constants::{
     DEFAULT_NAMESPACE, DOCKER_INFRASTRUCTURE_API_GROUP, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
     DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2,
 };
-use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
+use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderSpec, ProviderType};
 
 /// Docker/Kind infrastructure provider
 ///

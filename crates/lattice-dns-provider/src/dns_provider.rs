@@ -14,9 +14,9 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+use lattice_crd::crd::{DNSProvider, DNSProviderPhase, DNSProviderStatus, DNSProviderType};
 
 const FIELD_MANAGER: &str = "lattice-dns-provider-controller";
 
@@ -154,11 +154,11 @@ async fn update_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_core::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
     use lattice_crd::crd::{
         AzureDnsConfig, CloudflareConfig, CredentialSpec, DNSProviderSpec, GoogleDnsConfig,
         PiholeConfig, Route53Config,
     };
-    use lattice_core::{EXTERNAL_DNS_NAMESPACE, LATTICE_SYSTEM_NAMESPACE};
 
     fn sample_pihole_provider() -> DNSProvider {
         DNSProvider::new(

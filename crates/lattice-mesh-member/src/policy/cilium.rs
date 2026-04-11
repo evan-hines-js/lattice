@@ -16,14 +16,14 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::{derived_name, EgressTarget, NetworkProtocol};
-use lattice_graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::policy::cilium::{
     CiliumEgressRule, CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, CiliumPort,
     CiliumPortRule, DnsMatch, DnsRules, EndpointSelector, FqdnSelector,
 };
 use lattice_common::{mesh, CILIUM_LABEL_NAMESPACE};
+use lattice_crd::crd::{derived_name, EgressTarget, NetworkProtocol};
+use lattice_graph::{ActiveEdge, ServiceNode};
 
 use super::PolicyCompiler;
 

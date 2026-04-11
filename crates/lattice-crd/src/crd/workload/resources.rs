@@ -945,7 +945,11 @@ impl ResourceRequirements {
 
 impl ResourceQuantity {
     /// Validate resource quantity values
-    pub fn validate(&self, container_name: &str, field: &str) -> Result<(), crate::ValidationError> {
+    pub fn validate(
+        &self,
+        container_name: &str,
+        field: &str,
+    ) -> Result<(), crate::ValidationError> {
         if let Some(ref cpu) = self.cpu {
             validate_cpu_quantity(cpu, container_name, field)?;
         }

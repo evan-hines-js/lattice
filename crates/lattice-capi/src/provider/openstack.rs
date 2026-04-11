@@ -16,8 +16,8 @@ use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_NODE_CIDR_OPENSTACK, INFRASTRUCTURE_API_GROUP,
     OPENSTACK_API_VERSION,
 };
-use lattice_crd::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result, OPENSTACK_CREDENTIALS_SECRET};
+use lattice_crd::crd::{LatticeCluster, OpenStackConfig, ProviderSpec, ProviderType};
 
 /// Configuration for generating an OpenStack machine template
 struct MachineTemplateConfig<'a> {

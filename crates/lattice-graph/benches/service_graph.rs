@@ -171,8 +171,10 @@ fn setup_realistic_graph(n: usize) -> ServiceGraph {
     // Third pass: register with bilateral agreements
     for i in 0..n {
         let dep_names: Vec<String> = all_deps[i].iter().map(|j| format!("svc-{}", j)).collect();
-        let caller_names: Vec<String> =
-            all_callers[i].iter().map(|j| format!("svc-{}", j)).collect();
+        let caller_names: Vec<String> = all_callers[i]
+            .iter()
+            .map(|j| format!("svc-{}", j))
+            .collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
         let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
 
@@ -190,10 +192,7 @@ fn setup_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
     for i in 0..num_depends_all {
         let name = format!("svc-{}", i);
         let mm_spec = LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                name.clone(),
-            )])),
+            target: MeshMemberTarget::Selector(BTreeMap::from([("app".to_string(), name.clone())])),
             ports: vec![MeshMemberPort {
                 port: 8080,
                 service_port: None,
@@ -386,16 +385,12 @@ fn bench_get_active_edges(c: &mut Criterion) {
 
         // Star hub: one service with N inbound edges
         if size <= 10_000 {
-            group.bench_with_input(
-                BenchmarkId::new("star_hub_inbound", size),
-                &size,
-                |b, _| {
-                    let graph = setup_star_graph(size);
-                    b.iter(|| {
-                        black_box(graph.get_active_inbound_edges("default", "hub"));
-                    });
-                },
-            );
+            group.bench_with_input(BenchmarkId::new("star_hub_inbound", size), &size, |b, _| {
+                let graph = setup_star_graph(size);
+                b.iter(|| {
+                    black_box(graph.get_active_inbound_edges("default", "hub"));
+                });
+            });
         }
     }
 
@@ -508,16 +503,11 @@ fn bench_concurrent_mixed(c: &mut Criterion) {
                                     for i in 0..25 {
                                         let idx = (t * 25 + i) % size;
                                         if i % 5 == 0 {
-                                            g.put_service(
-                                                "default",
-                                                &format!("svc-{}", idx),
-                                                &s,
-                                            );
+                                            g.put_service("default", &format!("svc-{}", idx), &s);
                                         } else {
-                                            black_box(g.get_service(
-                                                "default",
-                                                &format!("svc-{}", idx),
-                                            ));
+                                            black_box(
+                                                g.get_service("default", &format!("svc-{}", idx)),
+                                            );
                                         }
                                     }
                                 })
@@ -588,15 +578,11 @@ fn bench_graph_construction(c: &mut Criterion) {
     group.sample_size(10);
 
     for size in [100usize, 1_000, 5_000, 10_000, 25_000, 50_000] {
-        group.bench_with_input(
-            BenchmarkId::new("realistic", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    black_box(setup_realistic_graph(size));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
+            b.iter(|| {
+                black_box(setup_realistic_graph(size));
+            });
+        });
     }
 
     group.finish();

@@ -9,8 +9,8 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, error, info, instrument};
 
 use lattice_cedar::PolicyEngine;
-use lattice_crd::crd::{ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase};
 use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
+use lattice_crd::crd::{ConditionStatus, LatticePackage, LatticePackageStatus, PackagePhase};
 
 use crate::error::PackageError;
 use crate::secrets;
@@ -87,7 +87,12 @@ pub async fn reconcile(
                 package.metadata.generation,
             );
             status.chart_version = Some(version);
-            status.set_condition("Ready", ConditionStatus::True, "Installed", "Helm release installed");
+            status.set_condition(
+                "Ready",
+                ConditionStatus::True,
+                "Installed",
+                "Helm release installed",
+            );
             patch_status(&ctx.client, &name, &namespace, &status).await?;
             Ok(Action::requeue(REQUEUE_READY))
         }
@@ -361,7 +366,11 @@ async fn patch_status(
     status: &LatticePackageStatus,
 ) -> Result<(), ReconcileError> {
     lattice_common::kube_utils::patch_resource_status::<LatticePackage>(
-        client, name, namespace, status, FIELD_MANAGER,
+        client,
+        name,
+        namespace,
+        status,
+        FIELD_MANAGER,
     )
     .await?;
     Ok(())

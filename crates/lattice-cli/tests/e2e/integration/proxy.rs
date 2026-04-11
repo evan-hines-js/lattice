@@ -277,10 +277,7 @@ pub async fn run_proxy_tests(
         );
     }
 
-    let diag = DiagnosticContext::new(
-        &ctx.mgmt_kubeconfig,
-        lattice_core::LATTICE_SYSTEM_NAMESPACE,
-    );
+    let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, lattice_core::LATTICE_SYSTEM_NAMESPACE);
     with_diagnostics(&diag, "Proxy", || async {
         apply_e2e_default_policy(&ctx.mgmt_kubeconfig).await?;
 

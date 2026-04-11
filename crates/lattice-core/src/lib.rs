@@ -263,7 +263,10 @@ mod tests {
 
     #[test]
     fn sanitize_special_chars() {
-        assert_eq!(sanitize_dns_label("wg_confs.conf").unwrap(), "wg-confs-conf");
+        assert_eq!(
+            sanitize_dns_label("wg_confs.conf").unwrap(),
+            "wg-confs-conf"
+        );
     }
 
     #[test]

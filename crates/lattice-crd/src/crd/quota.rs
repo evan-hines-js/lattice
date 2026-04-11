@@ -86,7 +86,10 @@ impl LatticeQuotaSpec {
     }
 }
 
-fn validate_resource_map(map: &BTreeMap<String, String>, field: &str) -> Result<(), crate::ValidationError> {
+fn validate_resource_map(
+    map: &BTreeMap<String, String>,
+    field: &str,
+) -> Result<(), crate::ValidationError> {
     for (key, value) in map {
         parse_resource_by_key(key, value).map_err(|_| {
             crate::ValidationError::new(format!("{field}.{key}: invalid quantity '{value}'"))

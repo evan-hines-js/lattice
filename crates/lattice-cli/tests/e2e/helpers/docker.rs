@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use lattice_crd::crd::BootstrapProvider;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_crd::crd::BootstrapProvider;
 use tracing::info;
 
 use super::{kubeconfig_local_path, kubeconfig_path, DOCKER_KIND_GATEWAY, DOCKER_KIND_SUBNET};

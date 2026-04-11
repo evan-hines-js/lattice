@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use lattice_crd::crd::ClusterRoute;
 use lattice_cell::peer_routes::PeerRouteIndex;
 use lattice_cell::route_reconciler::TaggedRoute;
+use lattice_crd::crd::ClusterRoute;
 
 // =============================================================================
 // Fixtures
@@ -32,7 +32,12 @@ fn generate_tagged_routes(num_routes: usize, num_clusters: usize) -> Vec<TaggedR
                 service_name: format!("svc-{}", svc_idx),
                 service_namespace: format!("ns-{}", svc_idx % 20),
                 hostname: format!("svc-{}.cluster-{}.example.com", svc_idx, cluster_idx),
-                address: format!("10.{}.{}.{}", cluster_idx % 256, svc_idx / 256, svc_idx % 256),
+                address: format!(
+                    "10.{}.{}.{}",
+                    cluster_idx % 256,
+                    svc_idx / 256,
+                    svc_idx % 256
+                ),
                 port: 443,
                 protocol: "HTTPS".to_string(),
                 allowed_services: vec![
@@ -101,7 +106,10 @@ fn bench_heartbeat_hash(c: &mut Criterion) {
         let index = PeerRouteIndex::build(&tagged);
 
         group.bench_with_input(
-            BenchmarkId::new("hash_excluding", format!("{}r_{}c", num_routes, num_clusters)),
+            BenchmarkId::new(
+                "hash_excluding",
+                format!("{}r_{}c", num_routes, num_clusters),
+            ),
             &(),
             |b, _| {
                 b.iter(|| {

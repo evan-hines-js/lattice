@@ -15,12 +15,12 @@ use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_common::{
-    CsrResponse, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY,
-    PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET,
+    CsrResponse, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY, PARENT_CONFIG_ENDPOINT_KEY,
+    PARENT_CONFIG_SECRET,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_infra::pki::CertificateAuthorityBundle;
 
 use super::bundle::generate_bootstrap_bundle;

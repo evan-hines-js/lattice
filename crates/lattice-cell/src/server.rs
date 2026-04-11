@@ -1306,12 +1306,20 @@ impl LatticeAgent for AgentServer {
                             if needs_rebuild {
                                 let mut rx = pc.all_routes.clone();
                                 let tagged = rx.borrow_and_update().clone();
-                                cached_index = Some(crate::peer_routes::PeerRouteIndex::build(&tagged));
+                                cached_index =
+                                    Some(crate::peer_routes::PeerRouteIndex::build(&tagged));
                                 cached_routes_rx = Some(rx);
                             }
                         }
 
-                        if !process_agent_message(&msg_ctx, &msg, peer_config.as_ref(), cached_index.as_ref()).await {
+                        if !process_agent_message(
+                            &msg_ctx,
+                            &msg,
+                            peer_config.as_ref(),
+                            cached_index.as_ref(),
+                        )
+                        .await
+                        {
                             break;
                         }
                     }

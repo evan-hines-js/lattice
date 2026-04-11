@@ -10,8 +10,8 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
 use tracing::{debug, error, info, warn};
 
-use lattice_crd::crd::{ClusterRoute, LatticeClusterRoutes};
 use lattice_common::PEER_ROUTES_LABEL;
+use lattice_crd::crd::{ClusterRoute, LatticeClusterRoutes};
 use lattice_proto::PeerRouteSync;
 
 use super::CommandContext;
@@ -179,7 +179,9 @@ pub async fn handle(sync: &PeerRouteSync, ctx: &CommandContext) {
     for (name, routes) in &by_cluster {
         per_cluster.insert(name.clone(), hash_routes(routes.as_slice()));
     }
-    let _ = ctx.peer_routes_hash_tx.send(combine_cluster_hashes(&per_cluster));
+    let _ = ctx
+        .peer_routes_hash_tx
+        .send(combine_cluster_hashes(&per_cluster));
 }
 
 /// Store the parent's proxy credentials in a Secret for the remote secret controller.

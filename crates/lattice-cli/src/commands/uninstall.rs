@@ -27,10 +27,10 @@ use tracing::{debug, info, warn};
 use super::{generate_run_id, kind_utils, wait_for_deletion, CommandErrorExt};
 
 use lattice_common::capi_lifecycle::{teardown_cluster, TeardownConfig};
-use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_common::kube_utils;
 use lattice_common::{capi_namespace, kubeconfig_secret_name};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 
 use crate::{Error, Result};
 
@@ -307,9 +307,8 @@ impl Uninstaller {
             server_url
         );
 
-        let mut kubeconfig: serde_json::Value =
-            lattice_core::yaml::parse_yaml(&kubeconfig_str)
-                .map_err(|e| Error::command_failed(format!("Failed to parse kubeconfig: {}", e)))?;
+        let mut kubeconfig: serde_json::Value = lattice_core::yaml::parse_yaml(&kubeconfig_str)
+            .map_err(|e| Error::command_failed(format!("Failed to parse kubeconfig: {}", e)))?;
 
         // Update server URL in all cluster entries (keep existing CA - it's valid)
         if let Some(clusters) = kubeconfig

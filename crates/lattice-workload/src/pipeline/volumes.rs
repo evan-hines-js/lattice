@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::CompilationError;
-use lattice_crd::crd::{VolumeAccessMode, WorkloadSpec};
 use lattice_common::kube_utils::{ObjectMeta, OwnerReference};
+use lattice_crd::crd::{VolumeAccessMode, WorkloadSpec};
 
 // =============================================================================
 // Kubernetes PVC Types

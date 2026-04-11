@@ -29,8 +29,8 @@ pub use proxmox::ProxmoxProvider;
 
 use async_trait::async_trait;
 
-use lattice_crd::crd::{LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
+use lattice_crd::crd::{LatticeCluster, ProviderSpec, ProviderType};
 
 /// A CAPI manifest represented as an untyped Kubernetes resource
 ///

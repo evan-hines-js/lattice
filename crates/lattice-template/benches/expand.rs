@@ -282,41 +282,29 @@ fn bench_secrets(c: &mut Criterion) {
         let secrets = make_secrets(num_secrets);
 
         // Collect mode (leaves ${secret.*} in place)
-        group.bench_with_input(
-            BenchmarkId::new("collect", num_secrets),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let mut val = template.clone();
-                    black_box(expand(&mut val, &ctx, &collect_opts()).unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("collect", num_secrets), &(), |b, _| {
+            b.iter(|| {
+                let mut val = template.clone();
+                black_box(expand(&mut val, &ctx, &collect_opts()).unwrap());
+            });
+        });
 
         // ESO template mode (replaces with {{ .key }}, escapes user Go templates)
-        group.bench_with_input(
-            BenchmarkId::new("eso", num_secrets),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let mut val = template.clone();
-                    black_box(expand(&mut val, &ctx, &eso_opts()).unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("eso", num_secrets), &(), |b, _| {
+            b.iter(|| {
+                let mut val = template.clone();
+                black_box(expand(&mut val, &ctx, &eso_opts()).unwrap());
+            });
+        });
 
         // Resolve mode (substitutes actual values)
         let opts = resolve_opts(secrets);
-        group.bench_with_input(
-            BenchmarkId::new("resolve", num_secrets),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let mut val = template.clone();
-                    black_box(expand(&mut val, &ctx, &opts).unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("resolve", num_secrets), &(), |b, _| {
+            b.iter(|| {
+                let mut val = template.clone();
+                black_box(expand(&mut val, &ctx, &opts).unwrap());
+            });
+        });
     }
 
     group.finish();
@@ -359,16 +347,12 @@ fn bench_noop_fast_path(c: &mut Criterion) {
         let ctx = TemplateContext::new();
         let template = plain_values(num_nodes);
 
-        group.bench_with_input(
-            BenchmarkId::new("nodes", num_nodes),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let mut val = template.clone();
-                    black_box(expand(&mut val, &ctx, &collect_opts()).unwrap());
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("nodes", num_nodes), &(), |b, _| {
+            b.iter(|| {
+                let mut val = template.clone();
+                black_box(expand(&mut val, &ctx, &collect_opts()).unwrap());
+            });
+        });
     }
 
     group.finish();

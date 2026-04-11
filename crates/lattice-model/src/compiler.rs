@@ -10,13 +10,13 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
+use lattice_common::policy::tetragon::TracingPolicyNamespaced;
+use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL};
 use lattice_crd::crd::{
     derived_name, EgressRule, EgressTarget, LatticeMeshMember, LatticeModel, MeshMemberPort,
     ModelRoutingSpec, ModelSourceSpec, PeerAuth, PortSpec, ProviderType, ServiceRef,
 };
 use lattice_graph::ServiceGraph;
-use lattice_common::policy::tetragon::TracingPolicyNamespaced;
-use lattice_common::{KTHENA_AUTOSCALER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA, LABEL_MODEL};
 use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
 use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
@@ -879,8 +879,8 @@ mod tests {
     use lattice_crd::crd::{
         AutoscalingMetric, ContainerSpec, InferenceEngine, KvConnector, KvConnectorType,
         LatticeModelSpec, ModelAutoscalingSpec, ModelRoleSpec, ModelRouteRule, ModelRouteSpec,
-        ModelRoutingSpec, ModelSourceSpec, PortSpec,
-        RuntimeSpec, ServicePortsSpec, TargetModel, WorkloadSpec,
+        ModelRoutingSpec, ModelSourceSpec, PortSpec, RuntimeSpec, ServicePortsSpec, TargetModel,
+        WorkloadSpec,
     };
 
     fn make_model(roles: BTreeMap<String, ModelRoleSpec>) -> LatticeModel {

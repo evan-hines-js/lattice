@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::mesh;
 use lattice_common::network::gateway_api::{
@@ -16,6 +15,7 @@ use lattice_common::network::gateway_api::{
     GatewayTlsConfig, IssuerRef,
 };
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_crd::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
 
 use crate::types::{
     KthenaHeaderMatch, KthenaKvConnector, KthenaModelMatch, KthenaModelRoute, KthenaModelRouteSpec,

@@ -5,10 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::{
-    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
-    PathMatchType, RouteKind,
-};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::network::gateway_api::*;
@@ -22,6 +18,10 @@ use lattice_common::policy::istio::{
 use lattice_common::policy::tetragon::{
     KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
     TracingPolicySpec,
+};
+use lattice_crd::crd::{
+    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    PathMatchType, RouteKind,
 };
 
 use crate::policy::cilium::{
@@ -437,10 +437,7 @@ impl IngressCompiler {
         let listener_ports = unique_listener_ports(listeners);
         if !listener_ports.is_empty() {
             ingress_rules.push(CiliumIngressRule {
-                to_ports: build_port_rules(
-                    &listener_ports,
-                    lattice_crd::crd::NetworkProtocol::Tcp,
-                ),
+                to_ports: build_port_rules(&listener_ports, lattice_crd::crd::NetworkProtocol::Tcp),
                 ..Default::default()
             });
         }

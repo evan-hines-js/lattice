@@ -180,10 +180,7 @@ pub async fn run_kubeconfig_verification(
     workload_cluster_name: &str,
     workload2_cluster_name: Option<&str>,
 ) -> Result<(), String> {
-    let diag = DiagnosticContext::new(
-        &ctx.mgmt_kubeconfig,
-        lattice_core::LATTICE_SYSTEM_NAMESPACE,
-    );
+    let diag = DiagnosticContext::new(&ctx.mgmt_kubeconfig, lattice_core::LATTICE_SYSTEM_NAMESPACE);
     with_diagnostics(&diag, "Kubeconfig Verification", || async {
         verify_kubeconfig_patched(
             &ctx.mgmt_kubeconfig,

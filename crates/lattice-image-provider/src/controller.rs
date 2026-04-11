@@ -12,10 +12,10 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
 
 const FIELD_MANAGER: &str = "lattice-image-provider-controller";
 

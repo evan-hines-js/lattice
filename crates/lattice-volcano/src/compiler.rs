@@ -4,9 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_crd::crd::{LatticeJob, LatticeJobSpec, RestartPolicy, VolcanoPolicy};
 
 use crate::types::{
     self, VCCronJob, VCCronJobSpec, VCCronJobTemplate, VCJob, VCJobSpec, VCJobTask,

@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_crd::crd::{KvConnectorType, LatticeModel, TopologyMode, WorkloadNetworkTopology};
 
 use crate::types::{
     self, GangPolicy, ModelServing, ModelServingRole, ModelServingSpec, ServingGroupTemplate,
@@ -408,9 +408,7 @@ mod tests {
 
     #[test]
     fn kv_connector_auto_injects_topology() {
-        use lattice_crd::crd::{
-            InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
-        };
+        use lattice_crd::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {
@@ -446,9 +444,7 @@ mod tests {
 
     #[test]
     fn mooncake_connector_auto_injects_tier_3() {
-        use lattice_crd::crd::{
-            InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec,
-        };
+        use lattice_crd::crd::{InferenceEngine, KvConnector, KvConnectorType, ModelRoutingSpec};
 
         let spec = LatticeModelSpec {
             routing: Some(ModelRoutingSpec {

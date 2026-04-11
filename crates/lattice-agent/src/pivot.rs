@@ -13,12 +13,12 @@ use thiserror::Error;
 use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
+use lattice_common::kubeconfig_secret_name;
+use lattice_common::DistributableResources;
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
 };
-use lattice_common::DistributableResources;
-use lattice_common::kubeconfig_secret_name;
-use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Resolve the Kubernetes API server ClusterIP from the `kubernetes` service.
 ///
@@ -413,13 +413,7 @@ pub async fn apply_distributed_resources(
 
     // Apply LatticePackages (propagated from parent)
     let pkg_api: Api<LatticePackage> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    apply_resources(
-        &pkg_api,
-        &resources.packages,
-        &params,
-        "LatticePackage",
-    )
-    .await?;
+    apply_resources(&pkg_api, &resources.packages, &params, "LatticePackage").await?;
 
     Ok(())
 }

@@ -465,7 +465,10 @@ impl FileMount {
 ///
 /// Note: Per Score spec, `${...}` placeholders are NOT supported in image field.
 /// Use "." for runtime-supplied images instead.
-pub(crate) fn validate_image(image: &str, container_name: &str) -> Result<(), crate::ValidationError> {
+pub(crate) fn validate_image(
+    image: &str,
+    container_name: &str,
+) -> Result<(), crate::ValidationError> {
     if image.is_empty() {
         return Err(crate::ValidationError::new(format!(
             "container '{}': image cannot be empty",

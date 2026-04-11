@@ -19,10 +19,10 @@ use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error, PARENT_CONFIG_SECRET};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_move::{pause_cluster, unpause_cluster};
 use lattice_proto::cell_command::Command;
 use lattice_proto::{CellCommand, DeleteCluster};

@@ -6,12 +6,12 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use lattice_common::{
+    KTHENA_AUTOSCALER_SA, KTHENA_CONTROLLER_MANAGER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA,
+};
 use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
-};
-use lattice_common::{
-    KTHENA_AUTOSCALER_SA, KTHENA_CONTROLLER_MANAGER_SA, KTHENA_NAMESPACE, KTHENA_ROUTER_SA,
 };
 
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};

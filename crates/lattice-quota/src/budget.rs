@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use kube::ResourceExt;
-use lattice_crd::crd::LatticeQuota;
 use lattice_common::resources::{parse_resource_by_key, WorkloadResourceDemand};
+use lattice_crd::crd::LatticeQuota;
 
 /// Snapshot of a quota's identity at read time, for optimistic concurrency.
 #[derive(Clone, Debug)]

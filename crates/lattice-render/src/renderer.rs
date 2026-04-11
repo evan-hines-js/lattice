@@ -675,12 +675,12 @@ impl TemplateRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kube::api::ObjectMeta;
+    use lattice_core::template_types::TemplateString;
     use lattice_crd::crd::{
         ContainerSpec, DependencyDirection, LatticeService, LatticeServiceSpec, PortSpec,
         ResourceParams, ResourceSpec, ResourceType, ServicePortsSpec, WorkloadSpec,
     };
-    use lattice_core::template_types::TemplateString;
-    use kube::api::ObjectMeta;
 
     fn make_graph_with_db(env: &str) -> ServiceGraph {
         let graph = ServiceGraph::new("lattice.test");

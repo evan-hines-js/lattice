@@ -3,9 +3,7 @@
 use std::collections::HashSet;
 
 use lattice_cedar::{PolicyEngine, SecurityAuthzRequest, SecurityOverrideRequest};
-use lattice_crd::crd::{
-    has_unknown_binary_entrypoint, RuntimeSpec, SecurityContext, WorkloadSpec,
-};
+use lattice_crd::crd::{has_unknown_binary_entrypoint, RuntimeSpec, SecurityContext, WorkloadSpec};
 
 use crate::error::CompilationError;
 

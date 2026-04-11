@@ -31,17 +31,17 @@ use std::sync::LazyLock;
 use kube::ResourceExt;
 use tracing::{debug, info};
 
-use lattice_crd::crd::{
-    BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
-    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
-    MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
-};
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_WEBHOOK_PORT, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
     OPERATOR_NAME, VMAGENT_SA_NAME,
 };
 use lattice_core::{
     DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
+};
+use lattice_crd::crd::{
+    BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
+    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
+    MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 
 /// A single infrastructure component with its name, version, and manifests.
@@ -629,10 +629,10 @@ pub async fn apply_phase(
     client: &kube::Client,
     phase: &InfraPhase,
 ) -> anyhow::Result<Vec<InfraComponentStatus>> {
-    use lattice_crd::crd::InfraComponentPhase;
     use lattice_common::kube_utils;
     use lattice_common::retry::{retry_with_backoff, RetryConfig};
     use lattice_common::{apply_manifests, ApplyOptions};
+    use lattice_crd::crd::InfraComponentPhase;
 
     let manifests = phase.all_manifests();
     tracing::info!(

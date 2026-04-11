@@ -536,7 +536,9 @@ impl ModelIngressSpec {
     /// Validate the ingress spec
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.hosts.is_empty() {
-            return Err(crate::ValidationError::new("ingress hosts must not be empty"));
+            return Err(crate::ValidationError::new(
+                "ingress hosts must not be empty",
+            ));
         }
         if let Some(ref tls) = self.tls {
             if tls.secret_name.is_some() && tls.issuer_ref.is_some() {

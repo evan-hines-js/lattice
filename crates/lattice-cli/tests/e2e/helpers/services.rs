@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kube::api::Api;
-use lattice_crd::crd::LatticeService;
 use lattice_common::LOCAL_SECRETS_NAMESPACE;
+use lattice_crd::crd::LatticeService;
 use tracing::info;
 
 use super::cedar::{apply_cedar_policies_batch, CedarPolicySpec};

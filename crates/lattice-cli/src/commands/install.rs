@@ -38,10 +38,6 @@ const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 use lattice_cell::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
 };
-use lattice_crd::crd::{
-    BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
-    LatticePackage, ProviderType,
-};
 use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
@@ -51,6 +47,10 @@ use lattice_common::{
     OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET,
 };
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_SA_TOKEN};
+use lattice_crd::crd::{
+    BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
+    LatticePackage, ProviderType,
+};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 
@@ -190,9 +190,8 @@ impl Installer {
                 }
                 "LatticePackage" => {
                     // Validate it deserializes, then store as JSON string for apply
-                    let _: LatticePackage = serde_json::from_value(doc.clone()).map_err(|e| {
-                        Error::validation(format!("Invalid LatticePackage: {}", e))
-                    })?;
+                    let _: LatticePackage = serde_json::from_value(doc.clone())
+                        .map_err(|e| Error::validation(format!("Invalid LatticePackage: {}", e)))?;
                     let json = serde_json::to_string(&doc).map_err(|e| {
                         Error::validation(format!("Failed to serialize LatticePackage: {}", e))
                     })?;

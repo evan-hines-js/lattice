@@ -31,15 +31,15 @@ use mockall::automock;
 
 use kube::runtime::events::EventType;
 use lattice_cedar::PolicyEngine;
+use lattice_common::events::{actions, reasons, EventPublisher};
+use lattice_common::kube_utils::ApplyBatch;
+use lattice_common::{CrdKind, CrdRegistry, Retryable};
+use lattice_cost::CostProvider;
 use lattice_crd::crd::{
     CostEstimate, LatticeModel, LatticeModelStatus, MetricsScraper, MetricsSnapshot,
     ModelCondition, ModelServingPhase, ProviderType,
 };
-use lattice_common::events::{actions, reasons, EventPublisher};
 use lattice_graph::ServiceGraph;
-use lattice_common::kube_utils::ApplyBatch;
-use lattice_common::{CrdKind, CrdRegistry, Retryable};
-use lattice_cost::CostProvider;
 
 use crate::compiler::{compile_model, role_key_suffix, CompileContext, CompiledModel};
 use crate::error::ModelError;
@@ -587,8 +587,7 @@ pub async fn reconcile(
                 let old_role_keys = pre_applied_roles.clone();
                 let new_role_keys = spec_role_keys(&name, &model.spec.roles);
 
-                let compiled = match compile_model(&model, &compile_ctx).await
-                {
+                let compiled = match compile_model(&model, &compile_ctx).await {
                     Ok(c) => c,
                     Err(e) => {
                         if e.is_retryable() {

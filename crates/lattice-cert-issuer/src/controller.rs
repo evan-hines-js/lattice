@@ -16,15 +16,12 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use lattice_common::status_check;
+use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CertIssuer, CertIssuerPhase, CertIssuerStatus, DNSProvider, DNSProviderPhase, IssuerType,
 };
-use lattice_common::status_check;
-use lattice_common::{
-    ControllerContext, ReconcileError, REQUEUE_ERROR_SECS,
-    REQUEUE_SUCCESS_SECS,
-};
-use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_secret_provider::credentials::{
     reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
 };

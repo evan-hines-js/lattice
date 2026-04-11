@@ -115,8 +115,10 @@ fn build_realistic_graph(n: usize) -> ServiceGraph {
     // Third pass: register services with bilateral agreements
     for i in 0..n {
         let dep_names: Vec<String> = all_deps[i].iter().map(|j| format!("svc-{}", j)).collect();
-        let caller_names: Vec<String> =
-            all_callers[i].iter().map(|j| format!("svc-{}", j)).collect();
+        let caller_names: Vec<String> = all_callers[i]
+            .iter()
+            .map(|j| format!("svc-{}", j))
+            .collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
         let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
 
@@ -155,8 +157,10 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
         let caller_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
             .choose_multiple(&mut rng, num_callers);
-        let caller_names: Vec<String> =
-            caller_indices.iter().map(|j| format!("svc-{}", j)).collect();
+        let caller_names: Vec<String> = caller_indices
+            .iter()
+            .map(|j| format!("svc-{}", j))
+            .collect();
         let caller_refs: Vec<&str> = caller_names.iter().map(|s| s.as_str()).collect();
 
         let spec = service_spec(&dep_refs, &caller_refs);
@@ -167,10 +171,7 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
     for i in 0..num_depends_all {
         let name = format!("svc-{}", i);
         let mm_spec = lattice_crd::crd::LatticeMeshMemberSpec {
-            target: MeshMemberTarget::Selector(BTreeMap::from([(
-                "app".to_string(),
-                name.clone(),
-            )])),
+            target: MeshMemberTarget::Selector(BTreeMap::from([("app".to_string(), name.clone())])),
             ports: vec![MeshMemberPort {
                 port: 8080,
                 service_port: None,
@@ -252,16 +253,12 @@ fn bench_compile_realistic(c: &mut Criterion) {
         let compiler = PolicyCompiler::new(&graph, vec![]);
         let mut rng = StdRng::seed_from_u64(99);
 
-        group.bench_with_input(
-            BenchmarkId::new("realistic", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    let idx = rng.gen_range(0..size);
-                    black_box(compiler.compile(&format!("svc-{}", idx), "default"));
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
+            b.iter(|| {
+                let idx = rng.gen_range(0..size);
+                black_box(compiler.compile(&format!("svc-{}", idx), "default"));
+            });
+        });
     }
 
     group.finish();
@@ -349,17 +346,13 @@ fn bench_compile_full_wave(c: &mut Criterion) {
         let graph = build_realistic_graph(size);
         let compiler = PolicyCompiler::new(&graph, vec![]);
 
-        group.bench_with_input(
-            BenchmarkId::new("all_services", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    for i in 0..size {
-                        black_box(compiler.compile(&format!("svc-{}", i), "default"));
-                    }
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("all_services", size), &size, |b, &size| {
+            b.iter(|| {
+                for i in 0..size {
+                    black_box(compiler.compile(&format!("svc-{}", i), "default"));
+                }
+            });
+        });
     }
 
     group.finish();

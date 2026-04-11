@@ -6,6 +6,7 @@ license.workspace = true
 description = "gRPC protocol definitions for Lattice agent-cell communication"
 
 [dependencies]
+lattice-core.workspace = true
 tonic.workspace = true
 prost.workspace = true
 prost-types.workspace = true

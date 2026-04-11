@@ -13,15 +13,15 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_cache::ResourceCache;
-use lattice_crd::crd::{
-    LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus, LatticeService,
-    QuotaPrincipal,
-};
 use lattice_common::resources::{
     compute_workload_demand, parse_resource_by_key, WorkloadResourceDemand,
 };
 use lattice_common::{ReconcileError, REQUEUE_ERROR_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{
+    LatticeJob, LatticeModel, LatticeQuota, LatticeQuotaPhase, LatticeQuotaStatus, LatticeService,
+    QuotaPrincipal,
+};
 
 const FIELD_MANAGER: &str = "lattice-quota-controller";
 const REQUEUE_SECS: u64 = 30;

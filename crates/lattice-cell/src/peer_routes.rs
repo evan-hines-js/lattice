@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use kube::Client;
 use lattice_common::kube_utils::request_proxy_token;
-use lattice_core::{combine_cluster_hashes, hash_routes, RouteHashable};
+use lattice_core::{combine_cluster_hashes, hash_routes};
 use tracing::{debug, error, info, warn};
 
 use lattice_proto::cell_command::Command;
@@ -25,24 +25,6 @@ use lattice_proto::{CellCommand, PeerRouteSync, SubtreeService};
 
 use crate::route_reconciler::TaggedRoute;
 use crate::SharedAgentRegistry;
-
-// =============================================================================
-// RouteHashable impl for SubtreeService (proto type)
-// =============================================================================
-
-impl RouteHashable for SubtreeService {
-    fn route_name(&self) -> &str { &self.name }
-    fn route_namespace(&self) -> &str { &self.namespace }
-    fn route_hostname(&self) -> &str { &self.hostname }
-    fn route_address(&self) -> &str { &self.address }
-    fn route_port(&self) -> u16 { self.port as u16 }
-    fn route_protocol(&self) -> &str { &self.protocol }
-    fn route_allowed_services(&self) -> &[String] { &self.allowed_services }
-    fn route_service_ports(&self) -> Vec<(&str, u16)> {
-        // BTreeMap — iteration is sorted by key
-        self.service_ports.iter().map(|(k, &v)| (k.as_str(), v as u16)).collect()
-    }
-}
 
 // =============================================================================
 // PeerRouteIndex
@@ -115,10 +97,7 @@ impl PeerRouteIndex {
 // Proto conversion
 // =============================================================================
 
-fn tagged_route_to_proto(
-    cluster: &str,
-    r: &lattice_crd::crd::ClusterRoute,
-) -> SubtreeService {
+fn tagged_route_to_proto(cluster: &str, r: &lattice_crd::crd::ClusterRoute) -> SubtreeService {
     SubtreeService {
         name: r.service_name.clone(),
         namespace: r.service_namespace.clone(),

@@ -195,10 +195,9 @@ impl ImageProviderSpec {
         }
 
         if self.provider_type == ImageProviderType::Ecr {
-            let ecr = self
-                .ecr
-                .as_ref()
-                .ok_or_else(|| crate::ValidationError::new("ecr config required when type is ecr"))?;
+            let ecr = self.ecr.as_ref().ok_or_else(|| {
+                crate::ValidationError::new("ecr config required when type is ecr")
+            })?;
             if ecr.region.is_empty() {
                 return Err(crate::ValidationError::new("ecr.region cannot be empty"));
             }

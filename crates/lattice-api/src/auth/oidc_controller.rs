@@ -12,15 +12,14 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use lattice_common::{
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, OPERATOR_NAME, REQUEUE_SUCCESS_SECS,
+};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget,
     OIDCProvider, OIDCProviderPhase, OIDCProviderStatus, ParsedEndpoint,
 };
-use lattice_common::{
-    ControllerContext, ReconcileError, LABEL_MANAGED_BY, OPERATOR_NAME,
-    REQUEUE_SUCCESS_SECS,
-};
-use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 /// Shorter retry interval for OIDC validation failures. The global REQUEUE_ERROR_SECS (60s) is
 /// too slow here — validation typically fails on the first attempt because the egress mesh policy

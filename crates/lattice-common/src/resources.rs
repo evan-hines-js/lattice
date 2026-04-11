@@ -65,7 +65,9 @@ pub fn is_node_ready(node: &Node) -> bool {
 // Quantity parsing (str parsers live in lattice-crd::quantity)
 // ---------------------------------------------------------------------------
 
-pub use lattice_core::quantity::{parse_cpu_millis_str, parse_memory_bytes_str, parse_resource_by_key};
+pub use lattice_core::quantity::{
+    parse_cpu_millis_str, parse_memory_bytes_str, parse_resource_by_key,
+};
 
 /// Parse a Kubernetes CPU `Quantity` to millicores.
 ///
@@ -306,7 +308,10 @@ fn sum_container_requests(
 /// Uses `requests` (not `limits`) — requests represent guaranteed allocation.
 /// Shared by the quota system and the cost calculator.
 pub fn sum_container_cpu_memory(
-    containers: &std::collections::BTreeMap<String, lattice_crd::crd::workload::container::ContainerSpec>,
+    containers: &std::collections::BTreeMap<
+        String,
+        lattice_crd::crd::workload::container::ContainerSpec,
+    >,
 ) -> Result<(i64, i64), QuantityParseError> {
     let mut cpu_millis: i64 = 0;
     let mut memory_bytes: i64 = 0;
@@ -329,7 +334,10 @@ pub fn sum_container_cpu_memory(
 
 /// Sum GPU count from `type: gpu` resource entries in a workload spec.
 pub fn sum_gpu_count(
-    resources: &std::collections::BTreeMap<String, lattice_crd::crd::workload::resources::ResourceSpec>,
+    resources: &std::collections::BTreeMap<
+        String,
+        lattice_crd::crd::workload::resources::ResourceSpec,
+    >,
 ) -> u32 {
     resources
         .values()

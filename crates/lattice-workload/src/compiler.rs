@@ -7,15 +7,15 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
+use lattice_common::kube_utils::{LabelSelector, OwnerReference};
+use lattice_common::mesh;
+use lattice_common::LABEL_NAME;
 use lattice_crd::crd::{
     EgressRule, EgressTarget, IngressSpec, LatticeMeshMember, LatticeMeshMemberSpec,
     MeshMemberPort, MeshMemberTarget, PeerAuth, ProviderType, RuntimeSpec, WorkloadSpec,
 };
 use lattice_graph::ServiceGraph;
-use lattice_common::kube_utils::{LabelSelector, OwnerReference};
-use lattice_common::mesh;
 use lattice_render::{RenderConfig, TemplateRenderer};
-use lattice_common::LABEL_NAME;
 
 use crate::authorization::VolumeAuthorizationMode;
 use crate::compiled::{CompiledConfig, CompiledWorkload};

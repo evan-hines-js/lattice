@@ -13,8 +13,8 @@ use super::{
     InfrastructureRef, Provider, WorkerPoolConfig,
 };
 use crate::constants::{AWS_API_VERSION, INFRASTRUCTURE_API_GROUP};
-use lattice_crd::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 use lattice_common::{Error, Result};
+use lattice_crd::crd::{AwsConfig, LatticeCluster, ProviderSpec, ProviderType};
 
 /// Configuration for generating an AWS machine template
 struct MachineTemplateConfig<'a> {

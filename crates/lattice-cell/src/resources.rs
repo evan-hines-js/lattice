@@ -11,12 +11,12 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 use tracing::debug;
 
-use lattice_crd::crd::{
-    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
-};
 use lattice_common::DistributableResources;
 use lattice_common::{INHERITED_LABEL, ORIGINAL_NAME_LABEL, ORIGIN_CLUSTER_LABEL};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{
+    CedarPolicy, ImageProvider, InfraProvider, LatticePackage, OIDCProvider, SecretProvider,
+};
 
 /// Convert domain `DistributableResources` to the proto wire type.
 ///

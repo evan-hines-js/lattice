@@ -234,8 +234,9 @@ impl WorkloadSpec {
             }
 
             if let Some(gpu) = resource.params.as_gpu() {
-                gpu.validate()
-                    .map_err(|e| crate::ValidationError::new(format!("resource '{}': {}", name, e)))?;
+                gpu.validate().map_err(|e| {
+                    crate::ValidationError::new(format!("resource '{}': {}", name, e))
+                })?;
             }
         }
 

@@ -11,10 +11,10 @@ use tracing::{debug, info, warn};
 
 use lattice_agent::{patch_kubeconfig_for_self_management, InClusterClientProvider};
 use lattice_capi::installer::CapiProviderConfig;
-use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{capi_namespace, Error};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
 use crate::controller::Context;
 use crate::phases::{try_transition_to_ready, update_status};

@@ -1065,11 +1065,7 @@ async fn test_job_failed_sets_observed_generation(
 // =============================================================================
 
 /// Build a minimal LatticeJob with a single "worker" task.
-fn build_simple_job(
-    name: &str,
-    namespace: &str,
-    command: &[&str],
-) -> lattice_crd::crd::LatticeJob {
+fn build_simple_job(name: &str, namespace: &str, command: &[&str]) -> lattice_crd::crd::LatticeJob {
     use lattice_crd::crd::{
         ContainerSpec, JobTaskSpec, LatticeJobSpec, ResourceQuantity, ResourceRequirements,
         RestartPolicy,

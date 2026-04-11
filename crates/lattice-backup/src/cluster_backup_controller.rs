@@ -11,12 +11,12 @@ use kube::runtime::controller::Action;
 use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{
-    BackupStore, ClusterBackupPhase, LatticeClusterBackup, LatticeClusterBackupStatus,
-};
 use lattice_common::status_check::is_status_unchanged;
 use lattice_common::{ControllerContext, ReconcileError};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{
+    BackupStore, ClusterBackupPhase, LatticeClusterBackup, LatticeClusterBackupStatus,
+};
 
 use crate::velero::{self, BackupTemplate, Schedule, ScheduleSpec, VELERO_NAMESPACE};
 

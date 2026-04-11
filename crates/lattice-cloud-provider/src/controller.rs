@@ -15,11 +15,9 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{
-    InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType,
-};
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+use lattice_crd::crd::{InfraProvider, InfraProviderPhase, InfraProviderStatus, InfraProviderType};
 
 const FIELD_MANAGER: &str = "lattice-cloud-provider-controller";
 
@@ -177,9 +175,9 @@ async fn update_status(
 mod tests {
     use super::*;
     use kube::core::ObjectMeta;
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
     use lattice_crd::crd::{CredentialSpec, InfraProviderSpec};
     use lattice_render::extract_secret_refs;
-    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
     use lattice_secret_provider::eso::{build_external_secret, build_templated_external_secret};
     use std::collections::BTreeMap;
 

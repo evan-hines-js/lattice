@@ -21,14 +21,14 @@ use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::ParentServers;
 use lattice_cluster::controller::{error_policy, reconcile, Context};
+use lattice_common::{CrdRegistry, LeaderElector};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_cost::CostProvider;
 use lattice_crd::crd::{
     CedarPolicy, ClusterConfig, LatticeCluster, LatticeClusterRoutes, LatticeJob,
     LatticeMeshMember, LatticeModel, LatticeService, MonitoringConfig, ProviderType,
 };
 use lattice_graph::ServiceGraph;
-use lattice_common::{CrdRegistry, LeaderElector};
-use lattice_core::LATTICE_SYSTEM_NAMESPACE;
-use lattice_cost::CostProvider;
 use lattice_mesh_member::controller as mesh_member_ctrl;
 use lattice_mesh_member::remote_secret;
 use lattice_service::compiler::VMServiceScrapePhase;

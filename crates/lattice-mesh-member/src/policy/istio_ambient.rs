@@ -18,9 +18,6 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::derived_name;
-use lattice_crd::crd::NetworkProtocol;
-use lattice_graph::{ActiveEdge, ServiceNode};
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
 use lattice_common::policy::istio::{
@@ -32,6 +29,9 @@ use lattice_common::policy::service_entry::{
     ServiceEntry, ServiceEntryEndpoint, ServiceEntryPort, ServiceEntrySpec,
 };
 use lattice_common::LABEL_NAME;
+use lattice_crd::crd::derived_name;
+use lattice_crd::crd::NetworkProtocol;
+use lattice_graph::{ActiveEdge, ServiceNode};
 
 use super::PolicyCompiler;
 
@@ -163,10 +163,12 @@ impl<'a> PolicyCompiler<'a> {
                 rules: vec![AuthorizationRule {
                     from: vec![AuthorizationSource {
                         source: SourceSpec {
-                            principals: vec![lattice_common::mesh::trust_domain::waypoint_principal(
-                                self.graph.trust_domain(),
-                                namespace,
-                            )],
+                            principals: vec![
+                                lattice_common::mesh::trust_domain::waypoint_principal(
+                                    self.graph.trust_domain(),
+                                    namespace,
+                                ),
+                            ],
                             not_principals: vec![],
                         },
                     }],

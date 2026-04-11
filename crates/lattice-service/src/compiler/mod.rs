@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use kube::discovery::ApiResource;
 use lattice_cedar::PolicyEngine;
-use lattice_crd::crd::LatticeMeshMember;
 use lattice_common::policy::tetragon::TracingPolicyNamespaced;
+use lattice_crd::crd::LatticeMeshMember;
 use lattice_workload::CompilationError;
 
 use crate::crd::{LatticeService, MonitoringConfig, ProviderType};

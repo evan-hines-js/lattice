@@ -6,8 +6,8 @@
 
 use std::collections::BTreeMap;
 
-use lattice_crd::crd::LatticeModel;
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
+use lattice_crd::crd::LatticeModel;
 
 use crate::routing_compiler::owner_reference;
 use crate::types::{

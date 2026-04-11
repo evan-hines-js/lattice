@@ -22,11 +22,11 @@ use kube::{Client, Resource};
 use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{create_provider, CAPIManifest};
+use lattice_common::events::{actions, reasons};
+use lattice_common::{capi_namespace, Error};
 use lattice_crd::crd::{
     ClusterPhase, Condition, ConditionStatus, LatticeCluster, LatticeClusterStatus,
 };
-use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, Error};
 
 use crate::controller::Context;
 

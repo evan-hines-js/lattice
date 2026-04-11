@@ -20,15 +20,14 @@ use kube::Client as KubeClient;
 use mockall::automock;
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::ProviderType;
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    Error, AWS_CAPA_CREDENTIALS_SECRET,
-    OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 use lattice_core::system_namespaces::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
+use lattice_crd::crd::ProviderType;
 
 /// Timeout for waiting on cert-manager and provider deployments
 const DEPLOYMENT_READY_TIMEOUT: Duration = Duration::from_secs(300);

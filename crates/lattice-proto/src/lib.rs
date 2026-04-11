@@ -104,6 +104,38 @@ pub mod tracing;
 
 pub use agent::v1::*;
 
+// RouteHashable impl for SubtreeService — ensures cell-side and agent-side
+// route hashing produce identical output via a shared trait in lattice-core.
+impl lattice_core::RouteHashable for SubtreeService {
+    fn route_name(&self) -> &str {
+        &self.name
+    }
+    fn route_namespace(&self) -> &str {
+        &self.namespace
+    }
+    fn route_hostname(&self) -> &str {
+        &self.hostname
+    }
+    fn route_address(&self) -> &str {
+        &self.address
+    }
+    fn route_port(&self) -> u16 {
+        self.port as u16
+    }
+    fn route_protocol(&self) -> &str {
+        &self.protocol
+    }
+    fn route_allowed_services(&self) -> &[String] {
+        &self.allowed_services
+    }
+    fn route_service_ports(&self) -> Vec<(&str, u16)> {
+        self.service_ports
+            .iter()
+            .map(|(k, &v)| (k.as_str(), v as u16))
+            .collect()
+    }
+}
+
 /// Current protocol version for agent-cell communication.
 ///
 /// Included in `AgentReady.protocol_version` so either side can gate new

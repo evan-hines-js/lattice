@@ -10,9 +10,9 @@ use kube::runtime::events::EventType;
 use kube::{Resource, ResourceExt};
 use tracing::{debug, error, info, warn};
 
-use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, Error};
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
 use crate::controller::{
     determine_pivot_action, Context, PivotAction, PivotOperations, PivotOperationsImpl,

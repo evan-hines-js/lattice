@@ -20,10 +20,10 @@ use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_VIP_INTERFACE_PROXMOX, INFRASTRUCTURE_API_GROUP,
     PROXMOX_API_VERSION,
 };
+use lattice_common::{Error, Result, PROXMOX_CREDENTIALS_SECRET};
 use lattice_crd::crd::{
     InstanceType, Ipv4PoolConfig, LatticeCluster, ProviderSpec, ProviderType, ProxmoxConfig,
 };
-use lattice_common::{Error, Result, PROXMOX_CREDENTIALS_SECRET};
 
 /// VM sizing parameters for ProxmoxMachineTemplate
 struct MachineSizing {

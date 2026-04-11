@@ -3,8 +3,8 @@
 //! These functions contain stateless decision logic that can be thoroughly
 //! unit tested without mocking Kubernetes or network connections.
 
-use lattice_crd::crd::WorkerPoolSpec;
 use lattice_common::gpu::{ANNOTATION_GPU_HEALTH, ANNOTATION_GPU_LOSS, ANNOTATION_HEARTBEAT};
+use lattice_crd::crd::WorkerPoolSpec;
 
 /// Check if the cluster being reconciled is the cluster we're running on.
 ///

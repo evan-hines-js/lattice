@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kube::api::Api;
-use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use tracing::{info, warn};
 
 use base64::Engine;

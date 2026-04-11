@@ -17,15 +17,15 @@
 use std::collections::BTreeMap;
 
 use lattice_cedar::PolicyEngine;
+use lattice_common::kube_utils::OwnerReference;
+use lattice_common::policy::tetragon::TracingPolicyNamespaced;
+use lattice_common::LABEL_TRAINING_JOB;
 use lattice_crd::crd::{
     JobTaskSpec, LatticeJob, LatticeMeshMember, NcclConfig, PortSpec, ProviderType,
     ServicePortsSpec, TrainingConfig, TrainingFramework, WorkloadSpec,
 };
 use lattice_graph::ServiceGraph;
-use lattice_common::kube_utils::OwnerReference;
-use lattice_common::policy::tetragon::TracingPolicyNamespaced;
 use lattice_template::TemplateString;
-use lattice_common::LABEL_TRAINING_JOB;
 use lattice_volcano::{VCCronJob, VCJob};
 use lattice_workload::{inject_pod_labels, CompiledConfig, WorkloadCompiler};
 

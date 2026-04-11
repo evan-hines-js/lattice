@@ -170,7 +170,8 @@ impl LatticeClusterSpec {
 
         // Validate issuer references
         for (key, cert_issuer_ref) in &self.issuers {
-            crate::crd::validate_dns_label(key, "issuer key").map_err(crate::ValidationError::new)?;
+            crate::crd::validate_dns_label(key, "issuer key")
+                .map_err(crate::ValidationError::new)?;
             if cert_issuer_ref.is_empty() {
                 return Err(crate::ValidationError::new(format!(
                     "issuers['{key}']: CertIssuer reference cannot be empty"

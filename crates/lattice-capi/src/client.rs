@@ -12,9 +12,9 @@ use tracing::{debug, info};
 use mockall::automock;
 
 use crate::provider::{control_plane_name, pool_resource_suffix, CAPIManifest};
-use lattice_crd::crd::BootstrapProvider;
 use lattice_common::kube_utils::build_api_resource;
 use lattice_common::Error;
+use lattice_crd::crd::BootstrapProvider;
 
 /// Trait abstracting CAPI resource operations
 ///

@@ -14,13 +14,13 @@ use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{format_capi_version, pool_resource_suffix};
 use lattice_cert_issuer::builder;
+use lattice_common::events::{actions, reasons};
+use lattice_common::{capi_namespace, Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CertIssuer, CertIssuerPhase, DNSProvider, DNSProviderPhase, LatticeCluster,
     LatticeClusterStatus, WorkerPoolStatus,
 };
-use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MANAGED_BY_VALUE};
-use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::controller::{
     autoscaling_warning, build_gpu_cordon_plan, determine_gpu_action, determine_scaling_action,

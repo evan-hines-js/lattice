@@ -293,7 +293,15 @@ fn bench_mesh(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("compile_mesh");
 
-    for (deps, callers) in [(2, 2), (5, 5), (10, 10), (20, 10), (50, 50), (100, 100), (200, 100)] {
+    for (deps, callers) in [
+        (2, 2),
+        (5, 5),
+        (10, 10),
+        (20, 10),
+        (50, 50),
+        (100, 100),
+        (200, 100),
+    ] {
         let graph = ServiceGraph::new("lattice.test");
         let cedar = PolicyEngine::new();
         let spec = mesh_spec(deps, callers);
@@ -453,17 +461,13 @@ fn bench_compile_in_large_graph(c: &mut Criterion) {
             MonitoringConfig::default(),
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("bg_services", bg_count),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        black_box(compiler.compile(&service).await.unwrap());
-                    });
+        group.bench_with_input(BenchmarkId::new("bg_services", bg_count), &(), |b, _| {
+            b.iter(|| {
+                rt.block_on(async {
+                    black_box(compiler.compile(&service).await.unwrap());
                 });
-            },
-        );
+            });
+        });
     }
 
     group.finish();
@@ -516,19 +520,15 @@ fn bench_compile_wave(c: &mut Criterion) {
             MonitoringConfig::default(),
         );
 
-        group.bench_with_input(
-            BenchmarkId::new("services", wave_size),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    rt.block_on(async {
-                        for svc in &services {
-                            black_box(compiler.compile(svc).await.unwrap());
-                        }
-                    });
+        group.bench_with_input(BenchmarkId::new("services", wave_size), &(), |b, _| {
+            b.iter(|| {
+                rt.block_on(async {
+                    for svc in &services {
+                        black_box(compiler.compile(svc).await.unwrap());
+                    }
                 });
-            },
-        );
+            });
+        });
     }
 
     group.finish();

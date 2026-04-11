@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 use lattice_common::LABEL_NAME;
+use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
 use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
 

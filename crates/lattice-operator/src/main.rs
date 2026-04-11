@@ -30,11 +30,6 @@ use lattice_capi::installer::{CapiInstaller, NativeInstaller};
 use lattice_cedar::PolicyEngine;
 use lattice_cell::bootstrap::DefaultManifestGenerator;
 use lattice_cell::parent::{ParentConfig, ParentServers};
-use lattice_crd::crd::{
-    CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
-    LatticeQuota, LatticeService, OIDCProvider,
-};
-use lattice_graph::ServiceGraph;
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::telemetry::init_telemetry;
 use lattice_common::CrdRegistry;
@@ -43,6 +38,11 @@ use lattice_common::{
     lattice_svc_dns, CELL_SERVICE_NAME, DEFAULT_AUTH_PROXY_PORT, DEFAULT_HEALTH_PORT, OPERATOR_NAME,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{
+    CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
+    LatticeQuota, LatticeService, OIDCProvider,
+};
+use lattice_graph::ServiceGraph;
 use lattice_operator::agent::start_agent_with_retry;
 use lattice_operator::cell_proxy_backend::CellProxyBackend;
 use lattice_operator::forwarder::SubtreeForwarder;

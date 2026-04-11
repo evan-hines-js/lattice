@@ -99,9 +99,7 @@ impl MoveCommandSender for GrpcMoveCommandSender {
                 move_id: complete.move_id,
                 cluster_name: complete.cluster_name,
                 target_namespace: complete.target_namespace,
-                resources: Some(crate::distributable_resources_to_proto(
-                    &complete.resources,
-                )),
+                resources: Some(crate::distributable_resources_to_proto(&complete.resources)),
                 manifests: complete.manifests,
             })),
         };

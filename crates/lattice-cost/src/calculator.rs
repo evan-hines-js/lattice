@@ -2,10 +2,10 @@
 //!
 //! Computes hourly cost from resource requests × rates for each workload type.
 
+use lattice_common::resources::sum_container_cpu_memory;
 use lattice_crd::crd::{
     CostBreakdown, CostEstimate, LatticeJobSpec, LatticeModelSpec, LatticeServiceSpec, WorkloadSpec,
 };
-use lattice_common::resources::sum_container_cpu_memory;
 
 use crate::error::CostError;
 use crate::rates::CostRates;

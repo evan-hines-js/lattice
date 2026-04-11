@@ -74,15 +74,32 @@ fn default_protocol() -> String {
 }
 
 impl lattice_core::RouteHashable for ClusterRoute {
-    fn route_name(&self) -> &str { &self.service_name }
-    fn route_namespace(&self) -> &str { &self.service_namespace }
-    fn route_hostname(&self) -> &str { &self.hostname }
-    fn route_address(&self) -> &str { &self.address }
-    fn route_port(&self) -> u16 { self.port }
-    fn route_protocol(&self) -> &str { &self.protocol }
-    fn route_allowed_services(&self) -> &[String] { &self.allowed_services }
+    fn route_name(&self) -> &str {
+        &self.service_name
+    }
+    fn route_namespace(&self) -> &str {
+        &self.service_namespace
+    }
+    fn route_hostname(&self) -> &str {
+        &self.hostname
+    }
+    fn route_address(&self) -> &str {
+        &self.address
+    }
+    fn route_port(&self) -> u16 {
+        self.port
+    }
+    fn route_protocol(&self) -> &str {
+        &self.protocol
+    }
+    fn route_allowed_services(&self) -> &[String] {
+        &self.allowed_services
+    }
     fn route_service_ports(&self) -> Vec<(&str, u16)> {
-        self.service_ports.iter().map(|(k, &v)| (k.as_str(), v)).collect()
+        self.service_ports
+            .iter()
+            .map(|(k, &v)| (k.as_str(), v))
+            .collect()
     }
 }
 

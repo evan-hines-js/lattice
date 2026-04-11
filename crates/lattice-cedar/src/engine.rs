@@ -27,9 +27,9 @@ use tokio::sync::watch;
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
-use lattice_crd::crd::CedarPolicy;
 use lattice_common::is_local_resource;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::CedarPolicy;
 
 // ============================================================================
 // Error types

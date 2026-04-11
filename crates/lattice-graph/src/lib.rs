@@ -13,11 +13,11 @@ use std::sync::Arc;
 use dashmap::{DashMap, DashSet};
 use tracing::warn;
 
+use lattice_core::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 use lattice_crd::crd::{
     EgressRule, LatticeMeshMemberSpec, LatticeServiceSpec, MeshMemberTarget, PeerAuth, ServiceRef,
     VolumeParams, WorkloadSpec,
 };
-use lattice_core::{MONITORING_NAMESPACE, VMAGENT_NODE_NAME};
 
 /// Fully qualified service reference: (namespace, name)
 pub type QualifiedName = (String, String);
@@ -368,9 +368,9 @@ impl ServiceNode {
 
     /// Effective match labels for Istio policies (custom selector or fallback to LABEL_NAME).
     pub fn istio_match_labels(&self) -> BTreeMap<String, String> {
-        self.selector
-            .clone()
-            .unwrap_or_else(|| BTreeMap::from([(lattice_core::LABEL_NAME.to_string(), self.name.clone())]))
+        self.selector.clone().unwrap_or_else(|| {
+            BTreeMap::from([(lattice_core::LABEL_NAME.to_string(), self.name.clone())])
+        })
     }
 
     /// Effective match labels for Cilium policies (custom selector with k8s: prefix or CILIUM_LABEL_NAME).
@@ -384,7 +384,10 @@ impl ServiceNode {
                     .collect()
             })
             .unwrap_or_else(|| {
-                BTreeMap::from([(lattice_core::CILIUM_LABEL_NAME.to_string(), self.name.clone())])
+                BTreeMap::from([(
+                    lattice_core::CILIUM_LABEL_NAME.to_string(),
+                    self.name.clone(),
+                )])
             })
     }
 
@@ -827,7 +830,11 @@ impl ServiceGraph {
     /// Removes all `Remote` nodes that were sourced from `source_cluster` and
     /// inserts the new routes. This is per-cluster, so updates from cluster A
     /// don't affect routes from cluster B (no flapping).
-    pub fn sync_remote_services(&self, source_cluster: &str, routes: &[lattice_crd::crd::ClusterRoute]) {
+    pub fn sync_remote_services(
+        &self,
+        source_cluster: &str,
+        routes: &[lattice_crd::crd::ClusterRoute],
+    ) {
         // Remove existing remote nodes from this source cluster only
         let stale_keys: Vec<QualifiedName> = self
             .vertices

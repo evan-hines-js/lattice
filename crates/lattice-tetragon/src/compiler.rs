@@ -7,11 +7,11 @@
 
 use std::collections::HashSet;
 
-use lattice_crd::crd::{has_unknown_binary_entrypoint, Probe, RuntimeSpec, WorkloadSpec};
 use lattice_common::policy::tetragon::{
     KprobeArg, KprobeSpec, MatchArg, PodSelector, Selector, TracingPolicyNamespaced,
     TracingPolicySpec,
 };
+use lattice_crd::crd::{has_unknown_binary_entrypoint, Probe, RuntimeSpec, WorkloadSpec};
 
 /// Compile TracingPolicyNamespaced resources for a workload.
 ///

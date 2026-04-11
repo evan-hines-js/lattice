@@ -17,9 +17,9 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::ByteString;
 
 use kube::CustomResourceExt;
-use lattice_crd::crd::{LatticeCluster, ProviderType};
 use lattice_common::{OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET};
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_DOCKERCONFIG};
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 
 use super::types::ManifestGenerator;
 

@@ -911,7 +911,9 @@ impl EndpointsSpec {
             return Err(crate::ValidationError::new("grpc_port must be non-zero"));
         }
         if self.bootstrap_port == 0 {
-            return Err(crate::ValidationError::new("bootstrap_port must be non-zero"));
+            return Err(crate::ValidationError::new(
+                "bootstrap_port must be non-zero",
+            ));
         }
         if self.proxy_port == 0 {
             return Err(crate::ValidationError::new("proxy_port must be non-zero"));
@@ -1095,7 +1097,9 @@ impl CredentialSpec {
     /// Validate required fields. Returns an error if `id` or `provider` is empty.
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         if self.id.is_empty() {
-            return Err(crate::ValidationError::new("credentials.id cannot be empty"));
+            return Err(crate::ValidationError::new(
+                "credentials.id cannot be empty",
+            ));
         }
         if self.provider.is_empty() {
             return Err(crate::ValidationError::new(

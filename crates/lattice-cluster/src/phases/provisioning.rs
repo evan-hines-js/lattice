@@ -13,10 +13,10 @@ use kube::{Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_cell::patch_kubeconfig_for_proxy;
-use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 use lattice_common::events::{actions, reasons};
 use lattice_common::{capi_namespace, lattice_svc_dns, Error, CELL_SERVICE_NAME};
 use lattice_core::DEFAULT_PROXY_PORT;
+use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
 use crate::controller::Context;
 use crate::phases::update_status;

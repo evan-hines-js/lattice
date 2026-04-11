@@ -18,15 +18,15 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, info, instrument, warn};
 
 use lattice_cedar::{MeshWildcardRequest, PolicyEngine, WildcardDirection};
+use lattice_common::kube_utils::OwnerReference;
+use lattice_common::mesh;
+use lattice_common::status_check;
+use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 use lattice_crd::crd::{
     AppliedResourceRef, Condition, ConditionStatus, LatticeMeshMember, LatticeMeshMemberSpec,
     LatticeMeshMemberStatus, MeshMemberPhase, MeshMemberScope, MeshMemberTarget,
 };
 use lattice_graph::{compute_edge_hash, ServiceGraph};
-use lattice_common::kube_utils::OwnerReference;
-use lattice_common::mesh;
-use lattice_common::status_check;
-use lattice_common::{CrdKind, CrdRegistry, ReconcileError};
 
 use crate::ingress::{IngressCompiler, WaypointCompiler};
 use crate::policy::PolicyCompiler;

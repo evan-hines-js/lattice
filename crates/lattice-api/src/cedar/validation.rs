@@ -13,9 +13,9 @@ use kube::{Client, ResourceExt};
 use lattice_cedar::PolicyEngine;
 use tracing::{debug, info, warn};
 
-use lattice_crd::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
 use lattice_common::{ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::{CedarPolicy, CedarPolicyPhase, CedarPolicyStatus};
 
 /// Controller context for CedarPolicy validation + policy engine reload
 pub struct CedarValidationContext {
