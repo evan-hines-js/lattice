@@ -54,14 +54,15 @@ else
 fi
 usermod -aG docker "$REAL_USER"
 
-# Configure Docker DNS
+# Configure Docker DNS and insecure registries for local testing
 mkdir -p /etc/docker
-if [ ! -f /etc/docker/daemon.json ]; then
-    cat > /etc/docker/daemon.json <<'EOF'
-{"dns": ["8.8.8.8", "1.1.1.1"]}
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "dns": ["8.8.8.8", "1.1.1.1"],
+  "insecure-registries": ["10.0.0.131:5555", "10.0.0.131:5556", "10.0.0.131:5557"]
+}
 EOF
-    systemctl restart docker
-fi
+systemctl restart docker
 
 # ---- Rust ----
 echo "=== Installing Rust ==="

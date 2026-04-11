@@ -25,7 +25,7 @@ const SIG_TEST_NS: &str = "image-sig-test";
 const LATTICE_NS: &str = "lattice-system";
 const SECRETS_NS: &str = "lattice-secrets";
 const IMAGE_PROVIDER_NAME: &str = "sig-test-registry";
-const LOCAL_REGISTRY: &str = "10.0.0.131:5555";
+const LOCAL_REGISTRY: &str = "10.0.0.131:5557";
 
 /// Run all image signature verification tests.
 pub async fn run_image_signature_tests(kubeconfig: &str) -> Result<(), String> {

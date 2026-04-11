@@ -80,6 +80,16 @@ services:
     networks:
       - lattice
 
+  test-registry:
+    image: registry:2
+    container_name: lattice-test-registry
+    ports:
+      - "5557:5000"
+    volumes:
+      - test-registry-data:/var/lib/registry
+    networks:
+      - lattice
+
   pihole:
     image: pihole/pihole:2024.07.0
     container_name: lattice-pihole
@@ -105,6 +115,7 @@ volumes:
   pihole-data:
   registry-mirror-data:
   ghcr-mirror-data:
+  test-registry-data:
 
 networks:
   lattice:
