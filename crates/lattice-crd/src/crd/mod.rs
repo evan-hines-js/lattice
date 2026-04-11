@@ -62,7 +62,7 @@ pub use infra_provider::{
 };
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
-    DnsConfig, IssuerType, VaultIssuerSpec,
+    IssuerType, VaultIssuerSpec,
 };
 pub use job::{
     ConcurrencyPolicy, JobPhase, JobTaskSpec, LatticeJob, LatticeJobSpec, LatticeJobStatus,
@@ -159,19 +159,4 @@ pub fn preserve_unknown_fields(_gen: &mut schemars::SchemaGenerator) -> schemars
         "type": "object",
         "x-kubernetes-preserve-unknown-fields": true
     })
-}
-
-/// Validate that a string is a valid K8s DNS label.
-///
-/// Sanitizes the input via [`sanitize_dns_label`] and checks that the result
-/// matches the original. `field` is used in error messages to identify
-/// what kind of name failed (e.g. "container name", "port name").
-pub fn validate_dns_label(name: &str, field: &str) -> Result<(), String> {
-    match crate::sanitize_dns_label(name) {
-        Some(ref sanitized) if sanitized == name => Ok(()),
-        _ => Err(format!(
-            "{} '{}' is not a valid DNS label (must be lowercase alphanumeric with hyphens, max 63 chars)",
-            field, name
-        )),
-    }
 }
