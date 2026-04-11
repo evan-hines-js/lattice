@@ -517,29 +517,40 @@ async fn test_coredns_forwarding(kubeconfig: &str) -> Result<(), String> {
         TEST_ZONE, resolver
     );
 
-    // Add a test record to PiHole via its API
+    // Add a test record to PiHole — delete first to be idempotent.
     // Run ephemeral pods in kube-system to bypass Cilium default-deny policies.
+    let pihole_api = format!(
+        "{pihole}/admin/api.php?customdns&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_API_TOKEN}"
+    );
+
     let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
         "delete", "pod", "-n", "kube-system", "dns-test", "--ignore-not-found",
     ]).await;
-
-    let add_result = run_kubectl(&[
+    let _ = run_kubectl(&[
         "--kubeconfig", kubeconfig,
         "run", "dns-test", "-n", "kube-system", "--rm", "-i", "--restart=Never",
         "--image=curlimages/curl:8.5.0",
-        "--", "curl", "-s", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}",
-        "-d", "",
-        &format!(
-            "{pihole}/admin/api.php?customdns&action=add&domain=test-svc.{TEST_ZONE}&ip=10.99.99.99&auth={PIHOLE_API_TOKEN}"
-        ),
+        "--", "curl", "-s", "-m", "10", "-d", "",
+        &format!("{pihole_api}&action=delete"),
+    ]).await;
+
+    let _ = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "delete", "pod", "-n", "kube-system", "dns-add", "--ignore-not-found",
+    ]).await;
+    let add_result = run_kubectl(&[
+        "--kubeconfig", kubeconfig,
+        "run", "dns-add", "-n", "kube-system", "--rm", "-i", "--restart=Never",
+        "--image=curlimages/curl:8.5.0",
+        "--", "curl", "-s", "-m", "10", "-d", "",
+        &format!("{pihole_api}&action=add"),
     ]).await?;
 
-    // kubectl run --rm appends 'pod "name" deleted' to stdout; check prefix
-    if !add_result.starts_with("200") {
+    if !add_result.contains("success") || add_result.contains("false") {
         return Err(format!(
-            "PiHole API returned {} (expected 200) when adding test record",
-            add_result.trim()
+            "PiHole API failed to add test record: {}",
+            super::super::helpers::truncate(&add_result, 200)
         ));
     }
     info!("[DNS] Added test record test-svc.{TEST_ZONE} -> 10.99.99.99 in PiHole");
