@@ -77,9 +77,12 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock versions.toml ./
 COPY crates ./crates
 COPY scripts/runtime ./scripts
-# Pre-downloaded artifacts so build.rs skips network downloads
-COPY test-charts ./test-charts
-COPY test-providers ./test-providers
+# Pre-downloaded artifacts so build.rs skips network downloads.
+# These are gitignored (large binaries), so they may not exist in CI.
+# Create empty dirs as fallback — build.rs will download if missing.
+RUN mkdir -p test-charts test-providers
+COPY test-chart[s] ./test-charts/
+COPY test-provider[s] ./test-providers/
 
 # Build with BuildKit cache mounts for incremental compilation
 # - registry/git: caches downloaded crates
