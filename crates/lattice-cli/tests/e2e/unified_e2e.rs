@@ -356,6 +356,19 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Image Signature: cosign verification + Cedar skip
+    {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Image signature",
+            tokio::spawn(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::image_signature::run_image_signature_tests(&kc).await
+            }),
+        ));
+    }
+
     // Gateway API: ingress routing through Istio gateway
     {
         let kc = ctx.require_workload()?.to_string();
