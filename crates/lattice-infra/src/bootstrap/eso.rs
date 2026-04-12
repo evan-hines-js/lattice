@@ -59,7 +59,8 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
         lmm(
@@ -78,7 +79,8 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
         lmm(
@@ -97,7 +99,8 @@ pub fn generate_eso_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: None,
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
     ]

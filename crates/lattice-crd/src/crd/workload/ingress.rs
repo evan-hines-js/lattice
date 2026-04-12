@@ -22,7 +22,6 @@ pub struct IngressSpec {
     pub routes: BTreeMap<String, RouteSpec>,
 }
 
-
 /// Route kind — which Gateway API route resource to generate.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[non_exhaustive]
@@ -109,7 +108,9 @@ impl AdvertiseConfig {
                 let parts: Vec<&str> = s.splitn(2, '/').collect();
                 if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
                     Some(crate::trust_domain::principal(
-                        trust_domain, parts[0], parts[1],
+                        trust_domain,
+                        parts[0],
+                        parts[1],
                     ))
                 } else {
                     tracing::warn!(

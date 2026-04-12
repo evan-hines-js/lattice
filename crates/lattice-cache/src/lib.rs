@@ -318,7 +318,12 @@ impl ResourceCache {
             if let Some(ref trust) = item.spec.trust {
                 if trust.enforce {
                     let name = item.metadata.name.clone().unwrap_or_default();
-                    result.push((name, item.spec.registry.clone(), item.spec.insecure, trust.clone()));
+                    result.push((
+                        name,
+                        item.spec.registry.clone(),
+                        item.spec.insecure,
+                        trust.clone(),
+                    ));
                 }
             }
         }

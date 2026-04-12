@@ -206,7 +206,8 @@ fn setup_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
             depends_all: true,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member("default", &name, &mm_spec);
     }

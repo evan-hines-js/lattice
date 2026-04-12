@@ -1795,7 +1795,8 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         }
     }
 
@@ -1927,7 +1928,8 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
 
         graph.put_mesh_member("default", "kube-api-access", &spec);
@@ -2258,7 +2260,8 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: Some("custom-sa".to_string()),
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 
@@ -2322,7 +2325,8 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member("ns", "frontend", &mm_spec);
 

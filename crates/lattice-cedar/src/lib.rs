@@ -60,10 +60,10 @@ pub use entities::{
 pub use external_endpoint_auth::{
     ExternalEndpointAuthzRequest, ExternalEndpointAuthzResult, ExternalEndpointDenial,
 };
+pub use image_auth::{ImageDenial, ImageVerifyRequest, ImageVerifyResult};
 pub use mesh_auth::{MeshWildcardRequest, MeshWildcardResult, WildcardDirection};
 pub use secret_auth::{SecretAuthzRequest, SecretAuthzResult, SecretDenial};
 pub use security_auth::{
     SecurityAuthzRequest, SecurityAuthzResult, SecurityDenial, SecurityOverrideRequest,
 };
-pub use image_auth::{ImageDenial, ImageVerifyRequest, ImageVerifyResult};
 pub use volume_auth::{VolumeAuthzRequest, VolumeAuthzResult, VolumeDenial};

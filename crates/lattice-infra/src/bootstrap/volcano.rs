@@ -153,7 +153,8 @@ pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: Some("volcano-admission".to_string()),
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
         lmm(
@@ -172,7 +173,8 @@ pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: Some("volcano-controllers".to_string()),
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
         lmm(
@@ -191,7 +193,8 @@ pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
                 ingress: None,
                 service_account: Some("volcano-scheduler".to_string()),
                 depends_all: false,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         ),
     ]

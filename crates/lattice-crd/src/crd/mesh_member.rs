@@ -412,7 +412,8 @@ mod tests {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         }
     }
 

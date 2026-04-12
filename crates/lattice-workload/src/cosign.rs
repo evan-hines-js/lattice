@@ -46,9 +46,7 @@ pub async fn verify_image(image: &str, key_pem: &[u8], insecure: bool) -> Verify
     let (cosign_image, source_digest) = match client.triangulate(&oci_ref, &auth).await {
         Ok(result) => result,
         Err(e) => {
-            return VerifyResult::NotSigned(format!(
-                "no cosign signature found for {image}: {e}"
-            ))
+            return VerifyResult::NotSigned(format!("no cosign signature found for {image}: {e}"))
         }
     };
 

@@ -185,7 +185,8 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
             depends_all: true,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member("default", &name, &mm_spec);
     }
@@ -233,7 +234,8 @@ fn build_egress_graph(n: usize, egress_per_service: usize) -> ServiceGraph {
             depends_all: false,
             ingress: None,
             service_account: None,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member("default", &format!("svc-{}", i), &mm_spec);
     }

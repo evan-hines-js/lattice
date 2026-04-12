@@ -1194,10 +1194,7 @@ async fn resolve_image_trust(
             // Secret name: {provider_name}-trust-{authority_name}-credentials
             // (set by ImageProvider controller via reconcile_credentials)
             let secret_name = format!("{}-trust-{}-credentials", provider_name, authority.name);
-            match kube
-                .get_secret(&secret_name, "lattice-system")
-                .await
-            {
+            match kube.get_secret(&secret_name, "lattice-system").await {
                 Ok(Some(secret_data)) => {
                     if let Some(key_bytes) = secret_data.values().next() {
                         authorities.push((authority.name.clone(), key_bytes.clone()));

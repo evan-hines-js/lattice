@@ -69,27 +69,24 @@ impl PolicyEngine {
             }
         };
 
-        let principal = match build_service_entity(
-            &request.namespace,
-            &request.service_name,
-            &request.kind,
-        ) {
-            Ok(e) => e,
-            Err(e) => {
-                return ImageVerifyResult {
-                    denied: request
-                        .unsigned_images
-                        .iter()
-                        .map(|image| ImageDenial {
-                            image: image.clone(),
-                            reason: DenialReason::InternalError(format!(
-                                "failed to build Cedar principal: {e}"
-                            )),
-                        })
-                        .collect(),
-                };
-            }
-        };
+        let principal =
+            match build_service_entity(&request.namespace, &request.service_name, &request.kind) {
+                Ok(e) => e,
+                Err(e) => {
+                    return ImageVerifyResult {
+                        denied: request
+                            .unsigned_images
+                            .iter()
+                            .map(|image| ImageDenial {
+                                image: image.clone(),
+                                reason: DenialReason::InternalError(format!(
+                                    "failed to build Cedar principal: {e}"
+                                )),
+                            })
+                            .collect(),
+                    };
+                }
+            };
 
         let mut denied = Vec::new();
 

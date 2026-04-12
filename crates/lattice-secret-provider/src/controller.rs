@@ -425,7 +425,8 @@ async fn ensure_external_egress_lmm(
             depends_all: false,
             ingress: None,
             service_account: Some("external-secrets".to_string()),
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         },
     );
     lmm.metadata.namespace = Some(ESO_NAMESPACE.to_string());

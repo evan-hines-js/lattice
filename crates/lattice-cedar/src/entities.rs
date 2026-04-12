@@ -305,14 +305,8 @@ pub(crate) fn build_image_ref_entity(image: &str) -> Result<Entity> {
         "registry".to_string(),
         RestrictedExpression::new_string(registry),
     );
-    attrs.insert(
-        "name".to_string(),
-        RestrictedExpression::new_string(name),
-    );
-    attrs.insert(
-        "tag".to_string(),
-        RestrictedExpression::new_string(tag),
-    );
+    attrs.insert("name".to_string(), RestrictedExpression::new_string(name));
+    attrs.insert("tag".to_string(), RestrictedExpression::new_string(tag));
 
     Entity::new(uid, attrs, HashSet::new())
         .map_err(|e| Error::Internal(format!("Failed to create image ref entity: {}", e)))

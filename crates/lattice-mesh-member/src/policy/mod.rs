@@ -647,7 +647,8 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         }
     }
 
@@ -963,7 +964,8 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member(ns, "api", &spec);
 
@@ -1034,7 +1036,8 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member(ns, "nzbget", &spec);
 
@@ -1084,7 +1087,8 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member(ns, "svc", &spec);
 
@@ -1130,7 +1134,8 @@ pub(crate) mod tests {
             ingress: None,
             service_account: None,
             depends_all: false,
-            ambient: true, advertise: None,
+            ambient: true,
+            advertise: None,
         };
         graph.put_mesh_member(ns, "svc", &spec);
 

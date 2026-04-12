@@ -83,19 +83,16 @@ async fn setup_cosign_infrastructure(kubeconfig: &str) -> Result<TestContext, St
     let priv_key_path = format!("{keypair_dir}/cosign.key");
 
     // Build a trivial test image, push to local registry
-    let signed_tag = format!(
-        "{LOCAL_REGISTRY}/sig-test:signed-{}",
-        std::process::id()
-    );
-    let unsigned_tag = format!(
-        "{LOCAL_REGISTRY}/sig-test:unsigned-{}",
-        std::process::id()
-    );
+    let signed_tag = format!("{LOCAL_REGISTRY}/sig-test:signed-{}", std::process::id());
+    let unsigned_tag = format!("{LOCAL_REGISTRY}/sig-test:unsigned-{}", std::process::id());
 
     // Create and push signed image
     let dockerfile = format!("{keypair_dir}/Dockerfile");
-    std::fs::write(&dockerfile, "FROM busybox:latest\nCMD [\"sleep\", \"infinity\"]\n")
-        .map_err(|e| format!("failed to write Dockerfile: {e}"))?;
+    std::fs::write(
+        &dockerfile,
+        "FROM busybox:latest\nCMD [\"sleep\", \"infinity\"]\n",
+    )
+    .map_err(|e| format!("failed to write Dockerfile: {e}"))?;
 
     run_docker_build(&keypair_dir, &signed_tag).await?;
     run_docker_push(&signed_tag).await?;
@@ -188,10 +185,7 @@ spec:
 // Test: Signed image accepted
 // =============================================================================
 
-async fn test_signed_image_accepted(
-    kubeconfig: &str,
-    ctx: &TestContext,
-) -> Result<(), String> {
+async fn test_signed_image_accepted(kubeconfig: &str, ctx: &TestContext) -> Result<(), String> {
     info!("[ImageSignature] Testing: signed image should be accepted...");
 
     let svc_yaml = format!(
@@ -235,10 +229,7 @@ spec:
 // Test: Unsigned image rejected
 // =============================================================================
 
-async fn test_unsigned_image_rejected(
-    kubeconfig: &str,
-    ctx: &TestContext,
-) -> Result<(), String> {
+async fn test_unsigned_image_rejected(kubeconfig: &str, ctx: &TestContext) -> Result<(), String> {
     info!("[ImageSignature] Testing: unsigned image should be rejected...");
 
     let svc_yaml = format!(
@@ -309,10 +300,16 @@ async fn test_cedar_skip_allows_unsigned(
 
     // Delete and recreate the unsigned service so the compiler re-evaluates
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "latticeservice", "unsigned-svc",
-        "-n", SIG_TEST_NS, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "latticeservice",
+        "unsigned-svc",
+        "-n",
+        SIG_TEST_NS,
+        "--ignore-not-found",
+    ])
+    .await;
 
     let svc_yaml = format!(
         r#"apiVersion: lattice.dev/v1alpha1
@@ -408,9 +405,14 @@ async fn cleanup(kubeconfig: &str) {
     info!("[ImageSignature/Cleanup] Cleaning up...");
 
     let _ = run_kubectl(&[
-        "--kubeconfig", kubeconfig,
-        "delete", "namespace", SIG_TEST_NS, "--ignore-not-found",
-    ]).await;
+        "--kubeconfig",
+        kubeconfig,
+        "delete",
+        "namespace",
+        SIG_TEST_NS,
+        "--ignore-not-found",
+    ])
+    .await;
 
     for (kind, name, ns) in [
         ("imageprovider", IMAGE_PROVIDER_NAME, LATTICE_NS),
@@ -418,9 +420,16 @@ async fn cleanup(kubeconfig: &str) {
         ("cedarpolicy", "permit-skip-sig-test", LATTICE_NS),
     ] {
         let _ = run_kubectl(&[
-            "--kubeconfig", kubeconfig,
-            "delete", kind, name, "-n", ns, "--ignore-not-found",
-        ]).await;
+            "--kubeconfig",
+            kubeconfig,
+            "delete",
+            kind,
+            name,
+            "-n",
+            ns,
+            "--ignore-not-found",
+        ])
+        .await;
     }
 
     info!("[ImageSignature/Cleanup] Done");

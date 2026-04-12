@@ -338,10 +338,7 @@ async fn check_cedar_wildcards(
     ctx: &MeshMemberContext,
 ) -> Option<String> {
     let allows_all = spec.allowed_callers.iter().any(|c| c.name == "*");
-    let has_wildcard_advertise = spec
-        .advertise
-        .as_ref()
-        .is_some_and(|a| a.is_open());
+    let has_wildcard_advertise = spec.advertise.as_ref().is_some_and(|a| a.is_open());
     let checks = [
         (allows_all, WildcardDirection::Inbound),
         (spec.depends_all, WildcardDirection::Outbound),
@@ -1157,7 +1154,8 @@ mod tests {
                 depends_all: false,
                 ingress: None,
                 service_account: None,
-                ambient: true, advertise: None,
+                ambient: true,
+                advertise: None,
             },
         )
     }

@@ -826,7 +826,8 @@ impl<'a> WorkloadCompiler<'a> {
                 ingress: self.ingress,
                 service_account: None,
                 depends_all: false,
-                ambient: true, advertise: self.advertise,
+                ambient: true,
+                advertise: self.advertise,
             },
         ));
 

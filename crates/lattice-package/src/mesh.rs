@@ -38,7 +38,8 @@ pub fn build_mesh_member(
         depends_all: false,
         ingress: None,
         service_account: None,
-        ambient: true, advertise: None,
+        ambient: true,
+        advertise: None,
     };
 
     let mut member = LatticeMeshMember::new(package_name, spec);
