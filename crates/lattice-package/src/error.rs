@@ -34,6 +34,9 @@ pub enum PackageError {
 
 impl PackageError {
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Kube(_) | Self::Helm(_))
+        matches!(
+            self,
+            Self::Kube(_) | Self::Helm(_) | Self::SecretAccessDenied(_)
+        )
     }
 }
