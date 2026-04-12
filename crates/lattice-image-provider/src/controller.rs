@@ -5,17 +5,25 @@
 //!
 //! Uses the same `ensure_credentials` path as InfraProvider and DNSProvider.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_common::status_check;
-use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
+use lattice_common::{
+    ControllerContext, ReconcileError, LABEL_MANAGED_BY, OPERATOR_NAME, REQUEUE_ERROR_SECS,
+    REQUEUE_SUCCESS_SECS,
+};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
-use lattice_crd::crd::{ImageProvider, ImageProviderPhase, ImageProviderStatus};
+use lattice_crd::crd::{
+    EgressRule, EgressTarget, ImageProvider, ImageProviderPhase, ImageProviderStatus,
+    LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget, ParsedEndpoint,
+};
 
 const FIELD_MANAGER: &str = "lattice-image-provider-controller";
 
@@ -136,6 +144,11 @@ pub async fn reconcile(
         }
     }
 
+    // Ensure the operator can reach the registry for signature verification
+    if let Err(e) = ensure_registry_egress_lmm(client, &ip).await {
+        warn!(image_provider = %name, error = %e, "Failed to ensure registry egress LMM");
+    }
+
     let status_msg = if ip.spec.credentials.is_some() {
         "Credentials synced"
     } else if ip.spec.trust.is_some() {
@@ -175,6 +188,119 @@ fn interpolate_registry(
         .iter()
         .map(|(k, v)| (k.clone(), v.replace("${registry}", registry)))
         .collect())
+}
+
+/// Ensure an egress LMM exists so the operator can reach the registry for
+/// cosign signature verification.
+///
+/// When an ImageProvider has `trust.enforce: true`, the operator needs to
+/// reach the registry to fetch signature manifests. This creates a lightweight
+/// egress-only LatticeMeshMember targeting operator pods. Without it, the
+/// mesh (Cilium CNP + Istio ServiceEntry) blocks the connection.
+///
+/// If trust is not enforced (or removed), any existing egress LMM is deleted.
+async fn ensure_registry_egress_lmm(
+    client: &Client,
+    ip: &ImageProvider,
+) -> Result<(), ReconcileError> {
+    let ip_name = ip.name_any();
+    let lmm_name = format!("egress-ip-{}", ip_name);
+    let api: Api<LatticeMeshMember> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+
+    let needs_egress = ip.spec.trust.as_ref().map(|t| t.enforce).unwrap_or(false);
+
+    if !needs_egress {
+        match api.delete(&lmm_name, &Default::default()).await {
+            Ok(_) => {
+                debug!(image_provider = %ip_name, "Deleted registry egress LMM (trust not enforced)");
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => {
+                warn!(image_provider = %ip_name, error = %e, "Failed to delete registry egress LMM");
+            }
+        }
+        return Ok(());
+    }
+
+    let ep = parse_registry_endpoint(&ip.spec.registry, ip.spec.insecure);
+
+    let mut lmm = LatticeMeshMember::new(
+        &lmm_name,
+        LatticeMeshMemberSpec {
+            target: MeshMemberTarget::Selector(BTreeMap::from([(
+                "app".to_string(),
+                OPERATOR_NAME.to_string(),
+            )])),
+            ports: vec![],
+            allowed_callers: vec![],
+            dependencies: vec![],
+            egress: vec![EgressRule::tcp(
+                EgressTarget::for_host(&ep.host),
+                vec![ep.port],
+            )],
+            allow_peer_traffic: false,
+            depends_all: false,
+            ingress: None,
+            service_account: Some(OPERATOR_NAME.to_string()),
+            ambient: true,
+            advertise: None,
+        },
+    );
+    lmm.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    lmm.metadata.labels = Some(BTreeMap::from([(
+        LABEL_MANAGED_BY.to_string(),
+        "image-provider-controller".to_string(),
+    )]));
+
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    api.patch(&lmm_name, &params, &Patch::Apply(&lmm)).await?;
+
+    info!(
+        image_provider = %ip_name,
+        lmm = %lmm_name,
+        host = %ep.host,
+        port = ep.port,
+        "Ensured egress LMM for image registry signature verification"
+    );
+    Ok(())
+}
+
+/// Parse a registry string (e.g., "ghcr.io", "10.0.0.131:5557") into host and port.
+///
+/// The `insecure` flag from the ImageProvider spec determines the protocol:
+/// insecure=true → HTTP (default port 80), insecure=false → HTTPS (default port 443).
+/// If the registry string includes an explicit port, that takes precedence.
+fn parse_registry_endpoint(registry: &str, insecure: bool) -> ParsedEndpoint {
+    let (protocol, default_port) = if insecure {
+        ("http", 80u16)
+    } else {
+        ("https", 443u16)
+    };
+
+    // Try ParsedEndpoint::parse with protocol prefix
+    if let Some(ep) = ParsedEndpoint::parse(&format!("{}://{}", protocol, registry)) {
+        return ep;
+    }
+
+    // Fallback: split host:port manually
+    if let Some((host, port_str)) = registry.rsplit_once(':') {
+        if let Ok(port) = port_str.parse::<u16>() {
+            return ParsedEndpoint {
+                protocol: protocol.to_string(),
+                host: host.to_string(),
+                port,
+                url: format!("{}://{}", protocol, registry),
+            };
+        }
+    }
+
+    // No explicit port — use protocol default
+    ParsedEndpoint {
+        protocol: protocol.to_string(),
+        host: registry.to_string(),
+        port: default_port,
+        url: format!("{}://{}", protocol, registry),
+    }
 }
 
 async fn update_status(
@@ -224,6 +350,37 @@ mod tests {
 
     fn sample_provider(provider_type: ImageProviderType, registry: &str) -> ImageProvider {
         ImageProvider::new("test", ImageProviderSpec::new(provider_type, registry))
+    }
+
+    #[test]
+    fn parse_registry_ip_with_port_insecure() {
+        let ep = super::parse_registry_endpoint("10.0.0.131:5557", true);
+        assert_eq!(ep.host, "10.0.0.131");
+        assert_eq!(ep.port, 5557);
+        assert_eq!(ep.protocol, "http");
+    }
+
+    #[test]
+    fn parse_registry_hostname_no_port_secure() {
+        let ep = super::parse_registry_endpoint("ghcr.io", false);
+        assert_eq!(ep.host, "ghcr.io");
+        assert_eq!(ep.port, 443);
+        assert_eq!(ep.protocol, "https");
+    }
+
+    #[test]
+    fn parse_registry_hostname_no_port_insecure() {
+        let ep = super::parse_registry_endpoint("registry.local", true);
+        assert_eq!(ep.host, "registry.local");
+        assert_eq!(ep.port, 80);
+        assert_eq!(ep.protocol, "http");
+    }
+
+    #[test]
+    fn parse_registry_hostname_with_port() {
+        let ep = super::parse_registry_endpoint("registry.example.com:5000", false);
+        assert_eq!(ep.host, "registry.example.com");
+        assert_eq!(ep.port, 5000);
     }
 
     #[test]

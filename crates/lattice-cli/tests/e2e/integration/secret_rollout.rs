@@ -506,7 +506,15 @@ async fn wait_for_secret_content(
     .await
 }
 
-/// Wait for a Deployment to have all replicas ready.
+/// Wait for a Deployment to be fully drained: latest generation observed,
+/// every replica count equals desired, and the live Running pod count matches.
+///
+/// `kubectl rollout status` returns OK as soon as availability is satisfied,
+/// which on a `replicas: 1` Deployment with `maxSurge: 25%` can leave a
+/// surge pod from the previous ReplicaSet still Terminating. That window is
+/// what made the secret_rollout Test 2 baseline flaky — we'd capture two pod
+/// UIDs while the surge pod was on its way out, then assert "pods rolled"
+/// once it finally went away.
 async fn wait_for_deployment_ready(
     kubeconfig: &str,
     namespace: &str,
@@ -517,7 +525,7 @@ async fn wait_for_deployment_ready(
     let deploy_name = name.to_string();
 
     wait_for_condition(
-        &format!("Deployment {}/{} to be ready", namespace, name),
+        &format!("Deployment {}/{} to be fully drained", namespace, name),
         DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
@@ -525,18 +533,51 @@ async fn wait_for_deployment_ready(
             let ns = ns.clone();
             let deploy_name = deploy_name.clone();
             async move {
-                let result = run_kubectl(&[
+                let raw = match run_kubectl(&[
                     "--kubeconfig",
                     &kc,
-                    "rollout",
-                    "status",
-                    &format!("deployment/{}", deploy_name),
+                    "get",
+                    "deployment",
+                    &deploy_name,
                     "-n",
                     &ns,
-                    "--timeout=5s",
+                    "-o",
+                    "jsonpath={.metadata.generation}|{.status.observedGeneration}|{.spec.replicas}|{.status.replicas}|{.status.updatedReplicas}|{.status.availableReplicas}",
                 ])
-                .await;
-                Ok(result.is_ok())
+                .await
+                {
+                    Ok(s) => s,
+                    Err(_) => return Ok(false),
+                };
+
+                let parts: Vec<&str> = raw.trim().split('|').collect();
+                if parts.len() != 6 {
+                    return Ok(false);
+                }
+                let parse = |s: &str| s.parse::<i64>().unwrap_or(-1);
+                let gen = parse(parts[0]);
+                let observed = parse(parts[1]);
+                let desired = parse(parts[2]);
+                let total = parse(parts[3]);
+                let updated = parse(parts[4]);
+                let available = parse(parts[5]);
+
+                if desired < 0
+                    || observed < gen
+                    || total != desired
+                    || updated != desired
+                    || available != desired
+                {
+                    return Ok(false);
+                }
+
+                // Final guard: the deployment status fields can satisfy the
+                // checks above while a Terminating pod from the old ReplicaSet
+                // is still in Running phase. Wait until the live Running pod
+                // count matches desired so the test can capture a stable
+                // baseline.
+                let pods = get_pod_uids(&kc, &ns, &deploy_name).await?;
+                Ok(pods.len() as i64 == desired)
             }
         },
     )
