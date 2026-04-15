@@ -481,7 +481,6 @@ mod tests {
             listen_port: None,
             rules: None,
             tls: None,
-            advertise: None,
         }
     }
 
@@ -525,7 +524,6 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -545,7 +543,6 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -565,7 +562,6 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -637,7 +633,6 @@ mod tests {
                             kind: None,
                         }),
                     }),
-                    advertise: None,
                 },
             )]),
         };
@@ -688,7 +683,6 @@ mod tests {
                         }],
                     }]),
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -773,31 +767,6 @@ mod tests {
             routes: BTreeMap::from([("public".to_string(), http_route(vec!["api.example.com"]))]),
         };
         assert!(spec.validate(&single_port()).is_ok());
-    }
-
-    #[test]
-    fn advertise_defaults_to_none() {
-        let json = r#"{ "hosts": ["api.example.com"] }"#;
-        let route: RouteSpec = serde_json::from_str(json).unwrap();
-        assert!(route.advertise.is_none());
-    }
-
-    #[test]
-    fn advertise_wildcard_roundtrips() {
-        let route = RouteSpec {
-            kind: RouteKind::HTTPRoute,
-            hosts: vec!["api.example.com".to_string()],
-            port: None,
-            listen_port: None,
-            rules: None,
-            tls: None,
-            advertise: Some(AdvertiseConfig {
-                allowed_services: vec!["*".to_string()],
-            }),
-        };
-        let json = serde_json::to_string(&route).unwrap();
-        let parsed: RouteSpec = serde_json::from_str(&json).unwrap();
-        assert!(parsed.advertise.unwrap().is_open());
     }
 
     #[test]

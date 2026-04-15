@@ -18,7 +18,6 @@
 
 use std::time::Duration;
 
-use rand::Rng;
 use tracing::{error, warn};
 
 /// Configuration for operations that may fail transiently.
@@ -129,7 +128,7 @@ where
                 }
 
                 // Add jitter: 0.5x to 1.5x of the delay
-                let jitter = rand::thread_rng().gen_range(0.5..1.5);
+                let jitter = rand::random_range(0.5..1.5);
                 let jittered_delay = Duration::from_secs_f64(delay.as_secs_f64() * jitter);
 
                 warn!(

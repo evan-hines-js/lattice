@@ -245,7 +245,6 @@ impl CertIssuerSpec {
 mod tests {
     use super::*;
     use crate::crd::CredentialSpec;
-    use std::collections::BTreeMap;
 
     fn make_issuer(name: &str, spec: CertIssuerSpec) -> CertIssuer {
         CertIssuer::new(name, spec)
@@ -546,48 +545,4 @@ mod tests {
         assert_eq!(spec, parsed);
     }
 
-    // =========================================================================
-    // DnsConfig Validation (unchanged)
-    // =========================================================================
-
-    fn with_provider(key: &str, value: &str) -> BTreeMap<String, String> {
-        BTreeMap::from([(key.to_string(), value.to_string())])
-    }
-
-    #[test]
-    fn dns_config_valid() {
-        let config = DnsConfig {
-            providers: with_provider("public", "route53-prod"),
-        };
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn dns_config_empty_ref_fails() {
-        let config = DnsConfig {
-            providers: with_provider("public", ""),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn dns_config_invalid_key_fails() {
-        let config = DnsConfig {
-            providers: BTreeMap::from([("My_Provider".to_string(), "route53-prod".to_string())]),
-        };
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn dns_config_json_roundtrip() {
-        let config = DnsConfig {
-            providers: BTreeMap::from([
-                ("public".to_string(), "route53-prod".to_string()),
-                ("internal".to_string(), "cloudflare-internal".to_string()),
-            ]),
-        };
-        let json = serde_json::to_string(&config).expect("serialize");
-        let parsed: DnsConfig = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(config, parsed);
-    }
 }

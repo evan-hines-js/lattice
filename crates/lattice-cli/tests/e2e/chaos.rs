@@ -22,7 +22,7 @@ use std::time::Duration;
 use kube::Api;
 use parking_lot::{Mutex, RwLock};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -200,18 +200,18 @@ impl ChaosTargets {
         if targets.is_empty() {
             return None;
         }
-        let idx = self.rng.lock().gen_range(0..targets.len());
+        let idx = self.rng.lock().random_range(0..targets.len());
         Some(targets[idx].clone())
     }
 
     /// Generate a random delay within the given range (uses seeded RNG)
     pub fn random_delay(&self, min: u64, max: u64) -> u64 {
-        self.rng.lock().gen_range(min..=max)
+        self.rng.lock().random_range(min..=max)
     }
 
     /// Generate a random probability check (uses seeded RNG)
     pub fn random_probability(&self) -> f32 {
-        self.rng.lock().gen::<f32>()
+        self.rng.lock().random::<f32>()
     }
 
     /// Get all targets as a snapshot

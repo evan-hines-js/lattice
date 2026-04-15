@@ -12,7 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use serde_json::{json, Value};
 
 use lattice_template::{expand, ExpandOptions, SecretMode, TemplateContext};

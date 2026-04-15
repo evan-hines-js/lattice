@@ -455,7 +455,6 @@ mod tests {
                             kind: None,
                         }),
                     }),
-                    advertise: None,
                 },
             )]),
         });

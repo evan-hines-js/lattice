@@ -839,7 +839,6 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls,
-                    advertise: None,
                 },
             )]),
         }
@@ -984,7 +983,6 @@ mod tests {
                         ],
                     }]),
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -1039,7 +1037,6 @@ mod tests {
                         }],
                     }]),
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -1104,7 +1101,6 @@ mod tests {
                         secret_name: Some("my-custom-cert".to_string()),
                         issuer_ref: None,
                     }),
-                    advertise: None,
                 },
             )]),
         };
@@ -1139,7 +1135,6 @@ mod tests {
                     listen_port: None,
                     rules: None,
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -1149,6 +1144,7 @@ mod tests {
             &ingress,
             &single_port(),
             "lattice.abcd1234",
+            None,
         )
         .unwrap();
 
@@ -1175,7 +1171,6 @@ mod tests {
                     listen_port: Some(9090),
                     rules: None,
                     tls: None,
-                    advertise: None,
                 },
             )]),
         };
@@ -1216,7 +1211,6 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                        advertise: None,
                     },
                 ),
                 (
@@ -1228,7 +1222,6 @@ mod tests {
                         listen_port: None,
                         rules: None,
                         tls: None,
-                        advertise: None,
                     },
                 ),
                 (
@@ -1240,7 +1233,6 @@ mod tests {
                         listen_port: Some(9090),
                         rules: None,
                         tls: None,
-                        advertise: None,
                     },
                 ),
             ]),
@@ -1542,6 +1534,7 @@ mod tests {
             &ingress_a,
             &single_port(),
             "lattice.abcd1234",
+            None,
         )
         .unwrap();
         let out_b = IngressCompiler::compile(
@@ -1550,6 +1543,7 @@ mod tests {
             &ingress_b,
             &single_port(),
             "lattice.abcd1234",
+            None,
         )
         .unwrap();
 

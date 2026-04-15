@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::thread;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::prelude::*;
 
 use lattice_crd::crd::{
@@ -150,13 +152,13 @@ fn setup_realistic_graph(n: usize) -> ServiceGraph {
     for i in 0..n {
         let max_deps = 4.min(n.saturating_sub(1));
         let num_deps = if max_deps > 0 {
-            rng.gen_range(0..=max_deps)
+            rng.random_range(0..=max_deps)
         } else {
             0
         };
         let dep_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
-            .choose_multiple(&mut rng, num_deps);
+            .sample(&mut rng, num_deps);
         all_deps.push(dep_indices);
     }
 
@@ -268,7 +270,7 @@ fn bench_get_service(c: &mut Criterion) {
             let graph = setup_realistic_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_service("default", &format!("svc-{}", idx)));
             });
         });
@@ -312,7 +314,7 @@ fn bench_get_dependencies(c: &mut Criterion) {
             let graph = setup_chain_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_dependencies("default", &format!("svc-{}", idx)));
             });
         });
@@ -321,7 +323,7 @@ fn bench_get_dependencies(c: &mut Criterion) {
             let graph = setup_star_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_dependencies("default", &format!("spoke-{}", idx)));
             });
         });
@@ -347,7 +349,7 @@ fn bench_get_dependents(c: &mut Criterion) {
             let graph = setup_realistic_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_dependents("default", &format!("svc-{}", idx)));
             });
         });
@@ -370,7 +372,7 @@ fn bench_get_active_edges(c: &mut Criterion) {
             let graph = setup_realistic_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_active_inbound_edges("default", &format!("svc-{}", idx)));
             });
         });
@@ -379,7 +381,7 @@ fn bench_get_active_edges(c: &mut Criterion) {
             let graph = setup_realistic_graph(size);
             let mut rng = StdRng::seed_from_u64(99);
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(graph.get_active_outbound_edges("default", &format!("svc-{}", idx)));
             });
         });
@@ -549,7 +551,7 @@ fn bench_reconcile_pattern(c: &mut Criterion) {
                 let mut rng = StdRng::seed_from_u64(99);
 
                 b.iter(|| {
-                    let idx = rng.gen_range(0..size);
+                    let idx = rng.random_range(0..size);
                     let name = format!("svc-{}", idx);
 
                     let _ = black_box(graph.get_service("default", &name));

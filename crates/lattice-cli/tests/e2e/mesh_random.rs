@@ -123,10 +123,10 @@ impl RandomMesh {
     pub fn generate(config: &RandomMeshConfig) -> Self {
         let mut rng = match config.seed {
             Some(seed) => StdRng::seed_from_u64(seed),
-            None => StdRng::from_entropy(),
+            None => StdRng::from_seed(rand::random()),
         };
 
-        let num_services = rng.gen_range(config.min_services..=config.max_services);
+        let num_services = rng.random_range(config.min_services..=config.max_services);
         info!(
             "[Random Mesh] Generating {} services across {} layers...",
             num_services, config.num_layers
@@ -182,7 +182,7 @@ impl RandomMesh {
                 };
                 let remaining_layers = num_layers - i - 1;
                 let max_size = remaining.saturating_sub(remaining_layers);
-                let size = (base_size + rng.gen_range(0..=variance)).min(max_size);
+                let size = (base_size + rng.random_range(0..=variance)).min(max_size);
                 remaining -= size;
                 size
             };
@@ -213,7 +213,7 @@ impl RandomMesh {
             let is_traffic_generator = layer_idx == 0;
             for name in layer {
                 let allows_all_inbound =
-                    !is_traffic_generator && rng.gen::<f64>() < config.wildcard_probability;
+                    !is_traffic_generator && rng.random::<f64>() < config.wildcard_probability;
                 services.insert(
                     name.clone(),
                     RandomService {
@@ -243,7 +243,7 @@ impl RandomMesh {
             for source_name in &layers[layer_idx] {
                 for target_layer in layers.iter().skip(layer_idx + 1) {
                     for target_name in target_layer {
-                        if rng.gen::<f64>() < config.outbound_probability {
+                        if rng.random::<f64>() < config.outbound_probability {
                             services
                                 .get_mut(source_name)
                                 .expect("source service should exist")
@@ -254,7 +254,7 @@ impl RandomMesh {
                             let is_bilateral = if target_allows_all {
                                 true
                             } else {
-                                let bilateral = rng.gen::<f64>() < config.bilateral_probability;
+                                let bilateral = rng.random::<f64>() < config.bilateral_probability;
                                 if bilateral {
                                     services
                                         .get_mut(target_name)
@@ -285,7 +285,7 @@ impl RandomMesh {
                             .filter(|t| !services[source_name].outbound.contains(*t))
                             .collect();
                         let sample_size = not_dependent.len().min(3);
-                        for target_name in not_dependent.choose_multiple(rng, sample_size) {
+                        for target_name in not_dependent.sample(rng, sample_size) {
                             expected_connections.push((
                                 source_name.clone(),
                                 (*target_name).clone(),
@@ -364,7 +364,7 @@ impl RandomMesh {
 
         for source_name in &traffic_generators {
             for ext_name in &ext_names {
-                if rng.gen::<f64>() < config.external_outbound_probability {
+                if rng.random::<f64>() < config.external_outbound_probability {
                     services
                         .get_mut(source_name)
                         .expect("source service should exist")
@@ -384,7 +384,7 @@ impl RandomMesh {
                 .cloned()
                 .collect();
             for ext_name in not_dependent
-                .choose_multiple(rng, not_dependent.len().min(2))
+                .sample(rng, not_dependent.len().min(2))
                 .cloned()
             {
                 expected_connections.push((source_name.clone(), ext_name, false, true));

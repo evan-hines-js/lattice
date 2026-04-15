@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rand::prelude::*;
 
 use lattice_crd::crd::{
@@ -94,13 +96,13 @@ fn build_realistic_graph(n: usize) -> ServiceGraph {
     for i in 0..n {
         let max_deps = 4.min(n.saturating_sub(1));
         let num_deps = if max_deps > 0 {
-            rng.gen_range(1..=max_deps)
+            rng.random_range(1..=max_deps)
         } else {
             0
         };
         let dep_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
-            .choose_multiple(&mut rng, num_deps);
+            .sample(&mut rng, num_deps);
         all_deps.push(dep_indices);
     }
 
@@ -137,26 +139,26 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
     for i in 0..n {
         let max_deps = 3.min(n.saturating_sub(1));
         let num_deps = if max_deps > 0 {
-            rng.gen_range(1..=max_deps)
+            rng.random_range(1..=max_deps)
         } else {
             0
         };
         let dep_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
-            .choose_multiple(&mut rng, num_deps);
+            .sample(&mut rng, num_deps);
 
         let dep_names: Vec<String> = dep_indices.iter().map(|j| format!("svc-{}", j)).collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
 
         let max_callers = 4.min(n.saturating_sub(1));
         let num_callers = if max_callers > 0 {
-            rng.gen_range(1..=max_callers)
+            rng.random_range(1..=max_callers)
         } else {
             0
         };
         let caller_indices: Vec<usize> = (0..n)
             .filter(|&j| j != i)
-            .choose_multiple(&mut rng, num_callers);
+            .sample(&mut rng, num_callers);
         let caller_names: Vec<String> = caller_indices
             .iter()
             .map(|j| format!("svc-{}", j))
@@ -257,7 +259,7 @@ fn bench_compile_realistic(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("realistic", size), &size, |b, &size| {
             b.iter(|| {
-                let idx = rng.gen_range(0..size);
+                let idx = rng.random_range(0..size);
                 black_box(compiler.compile(&format!("svc-{}", idx), "default"));
             });
         });
@@ -379,7 +381,7 @@ fn bench_compile_extreme(c: &mut Criterion) {
             &size,
             |b, &size| {
                 b.iter(|| {
-                    let idx = rng.gen_range(0..size);
+                    let idx = rng.random_range(0..size);
                     black_box(compiler.compile(&format!("svc-{}", idx), "default"));
                 });
             },

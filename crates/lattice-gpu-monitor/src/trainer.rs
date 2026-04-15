@@ -22,7 +22,7 @@ use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{Adam, AdamConfig, GradientsParams, Optimizer};
 use burn::record::{FullPrecisionSettings, Record};
 use burn::tensor::Tensor;
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use tracing::{info, warn};
 
 use crate::config::{
@@ -152,9 +152,9 @@ impl OnlineTrainer {
         let replay_count = REPLAY_SAMPLES_PER_STEP.min(self.replay_buffer.len());
         if replay_count > 0 {
             let buf_slice: Vec<&Vec<f32>> = self.replay_buffer.iter().collect();
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rngs::ThreadRng::default();
             let samples: Vec<Vec<f32>> = buf_slice
-                .choose_multiple(&mut rng, replay_count)
+                .sample(&mut rng, replay_count)
                 .map(|s| (*s).clone())
                 .collect();
             for sample in &samples {

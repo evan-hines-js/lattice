@@ -13,7 +13,9 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use lattice_cedar::PolicyEngine;
 use lattice_crd::crd::{
@@ -147,7 +149,6 @@ fn ingress_spec() -> LatticeServiceSpec {
                         kind: None,
                     }),
                 }),
-                advertise: None,
             },
         )]),
     });
@@ -190,7 +191,6 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
                         kind: None,
                     }),
                 }),
-                advertise: None,
             },
         )]),
     });
