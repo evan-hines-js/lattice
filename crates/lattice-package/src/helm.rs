@@ -134,6 +134,38 @@ pub fn install_or_upgrade(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // If a previous operation was interrupted (operator crash, pod eviction),
+        // helm leaves the release in a pending-* state. Roll back to the last
+        // successful revision to clear the lock, then retry the upgrade.
+        if stderr.contains("another operation") && stderr.contains("in progress") {
+            tracing::warn!(
+                release = release_name,
+                namespace = namespace,
+                "Helm release stuck in pending state, rolling back stale lock"
+            );
+            rollback_stale_release(release_name, namespace)?;
+
+            let retry_output = Command::new("helm")
+                .args(&args)
+                .output()
+                .map_err(|e| {
+                    PackageError::Helm(format!(
+                        "failed to run helm upgrade --install (retry): {}",
+                        e
+                    ))
+                })?;
+
+            if !retry_output.status.success() {
+                let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
+                return Err(PackageError::Helm(format!(
+                    "helm upgrade --install {} failed after rollback: {}",
+                    release_name, retry_stderr
+                )));
+            }
+            return Ok(());
+        }
+
         return Err(PackageError::Helm(format!(
             "helm upgrade --install {} failed: {}",
             release_name, stderr
@@ -141,6 +173,92 @@ pub fn install_or_upgrade(
     }
 
     Ok(())
+}
+
+/// Roll back a helm release stuck in a pending-* state.
+///
+/// Checks the release history to determine the correct recovery action:
+/// - If the only revision is pending (first install crashed), uninstalls to clear the lock.
+/// - If there's a previous successful revision, rolls back to it.
+/// - If the state is unrecognizable, returns an error rather than guessing.
+fn rollback_stale_release(release_name: &str, namespace: &str) -> Result<(), PackageError> {
+    // `helm history` shows all revisions and their statuses.
+    // A stuck first install has exactly one revision with status "pending-install".
+    let history_output = Command::new("helm")
+        .args([
+            "history",
+            release_name,
+            "--namespace",
+            namespace,
+            "--output",
+            "json",
+            "--max",
+            "256",
+        ])
+        .output()
+        .map_err(|e| PackageError::Helm(format!("failed to run helm history: {}", e)))?;
+
+    if !history_output.status.success() {
+        let stderr = String::from_utf8_lossy(&history_output.stderr);
+        return Err(PackageError::Helm(format!(
+            "helm history {} failed: {}",
+            release_name, stderr
+        )));
+    }
+
+    let history: serde_json::Value = serde_json::from_slice(&history_output.stdout)
+        .map_err(|e| PackageError::Helm(format!("failed to parse helm history: {}", e)))?;
+
+    let revisions = history.as_array().ok_or_else(|| {
+        PackageError::Helm("helm history returned non-array".to_string())
+    })?;
+
+    // Check if every revision is in a pending/failed state (no successful revision exists)
+    let has_deployed_revision = revisions.iter().any(|r| {
+        r.get("status")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s == "deployed" || s == "superseded")
+    });
+
+    if has_deployed_revision {
+        // There's a good revision to roll back to
+        tracing::info!(
+            release = release_name,
+            "Found previous deployed revision, rolling back"
+        );
+        let output = Command::new("helm")
+            .args([
+                "rollback",
+                release_name,
+                "--namespace",
+                namespace,
+                "--wait",
+            ])
+            .output()
+            .map_err(|e| PackageError::Helm(format!("failed to run helm rollback: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(PackageError::Helm(format!(
+                "helm rollback {} failed: {}",
+                release_name, stderr
+            )));
+        }
+        tracing::info!(release = release_name, "Rolled back stale helm release");
+        Ok(())
+    } else {
+        // No successful revision — stuck on first install. Safe to uninstall.
+        let statuses: Vec<&str> = revisions
+            .iter()
+            .filter_map(|r| r.get("status").and_then(|s| s.as_str()))
+            .collect();
+        tracing::warn!(
+            release = release_name,
+            ?statuses,
+            "No deployed revision found, uninstalling to clear stale lock"
+        );
+        uninstall(release_name, namespace)
+    }
 }
 
 /// Uninstall a Helm release. Returns Ok even if the release doesn't exist.

@@ -615,6 +615,11 @@ fn main() {
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
     // 12. Tetragon (runtime enforcement via eBPF kprobes)
+    //
+    // crds.installMethod=helm renders TracingPolicy/TracingPolicyNamespaced CRDs
+    // inline. Tetragon's default ("operator") defers CRD creation to the
+    // tetragon-operator pod, which races with anything applying TracingPolicy
+    // resources right after install.
     let yaml = run_helm_template(
         "tetragon",
         &chart(&format!(
@@ -629,6 +634,8 @@ fn main() {
             "tetragon.enablePolicyFilterDebug=false",
             "--set",
             "rthooks.enabled=false",
+            "--set",
+            "crds.installMethod=helm",
         ],
     );
     std::fs::write(out_dir.join("tetragon.yaml"), yaml).expect("write tetragon.yaml");

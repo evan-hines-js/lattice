@@ -33,9 +33,14 @@ pub async fn start_agent_with_retry(
 ) {
     let mut retry_delay = Duration::from_secs(1);
     let max_retry_delay = Duration::from_secs(30);
+    /// Max backoff for polling when no parent config secret exists yet.
+    /// The secret may be created at any time (bootstrap webhook race), so keep checking.
+    const MAX_CONFIG_POLL_DELAY: Duration = Duration::from_secs(300);
     /// Minimum connection duration before we consider it "stable" and reset backoff.
     /// Prevents rapid connect/disconnect cycles from resetting to 1s.
     const STABLE_CONNECTION_THRESHOLD: Duration = Duration::from_secs(30);
+
+    let mut config_poll_delay = Duration::from_secs(5);
 
     loop {
         match start_agent_if_needed(
@@ -66,8 +71,17 @@ pub async fn start_agent_with_retry(
                 );
             }
             Ok(None) => {
-                tracing::debug!("No parent cell configured, running as standalone");
-                return;
+                // Parent config secret not found. Could be a root cluster, or the operator
+                // started before the bootstrap webhook created the secret. Keep polling with
+                // exponential backoff — the cost is one secret lookup every few minutes.
+                tracing::debug!(
+                    retry_in = ?config_poll_delay,
+                    "No parent config secret found, will check again"
+                );
+                tokio::time::sleep(config_poll_delay).await;
+                config_poll_delay =
+                    std::cmp::min(config_poll_delay.mul_f64(2.0), MAX_CONFIG_POLL_DELAY);
+                continue;
             }
             Err(e) => {
                 tracing::warn!(error = %e, retry_in = ?retry_delay, "Failed to connect to parent cell, retrying...");

@@ -1,30 +1,10 @@
-//! ApiResource building: HasApiResource trait, discovery, and pluralization.
-
-// =============================================================================
-// ApiResource Building - When to Use Each Method
-// =============================================================================
-//
-// There are three ways to build an `ApiResource` in this module:
-//
-// 1. **`HasApiResource` trait** - Use for types with compile-time known API version/kind.
-//    Best for: CRDs where you control the type definition and want type-safe API access.
-//    Example: `AuthorizationPolicy::api_resource()` gives consistent apiVersion everywhere.
-//
-// 2. **`build_api_resource()`** - Use when you have a specific apiVersion string.
-//    Best for: Processing manifests where apiVersion is extracted from YAML/JSON.
-//    Example: Parsing a manifest with `apiVersion: apps/v1` and `kind: Deployment`.
-//    Note: The version you provide is used exactly, which may not match storage version.
-//
-// 3. **`build_api_resource_with_discovery()`** - Use for querying the API server.
-//    Best for: Listing/getting resources where you want the server's storage version.
-//    Example: Listing CAPI Clusters - discovers v1beta2 even if CRD supports multiple versions.
-//    Note: Requires async + API call, use sparingly and cache the result if repeated.
-//
-// Decision tree:
-// - Know the exact apiVersion at compile time? -> HasApiResource trait
-// - Have apiVersion from a manifest/config? -> build_api_resource()
-// - Need to query API and want server's preferred version? -> build_api_resource_with_discovery()
-// =============================================================================
+//! ApiResource building: discovery, HasApiResource trait, and pluralization.
+//!
+//! **Default**: Use `build_api_resource_with_discovery()` — it queries the API
+//! server for the correct version and is always accurate.
+//!
+//! `build_api_resource()` exists only for offline contexts (pivot import where
+//! CRDs may not be installed yet, or core K8s types like `v1/Secret`).
 
 use kube::discovery::ApiResource;
 use kube::Client;
@@ -137,16 +117,9 @@ pub(crate) async fn discover_api_version(
 
 /// Build an ApiResource using discovery to find the correct version.
 ///
-/// **When to use**: For querying resources where you need the API server's
-/// preferred/storage version. This is essential for CAPI types where different
-/// resources in the same group may exist at different versions (e.g.,
-/// KubeadmControlPlane at v1beta2, RKE2ControlPlane at v1beta1).
-///
-/// **Trade-offs**: Requires an async API call, so cache the result if making
-/// multiple calls for the same resource type.
-///
-/// For manifests with explicit apiVersion, use `build_api_resource()` instead.
-/// For compile-time known types, implement `HasApiResource` trait instead.
+/// This is the primary way to build an ApiResource at runtime. It queries
+/// the API server to find the installed version, so it's always correct
+/// regardless of hardcoded version constants.
 pub async fn build_api_resource_with_discovery(
     client: &Client,
     group: &str,
@@ -165,21 +138,12 @@ pub async fn build_api_resource_with_discovery(
     })
 }
 
-/// Build an ApiResource from a known apiVersion and kind.
+/// Build an ApiResource from a known apiVersion and kind without discovery.
 ///
-/// **When to use**: When you have an explicit apiVersion string, typically from
-/// parsing a manifest (YAML/JSON). The version you provide is used exactly.
-///
-/// **Note**: This may not match the API server's storage version. For querying
-/// resources where version matters, use `build_api_resource_with_discovery()`.
-/// For compile-time known types, implement `HasApiResource` trait instead.
-///
-/// # Example
-/// ```ignore
-/// // From a parsed manifest
-/// let ar = build_api_resource("apps/v1", "Deployment");
-/// let api: Api<DynamicObject> = Api::namespaced_with(client, "default", &ar);
-/// ```
+/// Only for offline contexts where discovery is unavailable: pivot import
+/// (CRDs may not exist on target), manifest parsing, or stable core K8s
+/// types (`v1`, `policy/v1`). Prefer `build_api_resource_with_discovery()`
+/// for all runtime API operations.
 pub fn build_api_resource(api_version: &str, kind: &str) -> ApiResource {
     let (group, version) = parse_api_version(api_version);
     ApiResource {

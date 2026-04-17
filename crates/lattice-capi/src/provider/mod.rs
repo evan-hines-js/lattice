@@ -201,9 +201,9 @@ pub const CAPI_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta2
 /// CAPI Control Plane API version for KubeadmControlPlane
 pub const CAPI_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta2";
 /// RKE2 Bootstrap API version for RKE2ConfigTemplate
-pub const RKE2_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta1";
+pub const RKE2_BOOTSTRAP_API_VERSION: &str = "bootstrap.cluster.x-k8s.io/v1beta2";
 /// RKE2 Control Plane API version for RKE2ControlPlane
-pub const RKE2_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta1";
+pub const RKE2_CONTROLPLANE_API_VERSION: &str = "controlplane.cluster.x-k8s.io/v1beta2";
 
 // ============================================================================
 // Shared Helper Functions
@@ -1239,10 +1239,12 @@ fn generate_rke2_control_plane(
         "version": format_capi_version(config.k8s_version, &config.bootstrap),
         "registrationMethod": "control-plane-endpoint",
         "machineTemplate": {
-            "infrastructureRef": {
-                "apiVersion": infra.api_version,
-                "kind": infra.machine_template_kind,
-                "name": control_plane_name(config.name)
+            "spec": {
+                "infrastructureRef": {
+                    "apiGroup": infra.api_group,
+                    "kind": infra.machine_template_kind,
+                    "name": control_plane_name(config.name)
+                }
             }
         },
         "agentConfig": {

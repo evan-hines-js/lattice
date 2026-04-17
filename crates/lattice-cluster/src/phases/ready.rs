@@ -868,9 +868,11 @@ async fn reconcile_worker_pools(
         }
     }
 
-    // Create CAPI resources for any pools that don't have MachineDeployments yet
+    // Create CAPI resources for any pools whose MachineDeployment doesn't exist yet.
+    // Never re-apply for pools with existing MachineDeployments — re-applying
+    // MachineTemplates triggers CAPI rolling updates that churn every node.
     if !missing_pools.is_empty() {
-        if let Err(e) = create_missing_pool_resources(cluster, ctx, &missing_pools).await {
+        if let Err(e) = ensure_pool_resources(cluster, ctx, &missing_pools).await {
             warn!(
                 pools = ?missing_pools,
                 error = %e,
@@ -927,28 +929,26 @@ async fn execute_scaling_action(
 ///
 /// Generates the full set of CAPI manifests for the cluster, then filters to only
 /// those belonging to the missing pools (matched by the `-pool-{id}` suffix).
-async fn create_missing_pool_resources(
+async fn ensure_pool_resources(
     cluster: &LatticeCluster,
     ctx: &Context,
-    missing_pools: &[String],
+    pool_ids: &[String],
 ) -> Result<(), Error> {
+    if pool_ids.is_empty() {
+        return Ok(());
+    }
+
     let name = cluster.name_any();
     let capi_ns = capi_namespace(&name);
 
-    info!(
-        cluster = %name,
-        pools = ?missing_pools,
-        "Creating CAPI resources for new worker pools"
-    );
-
     let all_manifests = generate_capi_manifests(cluster, ctx).await?;
 
-    // Filter to manifests belonging to missing pools.
+    // Filter to manifests belonging to the requested pools.
     // Pool resources are named with a `-pool-{pool_id}` suffix.
     let pool_manifests: Vec<_> = all_manifests
         .into_iter()
         .filter(|m| {
-            missing_pools
+            pool_ids
                 .iter()
                 .any(|pool_id| m.metadata.name.ends_with(&pool_resource_suffix(pool_id)))
         })
@@ -957,33 +957,20 @@ async fn create_missing_pool_resources(
     if pool_manifests.is_empty() {
         warn!(
             cluster = %name,
-            pools = ?missing_pools,
-            "No CAPI manifests matched missing pools"
+            pools = ?pool_ids,
+            "No CAPI manifests matched worker pools"
         );
         return Ok(());
     }
 
-    info!(
+    debug!(
         cluster = %name,
         manifests = pool_manifests.len(),
-        pools = ?missing_pools,
-        "Applying CAPI manifests for new worker pools"
+        pools = ?pool_ids,
+        "Ensuring CAPI resources for worker pools"
     );
 
     ctx.capi.apply_manifests(&pool_manifests, &capi_ns).await?;
-
-    ctx.events
-        .publish(
-            &cluster.object_ref(&()),
-            EventType::Normal,
-            reasons::PROVISIONING_STARTED,
-            actions::PROVISION,
-            Some(format!(
-                "Created CAPI resources for new worker pools: {}",
-                missing_pools.join(", ")
-            )),
-        )
-        .await;
 
     Ok(())
 }

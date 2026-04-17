@@ -12,7 +12,7 @@ use tracing::{debug, info};
 use mockall::automock;
 
 use crate::provider::{control_plane_name, pool_resource_suffix, CAPIManifest};
-use lattice_common::kube_utils::build_api_resource;
+use lattice_common::kube_utils::{build_api_resource_with_discovery, parse_api_version};
 use lattice_common::Error;
 use lattice_crd::crd::BootstrapProvider;
 
@@ -130,40 +130,42 @@ impl CAPIClientImpl {
         Self { client }
     }
 
-    /// Get API for CAPI Cluster resources using discovery
-    async fn capi_cluster_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
-        self.capi_api(namespace, "Cluster").await
-    }
-
-    /// Get API for CAPI MachineDeployment resources using discovery
-    async fn machine_deployment_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
-        self.capi_api(namespace, "MachineDeployment").await
-    }
-
-    /// Get API for CAPI Machine resources using discovery
-    async fn machine_api(&self, namespace: &str) -> Result<Api<DynamicObject>, Error> {
-        self.capi_api(namespace, "Machine").await
-    }
-
-    /// Get API for any CAPI resource kind using discovery
-    async fn capi_api(&self, namespace: &str, kind: &str) -> Result<Api<DynamicObject>, Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            "cluster.x-k8s.io",
-            kind,
-        )
-        .await?;
+    /// Get a namespaced API for any resource kind using discovery.
+    ///
+    /// Discovers the correct apiVersion from the cluster so callers never
+    /// need to hardcode version strings.
+    async fn discovered_api(
+        &self,
+        namespace: &str,
+        group: &str,
+        kind: &str,
+    ) -> Result<Api<DynamicObject>, Error> {
+        let ar = build_api_resource_with_discovery(&self.client, group, kind).await?;
         Ok(Api::namespaced_with(self.client.clone(), namespace, &ar))
     }
 
-    /// Apply a manifest with optional owner reference
+    /// Apply a manifest with optional owner reference.
+    ///
+    /// Uses API discovery to resolve the correct apiVersion from the cluster,
+    /// so the manifest is always applied against the installed version regardless
+    /// of what version string the manifest was generated with.
     async fn apply_manifest(
         &self,
         manifest: &CAPIManifest,
         namespace: &str,
         owner_ref: Option<serde_json::Value>,
     ) -> Result<(), Error> {
-        let ar = build_api_resource(&manifest.api_version, &manifest.kind);
+        let (group, _) = parse_api_version(&manifest.api_version);
+        // Core K8s types (empty group, e.g. "v1") don't need discovery —
+        // their version never changes and discovery with empty group hangs.
+        let ar = if group.is_empty() {
+            lattice_common::kube_utils::build_api_resource(
+                &manifest.api_version,
+                &manifest.kind,
+            )
+        } else {
+            build_api_resource_with_discovery(&self.client, &group, &manifest.kind).await?
+        };
 
         let metadata = build_manifest_metadata(
             &manifest.metadata.name,
@@ -174,7 +176,7 @@ impl CAPIClientImpl {
         );
 
         let mut obj_value = serde_json::json!({
-            "apiVersion": manifest.api_version,
+            "apiVersion": ar.api_version,
             "kind": manifest.kind,
             "metadata": metadata,
         });
@@ -213,7 +215,7 @@ impl CAPIClientImpl {
         namespace: &str,
         name: &str,
     ) -> Result<serde_json::Value, Error> {
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
+        let ar = build_api_resource_with_discovery(
             &self.client,
             "infrastructure.cluster.x-k8s.io",
             "DockerCluster",
@@ -250,17 +252,32 @@ impl CAPIClient for CAPIClientImpl {
             .find(|m| m.kind == "DockerCluster")
             .map(|m| m.metadata.name.clone());
 
-        // Apply all non-ConfigMap manifests first (includes DockerCluster)
-        for manifest in &other_manifests {
+        // Apply MachineDeployments last. MachineDeployment references a
+        // BootstrapConfigTemplate and an infrastructure MachineTemplate; if
+        // the MachineDeployment is created before its templates, CAPI tries
+        // to roll out machines with dangling references. Applying MD last
+        // also means "MD exists" is a reliable signal that the pool's
+        // dependent resources were successfully applied — callers use this
+        // to detect when a pool needs its resources re-created.
+        let (machine_deployments, non_md): (Vec<_>, Vec<_>) = other_manifests
+            .into_iter()
+            .partition(|m| m.kind == "MachineDeployment");
+
+        for manifest in &non_md {
             self.apply_manifest(manifest, namespace, None).await?;
         }
 
-        // Apply HAProxy ConfigMap with owner reference to DockerCluster
+        // Apply HAProxy ConfigMap (depends on DockerCluster existing, so
+        // this runs after DockerCluster is applied above).
         if let (Some(cm), Some(dc_name)) = (haproxy_configmap, docker_cluster_name) {
             let owner_ref = self
                 .get_docker_cluster_owner_ref(namespace, &dc_name)
                 .await?;
             self.apply_manifest(cm, namespace, Some(owner_ref)).await?;
+        }
+
+        for manifest in &machine_deployments {
+            self.apply_manifest(manifest, namespace, None).await?;
         }
 
         Ok(())
@@ -273,7 +290,7 @@ impl CAPIClient for CAPIClientImpl {
         bootstrap: BootstrapProvider,
     ) -> Result<bool, Error> {
         // Check 1: CAPI Cluster object is Ready/Provisioned
-        let cluster_api = self.capi_cluster_api(namespace).await?;
+        let cluster_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
         let cluster_ready = match cluster_api.get(cluster_name).await {
             Ok(cluster) => {
                 let mut ready = false;
@@ -311,24 +328,10 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 2: Control plane is Initialized
-        let (cp_kind, cp_group) = match bootstrap {
-            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
-            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
-            _ => {
-                return Err(Error::provider(format!(
-                    "unsupported bootstrap provider: {bootstrap}"
-                )))
-            }
-        };
-
-        let cp_ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            cp_group,
-            cp_kind,
-        )
-        .await?;
-        let cp_api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), namespace, &cp_ar);
+        let cp_kind = control_plane_kind(bootstrap)?;
+        let cp_api = self
+            .discovered_api(namespace, "controlplane.cluster.x-k8s.io", cp_kind)
+            .await?;
 
         let cp_name = control_plane_name(cluster_name);
         let cp_initialized = match cp_api.get(&cp_name).await {
@@ -359,7 +362,7 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 3: No machines are still provisioning
-        let machine_api = self.machine_api(namespace).await?;
+        let machine_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Machine").await?;
 
         let machines = machine_api
             .list(
@@ -398,7 +401,7 @@ impl CAPIClient for CAPIClientImpl {
         pool_id: &str,
         namespace: &str,
     ) -> Result<Option<u32>, Error> {
-        let api = self.machine_deployment_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
 
@@ -433,7 +436,7 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error> {
-        let api = self.machine_deployment_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({ "spec": { "replicas": replicas } });
@@ -451,7 +454,7 @@ impl CAPIClient for CAPIClientImpl {
     }
 
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
-        let api = self.capi_cluster_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
         match api.delete(cluster_name, &Default::default()).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
@@ -467,7 +470,7 @@ impl CAPIClient for CAPIClientImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<bool, Error> {
-        let api = self.capi_cluster_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
         match api.get(cluster_name).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
@@ -477,7 +480,7 @@ impl CAPIClient for CAPIClientImpl {
 
     async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
         // Check 1: CAPI Cluster is Provisioned
-        let cluster_api = self.capi_cluster_api(namespace).await?;
+        let cluster_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
         match cluster_api.get(cluster_name).await {
             Ok(cluster) => {
                 let phase = cluster
@@ -499,7 +502,7 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 2: No machines in transitional states
-        let machine_api = self.machine_api(namespace).await?;
+        let machine_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Machine").await?;
 
         let machines = machine_api
             .list(
@@ -536,23 +539,10 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         bootstrap: BootstrapProvider,
     ) -> Result<Option<String>, Error> {
-        let (cp_kind, cp_group) = match bootstrap {
-            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
-            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
-            _ => {
-                return Err(Error::provider(format!(
-                    "unsupported bootstrap provider: {bootstrap}"
-                )))
-            }
-        };
-
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            cp_group,
-            cp_kind,
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let cp_kind = control_plane_kind(bootstrap)?;
+        let api = self
+            .discovered_api(namespace, "controlplane.cluster.x-k8s.io", cp_kind)
+            .await?;
 
         let cp_name = control_plane_name(cluster_name);
         match api.get(&cp_name).await {
@@ -581,23 +571,10 @@ impl CAPIClient for CAPIClientImpl {
         bootstrap: BootstrapProvider,
         version: &str,
     ) -> Result<(), Error> {
-        let (cp_kind, cp_group) = match bootstrap {
-            BootstrapProvider::Kubeadm => ("KubeadmControlPlane", "controlplane.cluster.x-k8s.io"),
-            BootstrapProvider::Rke2 => ("RKE2ControlPlane", "controlplane.cluster.x-k8s.io"),
-            _ => {
-                return Err(Error::provider(format!(
-                    "unsupported bootstrap provider: {bootstrap}"
-                )))
-            }
-        };
-
-        let ar = lattice_common::kube_utils::build_api_resource_with_discovery(
-            &self.client,
-            cp_group,
-            cp_kind,
-        )
-        .await?;
-        let api: Api<DynamicObject> = Api::namespaced_with(self.client.clone(), namespace, &ar);
+        let cp_kind = control_plane_kind(bootstrap)?;
+        let api = self
+            .discovered_api(namespace, "controlplane.cluster.x-k8s.io", cp_kind)
+            .await?;
 
         let cp_name = control_plane_name(cluster_name);
         let patch = serde_json::json!({ "spec": { "version": version } });
@@ -619,7 +596,7 @@ impl CAPIClient for CAPIClientImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<std::collections::HashMap<String, String>, Error> {
-        let api = self.machine_deployment_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
 
         let lp = ListParams::default()
             .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name));
@@ -660,7 +637,7 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         version: &str,
     ) -> Result<(), Error> {
-        let api = self.machine_deployment_api(namespace).await?;
+        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({
@@ -687,6 +664,17 @@ impl CAPIClient for CAPIClientImpl {
 
     fn kube_client(&self) -> Client {
         self.client.clone()
+    }
+}
+
+/// Map a bootstrap provider to its control plane kind.
+fn control_plane_kind(bootstrap: BootstrapProvider) -> Result<&'static str, Error> {
+    match bootstrap {
+        BootstrapProvider::Kubeadm => Ok("KubeadmControlPlane"),
+        BootstrapProvider::Rke2 => Ok("RKE2ControlPlane"),
+        _ => Err(Error::provider(format!(
+            "unsupported bootstrap provider: {bootstrap}"
+        ))),
     }
 }
 
