@@ -100,9 +100,7 @@ fn build_realistic_graph(n: usize) -> ServiceGraph {
         } else {
             0
         };
-        let dep_indices: Vec<usize> = (0..n)
-            .filter(|&j| j != i)
-            .sample(&mut rng, num_deps);
+        let dep_indices: Vec<usize> = (0..n).filter(|&j| j != i).sample(&mut rng, num_deps);
         all_deps.push(dep_indices);
     }
 
@@ -143,9 +141,7 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
         } else {
             0
         };
-        let dep_indices: Vec<usize> = (0..n)
-            .filter(|&j| j != i)
-            .sample(&mut rng, num_deps);
+        let dep_indices: Vec<usize> = (0..n).filter(|&j| j != i).sample(&mut rng, num_deps);
 
         let dep_names: Vec<String> = dep_indices.iter().map(|j| format!("svc-{}", j)).collect();
         let dep_refs: Vec<&str> = dep_names.iter().map(|s| s.as_str()).collect();
@@ -156,9 +152,7 @@ fn build_depends_all_graph(n: usize, num_depends_all: usize) -> ServiceGraph {
         } else {
             0
         };
-        let caller_indices: Vec<usize> = (0..n)
-            .filter(|&j| j != i)
-            .sample(&mut rng, num_callers);
+        let caller_indices: Vec<usize> = (0..n).filter(|&j| j != i).sample(&mut rng, num_callers);
         let caller_names: Vec<String> = caller_indices
             .iter()
             .map(|j| format!("svc-{}", j))

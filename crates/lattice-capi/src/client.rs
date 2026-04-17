@@ -159,10 +159,7 @@ impl CAPIClientImpl {
         // Core K8s types (empty group, e.g. "v1") don't need discovery —
         // their version never changes and discovery with empty group hangs.
         let ar = if group.is_empty() {
-            lattice_common::kube_utils::build_api_resource(
-                &manifest.api_version,
-                &manifest.kind,
-            )
+            lattice_common::kube_utils::build_api_resource(&manifest.api_version, &manifest.kind)
         } else {
             build_api_resource_with_discovery(&self.client, &group, &manifest.kind).await?
         };
@@ -290,7 +287,9 @@ impl CAPIClient for CAPIClientImpl {
         bootstrap: BootstrapProvider,
     ) -> Result<bool, Error> {
         // Check 1: CAPI Cluster object is Ready/Provisioned
-        let cluster_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
+        let cluster_api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Cluster")
+            .await?;
         let cluster_ready = match cluster_api.get(cluster_name).await {
             Ok(cluster) => {
                 let mut ready = false;
@@ -362,7 +361,9 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 3: No machines are still provisioning
-        let machine_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Machine").await?;
+        let machine_api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Machine")
+            .await?;
 
         let machines = machine_api
             .list(
@@ -401,7 +402,9 @@ impl CAPIClient for CAPIClientImpl {
         pool_id: &str,
         namespace: &str,
     ) -> Result<Option<u32>, Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment")
+            .await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
 
@@ -436,7 +439,9 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         replicas: u32,
     ) -> Result<(), Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment")
+            .await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({ "spec": { "replicas": replicas } });
@@ -454,7 +459,9 @@ impl CAPIClient for CAPIClientImpl {
     }
 
     async fn delete_capi_cluster(&self, cluster_name: &str, namespace: &str) -> Result<(), Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Cluster")
+            .await?;
         match api.delete(cluster_name, &Default::default()).await {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {
@@ -470,7 +477,9 @@ impl CAPIClient for CAPIClientImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<bool, Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Cluster")
+            .await?;
         match api.get(cluster_name).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(false),
@@ -480,7 +489,9 @@ impl CAPIClient for CAPIClientImpl {
 
     async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error> {
         // Check 1: CAPI Cluster is Provisioned
-        let cluster_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Cluster").await?;
+        let cluster_api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Cluster")
+            .await?;
         match cluster_api.get(cluster_name).await {
             Ok(cluster) => {
                 let phase = cluster
@@ -502,7 +513,9 @@ impl CAPIClient for CAPIClientImpl {
         }
 
         // Check 2: No machines in transitional states
-        let machine_api = self.discovered_api(namespace, "cluster.x-k8s.io", "Machine").await?;
+        let machine_api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "Machine")
+            .await?;
 
         let machines = machine_api
             .list(
@@ -596,7 +609,9 @@ impl CAPIClient for CAPIClientImpl {
         cluster_name: &str,
         namespace: &str,
     ) -> Result<std::collections::HashMap<String, String>, Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment")
+            .await?;
 
         let lp = ListParams::default()
             .labels(&format!("cluster.x-k8s.io/cluster-name={}", cluster_name));
@@ -637,7 +652,9 @@ impl CAPIClient for CAPIClientImpl {
         namespace: &str,
         version: &str,
     ) -> Result<(), Error> {
-        let api = self.discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment").await?;
+        let api = self
+            .discovered_api(namespace, "cluster.x-k8s.io", "MachineDeployment")
+            .await?;
 
         let md_name = format!("{}-{}", cluster_name, pool_resource_suffix(pool_id));
         let patch = serde_json::json!({

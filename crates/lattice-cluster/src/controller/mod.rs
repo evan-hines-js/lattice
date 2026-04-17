@@ -1227,7 +1227,7 @@ mod tests {
                     backups: BackupsConfig::default(),
                     network_topology: None,
                     registry_mirrors: None,
-                        issuers: std::collections::BTreeMap::new(),
+                    issuers: std::collections::BTreeMap::new(),
                     lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
                     cascade_upgrade: false,
                 },

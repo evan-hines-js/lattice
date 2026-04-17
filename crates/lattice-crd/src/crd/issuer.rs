@@ -544,5 +544,4 @@ mod tests {
         let parsed: CertIssuerSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(spec, parsed);
     }
-
 }

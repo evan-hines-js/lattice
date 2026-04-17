@@ -80,12 +80,12 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
     info!("[Cost] Service ready, waiting for cost fields...");
 
     // The service may reach Ready before the rates ConfigMap is in the
-    // controller's cache. Wait for hourlyCost to be populated — the
-    // controller requeues on success and will recompute cost once the
-    // ConfigMap is cached.
+    // controller's cache. Poll all three required cost fields together —
+    // the controller writes them atomically, but kubectl/API-server caches
+    // can briefly return stale views across separate one-shot reads.
     let kc_cost = kubeconfig.to_string();
-    let hourly_cost: String = wait_for_condition(
-        "status.cost.hourlyCost to be populated",
+    let (hourly_cost, cpu_cost, mem_cost): (String, String, String) = wait_for_condition(
+        "status.cost.{hourlyCost,breakdown.cpu,breakdown.memory} to be populated",
         DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
@@ -100,15 +100,18 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
                     "-n",
                     COST_NAMESPACE,
                     "-o",
-                    "jsonpath={.status.cost.hourlyCost}",
+                    "jsonpath={.status.cost.hourlyCost}|{.status.cost.breakdown.cpu}|{.status.cost.breakdown.memory}",
                 ])
                 .await?;
-                let trimmed = output.trim().to_string();
-                if trimmed.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(trimmed))
+                let parts: Vec<&str> = output.split('|').map(str::trim).collect();
+                if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+                    return Ok(None);
                 }
+                Ok(Some((
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                    parts[2].to_string(),
+                )))
             }
         },
     )
@@ -121,42 +124,6 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
         .map_err(|e| format!("hourlyCost '{cost_str}' is not a valid number: {e}"))?;
     if cost_val <= 0.0 {
         return Err(format!("hourlyCost should be > 0, got: {cost_val}"));
-    }
-
-    // Verify breakdown.cpu is set
-    let cpu_cost = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeservice",
-        SERVICE_NAME,
-        "-n",
-        COST_NAMESPACE,
-        "-o",
-        "jsonpath={.status.cost.breakdown.cpu}",
-    ])
-    .await?;
-
-    if cpu_cost.trim().is_empty() {
-        return Err("status.cost.breakdown.cpu is empty".to_string());
-    }
-
-    // Verify breakdown.memory is set
-    let mem_cost = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "latticeservice",
-        SERVICE_NAME,
-        "-n",
-        COST_NAMESPACE,
-        "-o",
-        "jsonpath={.status.cost.breakdown.memory}",
-    ])
-    .await?;
-
-    if mem_cost.trim().is_empty() {
-        return Err("status.cost.breakdown.memory is empty".to_string());
     }
 
     // Verify breakdown.gpu is NOT set (CPU-only service)
@@ -182,9 +149,7 @@ async fn test_service_cost_populated(kubeconfig: &str) -> Result<(), String> {
 
     info!(
         "[Cost] Service cost verified: hourlyCost={}, cpu={}, memory={}",
-        cost_str,
-        cpu_cost.trim(),
-        mem_cost.trim(),
+        cost_str, cpu_cost, mem_cost,
     );
     Ok(())
 }

@@ -156,9 +156,7 @@ fn setup_realistic_graph(n: usize) -> ServiceGraph {
         } else {
             0
         };
-        let dep_indices: Vec<usize> = (0..n)
-            .filter(|&j| j != i)
-            .sample(&mut rng, num_deps);
+        let dep_indices: Vec<usize> = (0..n).filter(|&j| j != i).sample(&mut rng, num_deps);
         all_deps.push(dep_indices);
     }
 

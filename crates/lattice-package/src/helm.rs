@@ -146,15 +146,12 @@ pub fn install_or_upgrade(
             );
             rollback_stale_release(release_name, namespace)?;
 
-            let retry_output = Command::new("helm")
-                .args(&args)
-                .output()
-                .map_err(|e| {
-                    PackageError::Helm(format!(
-                        "failed to run helm upgrade --install (retry): {}",
-                        e
-                    ))
-                })?;
+            let retry_output = Command::new("helm").args(&args).output().map_err(|e| {
+                PackageError::Helm(format!(
+                    "failed to run helm upgrade --install (retry): {}",
+                    e
+                ))
+            })?;
 
             if !retry_output.status.success() {
                 let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
@@ -209,9 +206,9 @@ fn rollback_stale_release(release_name: &str, namespace: &str) -> Result<(), Pac
     let history: serde_json::Value = serde_json::from_slice(&history_output.stdout)
         .map_err(|e| PackageError::Helm(format!("failed to parse helm history: {}", e)))?;
 
-    let revisions = history.as_array().ok_or_else(|| {
-        PackageError::Helm("helm history returned non-array".to_string())
-    })?;
+    let revisions = history
+        .as_array()
+        .ok_or_else(|| PackageError::Helm("helm history returned non-array".to_string()))?;
 
     // Check if every revision is in a pending/failed state (no successful revision exists)
     let has_deployed_revision = revisions.iter().any(|r| {
@@ -227,13 +224,7 @@ fn rollback_stale_release(release_name: &str, namespace: &str) -> Result<(), Pac
             "Found previous deployed revision, rolling back"
         );
         let output = Command::new("helm")
-            .args([
-                "rollback",
-                release_name,
-                "--namespace",
-                namespace,
-                "--wait",
-            ])
+            .args(["rollback", release_name, "--namespace", namespace, "--wait"])
             .output()
             .map_err(|e| PackageError::Helm(format!("failed to run helm rollback: {}", e)))?;
 
