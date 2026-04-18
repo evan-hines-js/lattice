@@ -185,7 +185,6 @@ pub async fn update_status(
         children_health: current_status.children_health,
         last_heartbeat: current_status.last_heartbeat,
         version: current_status.version,
-        infrastructure: current_status.infrastructure,
         pool_resources: current_status.pool_resources,
         lattice_image: current_status.lattice_image,
         csr_token_hash: current_status.csr_token_hash,

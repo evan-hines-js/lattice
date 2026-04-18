@@ -35,8 +35,8 @@ use lattice_core::{
 };
 use lattice_crd::crd::{
     BackupsConfig, BootstrapProvider, CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget,
-    InfraComponentStatus, LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
-    MeshMemberTarget, MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
+    LatticeCluster, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    MonitoringConfig, NetworkTopologyConfig, PeerAuth, ProviderType, ServiceRef,
 };
 
 /// A single infrastructure component with its name, version, and manifests.
@@ -52,18 +52,6 @@ pub struct InfraComponent {
     /// When set, the phase runner waits for all Deployments in this namespace
     /// to be available before moving to the next phase.
     pub health_namespace: Option<&'static str>,
-}
-
-impl InfraComponent {
-    /// Convert to the CRD status representation.
-    pub fn to_status(&self) -> InfraComponentStatus {
-        InfraComponentStatus {
-            name: self.name.to_string(),
-            desired_version: self.version.to_string(),
-            current_version: None,
-            phase: Default::default(),
-        }
-    }
 }
 
 /// A group of components applied together.
@@ -393,16 +381,10 @@ pub fn generate_all_manifests(config: &InfrastructureConfig) -> Result<Vec<Strin
 const HEALTH_GATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Apply a single phase: send manifests to the API server, then wait for health gates.
-///
-/// Returns the list of `InfraComponentStatus` entries for this phase.
-pub async fn apply_phase(
-    client: &kube::Client,
-    phase: &InfraPhase,
-) -> anyhow::Result<Vec<InfraComponentStatus>> {
+pub async fn apply_phase(client: &kube::Client, phase: &InfraPhase) -> anyhow::Result<()> {
     use lattice_common::kube_utils;
     use lattice_common::retry::{retry_with_backoff, RetryConfig};
     use lattice_common::{apply_manifests, ApplyOptions};
-    use lattice_crd::crd::InfraComponentPhase;
 
     let manifests = phase.all_manifests();
     tracing::info!(
@@ -412,7 +394,6 @@ pub async fn apply_phase(
         "Applying infrastructure phase"
     );
 
-    // Apply manifests with retry
     let retry = RetryConfig {
         initial_delay: std::time::Duration::from_secs(2),
         ..RetryConfig::default()
@@ -424,45 +405,23 @@ pub async fn apply_phase(
     })
     .await?;
 
-    // Wait for health gates
-    let health_namespaces = phase.health_namespaces();
-    for ns in &health_namespaces {
-        tracing::info!(
-            phase = phase.name,
-            namespace = ns,
-            "Waiting for deployments"
-        );
+    for ns in phase.health_namespaces() {
+        tracing::info!(phase = phase.name, namespace = ns, "Waiting for deployments");
         kube_utils::wait_for_all_deployments(client, ns, HEALTH_GATE_TIMEOUT)
             .await
             .map_err(|e| anyhow::anyhow!("{} health gate failed ({}): {}", phase.name, ns, e))?;
     }
 
-    // Build status entries
-    let statuses = phase
-        .components
-        .iter()
-        .map(|c| InfraComponentStatus {
-            name: c.name.to_string(),
-            desired_version: c.version.to_string(),
-            current_version: Some(c.version.to_string()),
-            phase: InfraComponentPhase::UpToDate,
-        })
-        .collect();
-
     tracing::info!(phase = phase.name, "Phase complete");
-    Ok(statuses)
+    Ok(())
 }
 
 /// Apply all phases sequentially, waiting for health gates between each phase.
-pub async fn apply_all_phases(
-    client: &kube::Client,
-    phases: &[InfraPhase],
-) -> anyhow::Result<Vec<InfraComponentStatus>> {
-    let mut statuses = Vec::new();
+pub async fn apply_all_phases(client: &kube::Client, phases: &[InfraPhase]) -> anyhow::Result<()> {
     for phase in phases {
-        statuses.extend(apply_phase(client, phase).await?);
+        apply_phase(client, phase).await?;
     }
-    Ok(statuses)
+    Ok(())
 }
 
 // ---- Helpers ----
@@ -780,20 +739,6 @@ mod tests {
         let phases = generate_phases(&config).expect("should generate");
         let flattened = flatten_manifests(&phases);
         assert_eq!(all.len(), flattened.len());
-    }
-
-    #[test]
-    fn component_to_status() {
-        let comp = InfraComponent {
-            name: "test",
-            version: "1.0.0",
-            manifests: vec![],
-            health_namespace: None,
-        };
-        let status = comp.to_status();
-        assert_eq!(status.name, "test");
-        assert_eq!(status.desired_version, "1.0.0");
-        assert!(status.current_version.is_none());
     }
 
     #[test]

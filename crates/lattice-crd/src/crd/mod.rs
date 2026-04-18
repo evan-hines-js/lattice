@@ -34,9 +34,8 @@ pub use backup_store::{
 };
 pub use cedar_policy::{CedarPolicy, CedarPolicyPhase, CedarPolicySpec, CedarPolicyStatus};
 pub use cluster::{
-    BackupsConfig, ChildClusterHealth, InfraComponentPhase, InfraComponentStatus, LatticeCluster,
-    LatticeClusterSpec, LatticeClusterStatus, MonitoringConfig, PoolResourceSummary,
-    WorkerPoolStatus,
+    BackupsConfig, ChildClusterHealth, LatticeCluster, LatticeClusterSpec, LatticeClusterStatus,
+    MonitoringConfig, PoolResourceSummary, WorkerPoolStatus,
 };
 pub use cluster_backup::{
     BackupRetentionSpec, BackupScopeSpec, ClusterBackupPhase, LatticeClusterBackup,
