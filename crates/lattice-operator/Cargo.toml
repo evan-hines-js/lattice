@@ -52,6 +52,11 @@ lattice-quota.workspace = true
 lattice-package.workspace = true
 lattice-cache.workspace = true
 lattice-tetragon.workspace = true
+lattice-eso.workspace = true
+lattice-cert-manager.workspace = true
+lattice-volcano.workspace = true
+lattice-cilium.workspace = true
+lattice-istio.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

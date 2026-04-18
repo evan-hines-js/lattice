@@ -3205,12 +3205,17 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
+ "lattice-cert-manager",
+ "lattice-cilium",
  "lattice-common",
  "lattice-core",
  "lattice-crd",
+ "lattice-eso",
  "lattice-infra",
+ "lattice-istio",
  "lattice-secret-provider",
  "lattice-tetragon",
+ "lattice-volcano",
  "mockall",
  "rand 0.10.1",
  "serde",
@@ -3255,6 +3260,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "lattice-auth",
+ "lattice-cilium",
  "lattice-common",
  "lattice-core",
  "lattice-crd",
@@ -3294,6 +3300,35 @@ dependencies = [
  "lattice-core",
  "lattice-crd",
  "lattice-secret-provider",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-cert-manager"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-cilium"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
  "serde_json",
  "tokio",
  "tracing",
@@ -3379,14 +3414,19 @@ dependencies = [
  "lattice-capi",
  "lattice-cell",
  "lattice-cert-issuer",
+ "lattice-cert-manager",
+ "lattice-cilium",
  "lattice-common",
  "lattice-core",
  "lattice-crd",
+ "lattice-eso",
  "lattice-infra",
+ "lattice-istio",
  "lattice-move",
  "lattice-proto",
  "lattice-secret-provider",
  "lattice-tetragon",
+ "lattice-volcano",
  "mockall",
  "parking_lot",
  "pem",
@@ -3532,6 +3572,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-eso"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-gpu-monitor"
 version = "0.1.0"
 dependencies = [
@@ -3564,6 +3619,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "lattice-helm-build"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]
@@ -3611,6 +3674,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-istio"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
+ "lattice-infra",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-job"
 version = "0.1.0"
 dependencies = [
@@ -3631,7 +3712,7 @@ dependencies = [
  "lattice-secret-provider",
  "lattice-template",
  "lattice-tetragon-policy",
- "lattice-volcano",
+ "lattice-volcano-policy",
  "lattice-workload",
  "mockall",
  "serde",
@@ -3685,7 +3766,7 @@ dependencies = [
  "lattice-quota",
  "lattice-secret-provider",
  "lattice-tetragon-policy",
- "lattice-volcano",
+ "lattice-volcano-policy",
  "lattice-workload",
  "mockall",
  "serde",
@@ -3748,6 +3829,8 @@ dependencies = [
  "lattice-cedar",
  "lattice-cell",
  "lattice-cert-issuer",
+ "lattice-cert-manager",
+ "lattice-cilium",
  "lattice-cloud-provider",
  "lattice-cluster",
  "lattice-common",
@@ -3755,9 +3838,11 @@ dependencies = [
  "lattice-cost",
  "lattice-crd",
  "lattice-dns-provider",
+ "lattice-eso",
  "lattice-graph",
  "lattice-image-provider",
  "lattice-infra",
+ "lattice-istio",
  "lattice-job",
  "lattice-mesh-member",
  "lattice-model",
@@ -3767,6 +3852,7 @@ dependencies = [
  "lattice-secret-provider",
  "lattice-service",
  "lattice-tetragon",
+ "lattice-volcano",
  "lattice-webhook",
  "mockall",
  "parking_lot",
@@ -3917,7 +4003,7 @@ dependencies = [
  "lattice-secret-provider",
  "lattice-template",
  "lattice-tetragon-policy",
- "lattice-volcano",
+ "lattice-volcano-policy",
  "lattice-workload",
  "mockall",
  "parking_lot",
@@ -3951,10 +4037,9 @@ dependencies = [
  "kube",
  "lattice-common",
  "lattice-crd",
- "serde",
+ "lattice-helm-build",
  "serde_json",
  "tokio",
- "toml",
  "tracing",
 ]
 
@@ -3969,6 +4054,21 @@ dependencies = [
 
 [[package]]
 name = "lattice-volcano"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-volcano-policy"
 version = "0.1.0"
 dependencies = [
  "lattice-common",

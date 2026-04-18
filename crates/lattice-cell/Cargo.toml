@@ -15,6 +15,7 @@ lattice-core = { workspace = true }
 lattice-crd = { workspace = true }
 lattice-auth = { workspace = true }
 lattice-infra = { workspace = true }
+lattice-cilium = { workspace = true }
 lattice-move = { workspace = true }
 lattice-proto = { workspace = true }
 

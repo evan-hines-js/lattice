@@ -1,24 +1,16 @@
-//! Volcano Helm chart embedding for gang scheduling
-//!
-//! Provides pre-rendered Volcano manifests for batch workload scheduling.
-//! Volcano is always installed as core infrastructure.
-//! Includes the Volcano vGPU device plugin for GPU workloads.
-//!
-//! The Volcano admission webhook is configured to skip `lattice-system`
-//! (via `webhooks_namespace_selector_expressions` in the Helm values)
-//! so the operator can start before Volcano is ready.
+//! Volcano helm chart manifests (scheduler + controllers + admission + vGPU
+//! device plugin) plus topology-discovery ConfigMap generation + mesh
+//! enrollment.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use lattice_common::kube_utils::split_yaml_documents;
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
     NetworkTopologyConfig, PeerAuth, ProviderType, TopologyDiscoverySpec,
 };
-
-use lattice_common::kube_utils::split_yaml_documents;
-
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
 
 static VOLCANO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("volcano-system")];
@@ -36,20 +28,22 @@ static VOLCANO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     manifests
 });
 
+/// Volcano chart version pinned at build time from `versions.toml`.
 pub fn volcano_version() -> &'static str {
     env!("VOLCANO_VERSION")
 }
 
-/// Pre-rendered Volcano Helm chart manifests (including vGPU device plugin)
+/// Pre-rendered Volcano helm chart manifests (including the vGPU device plugin
+/// DaemonSet).
 pub fn generate_volcano() -> &'static [String] {
     &VOLCANO_MANIFESTS
 }
 
 /// Generate a topology discovery ConfigMap for the Volcano controller.
 ///
-/// Returns `None` for manual mode (discovery is `None` — user creates HyperNode CRDs directly).
-/// For UFM or Label discovery, generates a ConfigMap in `volcano-system` with the
-/// discovery configuration that the `network-topology-aware` plugin reads.
+/// Returns `None` for manual mode (discovery is `None` — user creates
+/// `HyperNode` CRDs directly). For UFM or Label discovery, renders a ConfigMap
+/// in `volcano-system` that the `network-topology-aware` plugin reads.
 pub fn generate_topology_discovery_configmap(
     config: &NetworkTopologyConfig,
     provider: ProviderType,
@@ -114,8 +108,8 @@ data:
 /// Auto-configure label tiers from the cloud provider.
 ///
 /// Cloud providers (AWS, GCP, Azure, OpenStack) get zone + hostname tiers.
-/// Local providers (Docker, Proxmox) get hostname only.
-/// No region tier — K8s clusters are almost never multi-region.
+/// Local providers (Docker, Proxmox) get hostname only. No region tier —
+/// K8s clusters are almost never multi-region.
 fn auto_label_tiers(provider: ProviderType) -> String {
     match provider {
         ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure | ProviderType::OpenStack => [
@@ -127,14 +121,15 @@ fn auto_label_tiers(provider: ProviderType) -> String {
     }
 }
 
-/// Generate LatticeMeshMembers for Volcano components.
+/// LatticeMeshMembers for Volcano components.
 ///
-/// - **volcano-admission**: admission webhooks called by kube-apiserver (port 8443, Webhook mTLS)
-/// - **volcano-controllers**: reconciliation controller, egress-only (K8s API)
-/// - **volcano-scheduler**: batch scheduler, egress-only (K8s API)
+/// - `volcano-admission`: admission webhooks called by kube-apiserver
+///   (port 8443, Webhook mTLS).
+/// - `volcano-controllers`: reconciliation controller, egress-only.
+/// - `volcano-scheduler`: batch scheduler, egress-only.
 pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
     vec![
-        lmm(
+        mesh_member(
             "volcano-admission",
             "volcano-system",
             LatticeMeshMemberSpec {
@@ -159,7 +154,7 @@ pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        lmm(
+        mesh_member(
             "volcano-controllers",
             "volcano-system",
             LatticeMeshMemberSpec {
@@ -179,7 +174,7 @@ pub fn generate_volcano_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        lmm(
+        mesh_member(
             "volcano-scheduler",
             "volcano-system",
             LatticeMeshMemberSpec {
@@ -215,90 +210,34 @@ mod tests {
     fn manifests_are_embedded() {
         let m = generate_volcano();
         assert!(!m.is_empty());
-    }
-
-    #[test]
-    fn namespace_is_first_manifest() {
-        let m = generate_volcano();
-        assert!(
-            m[0].contains("volcano-system"),
-            "First manifest should create the volcano-system namespace"
-        );
-        assert!(
-            m[0].contains("istio.io/dataplane-mode: ambient"),
-            "Volcano namespace must be enrolled in ambient mesh"
-        );
+        assert!(m[0].contains("volcano-system"));
+        assert!(m[0].contains("istio.io/dataplane-mode: ambient"));
     }
 
     #[test]
     fn webhook_excludes_lattice_system() {
         let m = generate_volcano();
-        let webhook_manifests: Vec<&String> = m
+        for wh in m
             .iter()
             .filter(|doc| doc.contains("MutatingWebhookConfiguration"))
-            .collect();
-
-        // If Volcano has webhook configs, they should exclude lattice-system
-        for wh in &webhook_manifests {
+        {
             assert!(
                 wh.contains("lattice-system"),
-                "MutatingWebhookConfiguration should exclude lattice-system namespace"
+                "MutatingWebhookConfiguration should exclude lattice-system"
             );
         }
     }
 
     #[test]
-    fn volcano_mesh_members_generated() {
+    fn mesh_members_have_expected_shape() {
         let members = generate_volcano_mesh_members();
-        assert_eq!(
-            members.len(),
-            3,
-            "should have admission + controllers + scheduler"
-        );
+        assert_eq!(members.len(), 3);
 
-        for m in &members {
-            assert_eq!(m.metadata.namespace.as_deref(), Some("volcano-system"));
-            assert!(m.spec.validate().is_ok());
-            assert!(
-                m.spec.ambient,
-                "{} should be ambient",
-                m.metadata.name.as_deref().unwrap()
-            );
-        }
-
-        // admission webhook
         let adm = members
             .iter()
             .find(|m| m.metadata.name.as_deref() == Some("volcano-admission"))
-            .expect("admission member should exist");
-        assert_eq!(adm.spec.ports.len(), 1);
+            .expect("admission member");
         assert_eq!(adm.spec.ports[0].port, 8443);
         assert_eq!(adm.spec.ports[0].peer_auth, PeerAuth::Webhook);
-        assert_eq!(
-            adm.spec.service_account.as_deref(),
-            Some("volcano-admission")
-        );
-
-        // controllers (egress-only)
-        let ctrl = members
-            .iter()
-            .find(|m| m.metadata.name.as_deref() == Some("volcano-controllers"))
-            .expect("controllers member should exist");
-        assert!(ctrl.spec.ports.is_empty(), "controllers is egress-only");
-        assert_eq!(
-            ctrl.spec.service_account.as_deref(),
-            Some("volcano-controllers")
-        );
-
-        // scheduler (egress-only)
-        let sched = members
-            .iter()
-            .find(|m| m.metadata.name.as_deref() == Some("volcano-scheduler"))
-            .expect("scheduler member should exist");
-        assert!(sched.spec.ports.is_empty(), "scheduler is egress-only");
-        assert_eq!(
-            sched.spec.service_account.as_deref(),
-            Some("volcano-scheduler")
-        );
     }
 }

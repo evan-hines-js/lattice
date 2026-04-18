@@ -12,8 +12,7 @@ use lattice_crd::crd::{
 };
 
 use lattice_common::kube_utils::split_yaml_documents;
-
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 use lattice_common::MONITORING_NAMESPACE;
 
 /// Namespace for KEDA components.
@@ -48,7 +47,7 @@ pub fn generate_keda() -> &'static [String] {
 pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
     vec![
         // keda-metrics-apiserver — webhook called by kube-apiserver, aggregates metrics
-        lmm(
+        mesh_member(
             "keda-metrics-apiserver",
             KEDA_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -74,7 +73,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
             },
         ),
         // keda-admission-webhooks — webhook called by kube-apiserver
-        lmm(
+        mesh_member(
             "keda-admission-webhooks",
             KEDA_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -100,7 +99,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
             },
         ),
         // keda-operator — receives gRPC from metrics-apiserver, scales workloads
-        lmm(
+        mesh_member(
             "keda-operator",
             KEDA_NAMESPACE,
             LatticeMeshMemberSpec {

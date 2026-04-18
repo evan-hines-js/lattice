@@ -134,6 +134,53 @@ Same shape for every Install controller, even though the work inside each phase 
 
 All phases commit to `status.phase` atomically — a controller crash resumes from `status.phase` on restart.
 
+## Version-Specific Upgrade Steps
+
+Many upgrades require logic that only applies to a specific version transition — a CRD field rename, a waypoint relabel, a one-time data migration. These do NOT compress to a shared "upgrade protocol" across components; each component has its own quirks. The target pattern, per component:
+
+```
+crates/lattice-<component>/src/install/migrations/
+├── mod.rs            // registry of all known migrations for this component
+├── v1_19_to_v1_20.rs // one file per version step
+├── v1_20_to_v2_0.rs  // one file per version step
+└── ...
+```
+
+Each migration is a value in a static registry:
+
+```rust
+pub struct Migration {
+    pub from: VersionRange,        // ">=1.19, <1.20"
+    pub to: VersionRange,          // ">=1.20, <1.21"
+    pub description: &'static str, // "Rename waypoint label from X to Y"
+    pub pre:  MigrationFn,         // before manifest apply
+    pub post: MigrationFn,         // after manifest apply, before Ready gate
+}
+```
+
+Controller upgrade loop:
+
+```
+observed = status.observedVersion
+target   = spec.version
+applicable = MIGRATIONS.filter(from.matches(observed) && to.matches(target))
+for m in applicable: m.pre().await?        // CRD schema checks, drain, pre-validation
+apply_manifests(new_bundle).await?
+health_gate().await?
+for m in applicable: m.post().await?       // relabel, data migration, post-validation
+```
+
+**Properties:**
+
+- **Discoverable.** `ls migrations/` shows every version step in the component's history.
+- **Data-driven.** Adding a new migration is one module + one registry entry. No controller changes.
+- **Testable in isolation.** Each migration has its own unit + e2e tests.
+- **Component-specific.** Istio's migrations (waypoint relabel) don't share shape with Cilium's (CRD additions) or cert-manager's (webhook rotation order). Each component owns what it knows.
+- **Hard-fail early.** Destructive transitions (e.g. Istio 1.x → 2.0 with breaking CRD changes) return a structured error from `pre` → controller sets `phase: PreFlightFailed` with an actionable message. Human intervention, not silent breakage.
+- **Forward-only by default.** Rollback reuses the snapshot-and-restore model; migrations don't each implement their own reverse.
+
+**Not built yet.** Phase 1 is install-only — no migrations exist. The first Phase 2 component to land an upgrade protocol (Tetragon, easiest) will introduce the first `migrations/` module. Subsequent components adopt the same pattern as they acquire their first version-specific step.
+
 ## Rollback Model
 
 Within-attempt only. Cross-release rollback is not supported.

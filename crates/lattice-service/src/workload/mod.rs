@@ -335,7 +335,7 @@ pub struct GeneratedWorkloads {
     /// KEDA ScaledObject for autoscaling
     pub scaled_object: Option<ScaledObject>,
     /// Volcano PodGroup for topology-aware scheduling
-    pub pod_group: Option<lattice_volcano::PodGroup>,
+    pub pod_group: Option<lattice_volcano_policy::PodGroup>,
     /// Configuration resources (ConfigMaps, Secrets, PVCs, ExternalSecrets)
     pub config: lattice_workload::CompiledConfig,
 }
@@ -413,12 +413,12 @@ impl WorkloadCompiler {
 
         // Generate PodGroup for topology-aware scheduling
         if let Some(ref topology) = spec.topology {
-            output.pod_group = Some(lattice_volcano::compile_service_pod_group(
+            output.pod_group = Some(lattice_volcano_policy::compile_service_pod_group(
                 name, namespace, topology,
             ));
             // Annotate pod template so Volcano associates pods with this PodGroup
             deployment.spec.template.metadata.annotations.insert(
-                lattice_volcano::PODGROUP_ANNOTATION.to_string(),
+                lattice_volcano_policy::PODGROUP_ANNOTATION.to_string(),
                 name.to_string(),
             );
         }

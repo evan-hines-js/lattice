@@ -6,7 +6,12 @@
 //! lifecycle phase enum and the upgrade policy — live here. Per-component CRDs
 //! are in sibling modules.
 
+pub mod cert_manager;
+pub mod cilium;
+pub mod eso;
+pub mod istio;
 pub mod tetragon;
+pub mod volcano;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

@@ -16,7 +16,7 @@ lattice-crd = { workspace = true }
 lattice-graph = { workspace = true }
 lattice-infra = { workspace = true }
 lattice-secret-provider = { workspace = true }
-lattice-volcano = { workspace = true }
+lattice-volcano-policy = { workspace = true }
 lattice-workload = { workspace = true }
 lattice-quota = { workspace = true }
 lattice-cache = { workspace = true }

@@ -335,7 +335,10 @@ pub async fn ensure_graph(
     }
 
     loop {
-        match lattice_infra::bootstrap::read_trust_domain(client).await {
+        match lattice_istio::install::resolve_istio_ca(client)
+            .await
+            .trust_domain
+        {
             Some(td) => {
                 let graph =
                     Arc::new(ServiceGraph::new(&td).with_cluster_name(cluster_name.to_string()));

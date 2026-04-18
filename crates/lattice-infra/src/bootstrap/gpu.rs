@@ -10,8 +10,7 @@ use lattice_common::LABEL_NAME;
 use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
 use lattice_common::kube_utils::split_yaml_documents;
-
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 
 /// Pre-rendered GPU stack manifests (GPU Operator) with namespaces.
 static GPU_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -48,7 +47,7 @@ pub fn generate_gpu_stack() -> &'static [String] {
 /// NFD master, GC, and worker DaemonSets are internal to the operator and run
 /// in kube-system (already excluded from mesh policies).
 pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
-    vec![lmm(
+    vec![mesh_member(
         "gpu-operator",
         "gpu-operator",
         LatticeMeshMemberSpec {
@@ -171,7 +170,7 @@ spec:
 
 /// Generate LatticeMeshMember for the GPU monitor DaemonSet.
 pub fn generate_gpu_monitor_mesh_member() -> LatticeMeshMember {
-    lmm(
+    mesh_member(
         "lattice-gpu-monitor",
         lattice_core::LATTICE_SYSTEM_NAMESPACE,
         LatticeMeshMemberSpec {

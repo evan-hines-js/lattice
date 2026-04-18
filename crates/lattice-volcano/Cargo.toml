@@ -3,13 +3,19 @@ name = "lattice-volcano"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Volcano VCJob compiler for Lattice batch workloads"
+description = "Volcano dependency install — helm manifests, vGPU device plugin, controller"
+build = "build.rs"
 
 [dependencies]
 lattice-common = { workspace = true }
+lattice-core = { workspace = true }
 lattice-crd = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
 
-[dev-dependencies]
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+tokio = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+lattice-helm-build.workspace = true

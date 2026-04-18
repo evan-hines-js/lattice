@@ -1,0 +1,21 @@
+[package]
+name = "lattice-cilium"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cilium dependency install — helm manifests, CiliumClusterwideNetworkPolicy generators, controller"
+build = "build.rs"
+
+[dependencies]
+lattice-common = { workspace = true }
+lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+lattice-helm-build.workspace = true

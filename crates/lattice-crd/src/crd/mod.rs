@@ -61,7 +61,14 @@ pub use infra_provider::{
     AwsProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase, InfraProviderSpec,
     InfraProviderStatus, InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
+pub use install::cert_manager::{
+    CertManagerInstall, CertManagerInstallSpec, CertManagerInstallStatus,
+};
+pub use install::cilium::{CiliumInstall, CiliumInstallSpec, CiliumInstallStatus};
+pub use install::istio::{IstioInstall, IstioInstallSpec, IstioInstallStatus};
+pub use install::eso::{ESOInstall, ESOInstallSpec, ESOInstallStatus};
 pub use install::tetragon::{TetragonInstall, TetragonInstallSpec, TetragonInstallStatus};
+pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec, VolcanoInstallStatus};
 pub use install::{HealthGate, InstallPhase, UpgradeAttempt, UpgradeOutcome, UpgradePolicy};
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,

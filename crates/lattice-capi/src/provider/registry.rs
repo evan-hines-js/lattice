@@ -28,6 +28,25 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_tetragon::install::manifests::generate_tetragon(),
         ));
+        set.extend(extract_image_registries(
+            lattice_eso::install::manifests::generate_eso(),
+        ));
+        set.extend(extract_image_registries(
+            lattice_cert_manager::install::manifests::generate_cert_manager(),
+        ));
+        set.extend(extract_image_registries(
+            lattice_volcano::install::manifests::generate_volcano(),
+        ));
+        set.extend(extract_image_registries(
+            lattice_cilium::install::manifests::generate_cilium_manifests(),
+        ));
+        set.extend(extract_image_registries(
+            &lattice_istio::install::manifests::render_istio_manifests(
+                "registry-scan",
+                "lattice.scan",
+                &[],
+            ),
+        ));
         set.into_iter().collect()
     });
     &REGS

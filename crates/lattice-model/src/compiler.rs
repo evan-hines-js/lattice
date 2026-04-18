@@ -17,8 +17,8 @@ use lattice_crd::crd::{
     ModelRoutingSpec, ModelSourceSpec, PeerAuth, PortSpec, ProviderType, ServiceRef,
 };
 use lattice_graph::ServiceGraph;
-use lattice_volcano::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
-use lattice_volcano::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
+use lattice_volcano_policy::routing_compiler::{PD_ROLE_DECODE, PD_ROLE_PREFILL};
+use lattice_volcano_policy::{CompiledAutoscaling, CompiledRouting, ModelServing, RoleTemplates};
 use lattice_workload::{CompiledConfig, WorkloadCompiler};
 
 use crate::error::ModelError;
@@ -74,7 +74,7 @@ fn has_pd_disaggregation(
     roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
 ) -> bool {
     routing
-        .map(|r| r.kv_connector.is_some() && lattice_volcano::routing_compiler::has_pd_roles(roles))
+        .map(|r| r.kv_connector.is_some() && lattice_volcano_policy::routing_compiler::has_pd_roles(roles))
         .unwrap_or(false)
 }
 
@@ -600,11 +600,11 @@ fn assemble_serving(
     role_templates: &BTreeMap<String, RoleTemplates>,
     role_suffix: &str,
 ) -> Result<AssembledServing, ModelError> {
-    let compilation = lattice_volcano::compile_model_serving(model, role_templates, role_suffix);
+    let compilation = lattice_volcano_policy::compile_model_serving(model, role_templates, role_suffix);
     let serving_name = &compilation.model_serving.metadata.name;
 
     let routing = model.spec.routing.as_ref().map(|routing_spec| {
-        lattice_volcano::compile_model_routing(
+        lattice_volcano_policy::compile_model_routing(
             model,
             routing_spec,
             serving_name,
@@ -613,7 +613,7 @@ fn assemble_serving(
     });
 
     let autoscaling = {
-        let compiled = lattice_volcano::compile_model_autoscaling(model);
+        let compiled = lattice_volcano_policy::compile_model_autoscaling(model);
         if compiled.policies.is_empty() {
             None
         } else {

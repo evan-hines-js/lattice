@@ -306,7 +306,7 @@ impl ManifestGenerator for DefaultManifestGenerator {
 
         // CNI manifests first (Cilium) - embedded at build time
         manifests.extend(
-            lattice_infra::bootstrap::cilium::generate_cilium_manifests()
+            lattice_cilium::install::manifests::generate_cilium_manifests()
                 .iter()
                 .cloned(),
         );

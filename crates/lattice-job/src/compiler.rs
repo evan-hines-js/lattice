@@ -26,7 +26,7 @@ use lattice_crd::crd::{
 };
 use lattice_graph::ServiceGraph;
 use lattice_template::TemplateString;
-use lattice_volcano::{VCCronJob, VCJob};
+use lattice_volcano_policy::{VCCronJob, VCJob};
 use lattice_workload::{inject_pod_labels, CompiledConfig, WorkloadCompiler};
 
 use crate::error::JobError;
@@ -228,9 +228,9 @@ pub async fn compile_job(
     // Build VCJob from aggregated pod templates, then wrap in VCCronJob if scheduled.
     // For training jobs, the Volcano `svc` plugin creates the headless Service
     // and sets hostname/subdomain on each pod — no manual service needed.
-    let vcjob = lattice_volcano::compile_vcjob(job, &pod_templates);
+    let vcjob = lattice_volcano_policy::compile_vcjob(job, &pod_templates);
     let workload = if job.spec.is_cron() {
-        VolcanoWorkload::CronJob(lattice_volcano::compile_vccronjob(job, vcjob))
+        VolcanoWorkload::CronJob(lattice_volcano_policy::compile_vccronjob(job, vcjob))
     } else {
         VolcanoWorkload::Job(vcjob)
     };

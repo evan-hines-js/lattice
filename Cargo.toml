@@ -40,6 +40,12 @@ members = [
     "crates/lattice-core",
     "crates/lattice-graph",
     "crates/lattice-render",
+    "crates/lattice-helm-build",
+    "crates/lattice-eso",
+    "crates/lattice-cert-manager",
+    "crates/lattice-volcano-policy",
+    "crates/lattice-cilium",
+    "crates/lattice-istio",
 ]
 
 [workspace.package]
@@ -86,6 +92,12 @@ lattice-crd = { path = "crates/lattice-crd" }
 lattice-core = { path = "crates/lattice-core" }
 lattice-graph = { path = "crates/lattice-graph" }
 lattice-render = { path = "crates/lattice-render" }
+lattice-helm-build = { path = "crates/lattice-helm-build" }
+lattice-eso = { path = "crates/lattice-eso" }
+lattice-cert-manager = { path = "crates/lattice-cert-manager" }
+lattice-volcano-policy = { path = "crates/lattice-volcano-policy" }
+lattice-cilium = { path = "crates/lattice-cilium" }
+lattice-istio = { path = "crates/lattice-istio" }
 
 # Optimization
 good_lp = { version = "1.15", default-features = false, features = ["microlp"] }

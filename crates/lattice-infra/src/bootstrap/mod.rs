@@ -11,26 +11,21 @@
 //!
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
-pub mod cert_manager;
-pub mod cilium;
-pub mod eastwest;
-pub mod eso;
 pub mod gpu;
-pub mod istio;
 pub mod keda;
 pub mod kthena;
 pub mod metrics_server;
 pub mod prometheus;
 pub mod velero;
-pub mod volcano;
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use kube::ResourceExt;
-use tracing::{debug, info};
+use tracing::debug;
 
 use lattice_common::kube_utils::split_yaml_documents;
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_WEBHOOK_PORT, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
     OPERATOR_NAME, VMAGENT_SA_NAME,
@@ -113,9 +108,8 @@ pub struct InfrastructureConfig {
     pub bootstrap: BootstrapProvider,
     /// Cluster name used for Istio clusterName / network identity.
     pub cluster_name: String,
-    /// Skip Cilium policies (true for kind/bootstrap clusters without Cilium)
-    pub skip_cilium_policies: bool,
-    /// Skip Istio, Gateway API CRDs, and mesh-related Cilium policies
+    /// Skip Istio, Gateway API CRDs, and mesh-related policies entirely.
+    /// True for bootstrap / kind clusters without service workloads.
     pub skip_service_mesh: bool,
     /// Parent cell hostname (None for root/management clusters)
     pub parent_host: Option<String>,
@@ -129,21 +123,6 @@ pub struct InfrastructureConfig {
     pub backups: BackupsConfig,
     /// Network topology configuration for topology-aware scheduling.
     pub network_topology: Option<NetworkTopologyConfig>,
-    /// Lattice root CA for generating Istio intermediate CA (cacerts Secret).
-    /// When set, a per-cluster intermediate CA is generated and installed as
-    /// the `cacerts` Secret before istiod starts, enabling cross-cluster mTLS.
-    pub root_ca: Option<crate::pki::CertificateAuthority>,
-    /// Trust domain for Istio mTLS, derived from the root CA fingerprint.
-    /// All clusters sharing the same root CA get the same trust domain,
-    /// so cross-cluster mTLS works without trustDomainAliases.
-    /// Format: `lattice.{sha256_hex_prefix}`
-    /// None = root CA not available yet; callers MUST skip Istio configuration.
-    pub trust_domain: Option<String>,
-    /// Remote cluster names for Istio meshNetworks gateway mapping.
-    /// None = don't touch meshNetworks (SSA preserves existing value).
-    /// Some(vec![]) = explicitly clear meshNetworks.
-    /// Some(vec!["cluster-a"]) = populate with gateway entries.
-    pub remote_networks: Option<Vec<String>>,
 }
 
 impl Default for InfrastructureConfig {
@@ -152,7 +131,6 @@ impl Default for InfrastructureConfig {
             provider: ProviderType::default(),
             bootstrap: BootstrapProvider::default(),
             cluster_name: String::new(),
-            skip_cilium_policies: false,
             skip_service_mesh: false,
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
@@ -160,144 +138,22 @@ impl Default for InfrastructureConfig {
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
             network_topology: None,
-            root_ca: None,
-            trust_domain: None,
-            remote_networks: None,
         }
     }
-}
-
-/// Istio CA configuration resolved from cluster state.
-///
-/// Single source of truth for Istio CA decisions. Callers set these fields
-/// on `InfrastructureConfig` directly — no separate cacerts/trust_domain logic needed.
-pub struct IstioCaConfig {
-    /// Trust domain derived from the root CA fingerprint.
-    /// `None` means lattice-ca doesn't exist yet — Istio must be skipped entirely.
-    pub trust_domain: Option<String>,
-    /// Root CA for generating the Istio `cacerts` intermediate CA.
-    /// `None` when cacerts already exists (no regeneration) or when lattice-ca is missing.
-    pub root_ca: Option<crate::pki::CertificateAuthority>,
-}
-
-/// Resolve the Istio CA configuration from cluster state.
-///
-/// Reads `lattice-ca` and checks whether `cacerts` already exists.
-/// Returns the trust domain and (optionally) the root CA for cacerts generation.
-///
-/// Rules:
-/// - No `lattice-ca` → trust_domain=None, root_ca=None → Istio skipped
-/// - `lattice-ca` exists + `cacerts` exists → trust_domain=Some, root_ca=None → Istio installed, no cacerts regen
-/// - `lattice-ca` exists + no `cacerts` → trust_domain=Some, root_ca=Some → Istio installed with cacerts
-pub async fn resolve_istio_ca(client: &kube::Client) -> IstioCaConfig {
-    use k8s_openapi::api::core::v1::Secret;
-    use lattice_common::{CA_CERT_KEY, CA_KEY_KEY, CA_SECRET};
-    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
-
-    let api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let secret = match api.get(CA_SECRET).await {
-        Ok(s) => s,
-        Err(_) => {
-            return IstioCaConfig {
-                trust_domain: None,
-                root_ca: None,
-            }
-        }
-    };
-
-    let data = match secret.data {
-        Some(d) => d,
-        None => {
-            return IstioCaConfig {
-                trust_domain: None,
-                root_ca: None,
-            }
-        }
-    };
-
-    let cert_pem = match data
-        .get(CA_CERT_KEY)
-        .and_then(|b| String::from_utf8(b.0.clone()).ok())
-    {
-        Some(p) => p,
-        None => {
-            return IstioCaConfig {
-                trust_domain: None,
-                root_ca: None,
-            }
-        }
-    };
-
-    let trust_domain = match trust_domain_from_ca(&cert_pem) {
-        Some(td) => td,
-        None => {
-            return IstioCaConfig {
-                trust_domain: None,
-                root_ca: None,
-            }
-        }
-    };
-
-    // cacerts already exists — don't regenerate the intermediate CA
-    let cacerts_api: kube::Api<Secret> = kube::Api::namespaced(client.clone(), "istio-system");
-    if cacerts_api.get("cacerts").await.is_ok() {
-        return IstioCaConfig {
-            trust_domain: Some(trust_domain),
-            root_ca: None,
-        };
-    }
-
-    // Need to generate cacerts — load the full CA (cert + key)
-    let root_ca = data
-        .get(CA_KEY_KEY)
-        .and_then(|b| String::from_utf8(b.0.clone()).ok())
-        .and_then(|key_pem| crate::pki::CertificateAuthority::from_pem(&cert_pem, &key_pem).ok());
-
-    IstioCaConfig {
-        trust_domain: Some(trust_domain),
-        root_ca,
-    }
-}
-
-/// Read just the trust domain from `lattice-ca`.
-///
-/// Convenience wrapper around [`resolve_istio_ca`] for callers that only
-/// need the trust domain (e.g., ServiceGraph initialization).
-pub async fn read_trust_domain(client: &kube::Client) -> Option<String> {
-    resolve_istio_ca(client).await.trust_domain
-}
-
-/// Compute the trust domain from a root CA's certificate fingerprint.
-/// Uses the first 54 hex characters (27 bytes / 216 bits) of the SHA-256
-/// of the DER-encoded certificate. Total: `lattice.` (8) + 54 = 62 chars,
-/// under Istio's 63-char trust domain limit.
-///
-/// Returns `None` if the PEM cannot be parsed.
-///
-/// Verify with: `openssl x509 -in ca.crt -fingerprint -sha256 -noout`
-pub fn trust_domain_from_ca(ca_cert_pem: &str) -> Option<String> {
-    let der = crate::pki::parse_pem(ca_cert_pem)
-        .ok()
-        .filter(|d| !d.is_empty())?;
-    let hash = lattice_common::kube_utils::sha256(&der);
-    // 27 bytes = 54 hex chars. Total: lattice.(54) = 62 chars (under 63 limit)
-    let hex: String = hash.iter().take(27).map(|b| format!("{:02x}", b)).collect();
-    Some(format!("lattice.{}", hex))
 }
 
 impl From<&LatticeCluster> for InfrastructureConfig {
-    /// Create an InfrastructureConfig from a LatticeCluster
+    /// Create an InfrastructureConfig from a LatticeCluster.
     ///
-    /// Extracts provider, bootstrap, and cluster name.
-    /// NOTE: Does NOT set parent_host - that must come from the `lattice-parent-config`
-    /// secret (the upstream parent this cluster connects to), not from parent_config
-    /// (which is for this cluster's own cell server endpoints).
+    /// NOTE: Does NOT set parent_host — that comes from the
+    /// `lattice-parent-config` Secret (the upstream parent this cluster
+    /// connects to), not from `parent_config` (which is for this cluster's
+    /// own cell server endpoints).
     fn from(cluster: &LatticeCluster) -> Self {
         Self {
             provider: cluster.spec.provider.provider_type(),
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             cluster_name: cluster.name_any(),
-            skip_cilium_policies: false,
             skip_service_mesh: !cluster.spec.services,
             parent_host: None,
             parent_grpc_port: DEFAULT_GRPC_PORT,
@@ -305,9 +161,6 @@ impl From<&LatticeCluster> for InfrastructureConfig {
             monitoring: cluster.spec.monitoring.clone(),
             backups: cluster.spec.backups.clone(),
             network_topology: cluster.spec.network_topology.clone(),
-            root_ca: None,         // Set by caller when CA is available
-            trust_domain: None,    // Set by caller from root CA
-            remote_networks: None, // Set by caller from LatticeClusterRoutes
         }
     }
 }
@@ -352,118 +205,44 @@ pub async fn discover_remote_networks(client: &kube::Client) -> Option<Vec<Strin
 pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>, String> {
     let mut phases = Vec::new();
 
-    // Phase 0: cert-manager (must be ready before anything with webhooks)
-    phases.push(InfraPhase {
-        name: "cert-manager",
-        components: vec![InfraComponent {
-            name: "cert-manager",
-            version: cert_manager::cert_manager_version(),
-            manifests: cert_manager::generate_cert_manager().to_vec(),
-            health_namespace: Some("cert-manager"),
-        }],
-    });
-
     // Phase 1: service mesh (Istio + Cilium policies + Gateway API CRDs)
     if !config.skip_service_mesh {
-        let mut components = Vec::new();
-
-        // Gateway API CRDs first (Istio depends on them)
         let gw_api = generate_gateway_api_crds();
         debug!(count = gw_api.len(), "generated Gateway API CRDs");
-        components.push(InfraComponent {
-            name: "gateway-api",
-            version: env!("GATEWAY_API_VERSION"),
-            manifests: gw_api.to_vec(),
-            health_namespace: None, // CRDs only, no deployments
-        });
 
-        // Istio ambient mesh + policies (requires trust domain from root CA).
-        // On first bootstrap the CA doesn't exist yet — skip Istio and let the
-        // next reconcile apply it once the CA is available.
-        if let Some(ref trust_domain) = config.trust_domain {
-            components.push(InfraComponent {
-                name: "istio",
-                version: env!("ISTIO_VERSION"),
-                manifests: generate_istio_manifests(config, trust_domain)?,
-                health_namespace: Some("istio-system"),
-            });
-
-            // East-west gateway for multi-cluster HBONE traffic
-            let ew_manifests = vec![eastwest::generate_eastwest_gateway(&config.cluster_name)];
-            components.push(InfraComponent {
-                name: "eastwest-gateway",
-                version: env!("ISTIO_VERSION"),
-                manifests: ew_manifests,
-                health_namespace: None, // Gateway controller creates deployment async
-            });
-        } else {
-            info!("Skipping Istio — trust domain not yet available (root CA pending)");
-        }
-
-        // Cilium network policies
-        if !config.skip_cilium_policies {
-            components.push(InfraComponent {
-                name: "cilium-policies",
-                version: env!("CILIUM_VERSION"),
-                manifests: generate_cilium_policy_manifests()?,
-                health_namespace: None, // Policy objects, no deployments
-            });
-        }
-
-        // Enroll lattice-system in ambient mesh so ESO can reach the operator's
-        // local-secrets webhook via HBONE/mTLS. Applied in Phase 1 so the
-        // namespace label and MeshMember CRD are present before ESO starts in
-        // Phase 2. The static operator-allow AuthorizationPolicy (above) covers
-        // the bootstrap window before the MeshMember controller processes this.
         let mut operator_manifests = vec![namespace_yaml_ambient(LATTICE_SYSTEM_NAMESPACE)];
         operator_manifests.extend(serialize_lmms(vec![generate_operator_mesh_member()])?);
-        components.push(InfraComponent {
-            name: "operator-mesh-enrollment",
-            version: "1",
-            manifests: operator_manifests,
-            health_namespace: None,
-        });
 
         phases.push(InfraPhase {
             name: "service-mesh",
-            components,
+            components: vec![
+                InfraComponent {
+                    name: "gateway-api",
+                    version: env!("GATEWAY_API_VERSION"),
+                    manifests: gw_api.to_vec(),
+                    health_namespace: None,
+                },
+                InfraComponent {
+                    name: "operator-mesh-enrollment",
+                    version: "1",
+                    manifests: operator_manifests,
+                    health_namespace: None,
+                },
+            ],
         });
     }
 
     // Phase 2: core services (always installed)
     {
-        let mut components = vec![
-            InfraComponent {
-                name: "eso",
-                version: eso::eso_version(),
-                manifests: eso::generate_eso().to_vec(),
-                health_namespace: Some("external-secrets"),
-            },
-            InfraComponent {
-                name: "volcano",
-                version: volcano::volcano_version(),
-                manifests: generate_volcano_manifests(config),
-                health_namespace: Some("volcano-system"),
-            },
-            InfraComponent {
-                name: "kthena",
-                version: kthena::kthena_version(),
-                manifests: kthena::generate_kthena().to_vec(),
-                health_namespace: Some("kthena-system"),
-            },
-        ];
+        let mut components = vec![InfraComponent {
+            name: "kthena",
+            version: kthena::kthena_version(),
+            manifests: kthena::generate_kthena().to_vec(),
+            health_namespace: Some("kthena-system"),
+        }];
 
-        // Tetragon has migrated to its own install crate — the TetragonInstall
-        // controller reconciles it via a CR created by the LatticeCluster
-        // orchestrator. See `lattice_tetragon::install`.
-
-        // Mesh policies for core components (ESO, Volcano, Kthena)
-        // These must be in Phase 2 because these namespaces are subject to
-        // default-deny after Phase 1 (service-mesh) completes.
         if !config.skip_service_mesh {
             let mut mesh_manifests = Vec::new();
-            mesh_manifests.extend(serialize_lmms(eso::generate_eso_mesh_members())?);
-            mesh_manifests.extend(serialize_lmms(volcano::generate_volcano_mesh_members())?);
             mesh_manifests.extend(serialize_lmms(kthena::generate_kthena_mesh_members())?);
             mesh_manifests.push(
                 serde_json::to_string_pretty(&generate_kthena_router_cedar_policy())
@@ -693,122 +472,6 @@ pub async fn apply_all_phases(
     Ok(statuses)
 }
 
-// ---- Internal manifest generators ----
-
-/// Generate Istio manifests (namespace + charts + cacerts + policies).
-///
-/// The cacerts Secret MUST be created before istiod starts. When istiod finds
-/// a `cacerts` Secret in `istio-system`, it uses the intermediate CA from that
-/// Secret to sign workload certificates instead of generating a self-signed CA.
-/// This enables cross-cluster mTLS when all clusters share the same root CA.
-fn generate_istio_manifests(
-    config: &InfrastructureConfig,
-    trust_domain: &str,
-) -> Result<Vec<String>, String> {
-    // istio-system needs topology.istio.io/network label for multi-cluster
-    let mut manifests = vec![namespace_yaml_with_network(
-        "istio-system",
-        &config.cluster_name,
-    )];
-
-    // cacerts Secret with per-cluster intermediate CA (must be before istiod).
-    // Only included when root_ca is Some — the caller is responsible for
-    // checking whether cacerts already exists to avoid regenerating the
-    // intermediate CA on every reconcile (which would break in-flight mTLS).
-    if let Some(ref root_ca) = config.root_ca {
-        manifests.push(
-            generate_cacerts_manifest(root_ca, &config.cluster_name)
-                .map_err(|e| format!("Failed to generate cacerts: {e}"))?,
-        );
-    }
-
-    let reconciler = istio::IstioReconciler::new(
-        &config.cluster_name,
-        trust_domain.to_string(),
-        config.remote_networks.clone(),
-    );
-    manifests.extend(reconciler.manifests().iter().cloned());
-
-    for policy in [
-        serde_json::to_string_pretty(&istio::IstioReconciler::generate_peer_authentication()),
-        serde_json::to_string_pretty(&istio::IstioReconciler::generate_default_deny()),
-        serde_json::to_string_pretty(&istio::IstioReconciler::generate_waypoint_default_deny()),
-        serde_json::to_string_pretty(&istio::IstioReconciler::generate_operator_allow_policy()),
-        serde_json::to_string_pretty(&istio::IstioReconciler::generate_eastwest_gateway_allow()),
-    ] {
-        manifests.push(policy.map_err(|e| format!("Failed to serialize Istio policy: {e}"))?);
-    }
-
-    Ok(manifests)
-}
-
-/// Generate the `cacerts` Secret for Istio's intermediate CA.
-///
-/// Istio expects four PEM files in a `cacerts` Secret in `istio-system`:
-/// - `ca-cert.pem`: per-cluster intermediate CA (signed by root)
-/// - `ca-key.pem`: intermediate CA private key
-/// - `root-cert.pem`: shared root CA
-/// - `cert-chain.pem`: intermediate + root concatenated
-fn generate_cacerts_manifest(
-    root_ca: &crate::pki::CertificateAuthority,
-    cluster_name: &str,
-) -> Result<String, crate::pki::PkiError> {
-    use base64::Engine;
-
-    let intermediate = root_ca.generate_istio_intermediate_ca(cluster_name)?;
-    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
-
-    let secret = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {
-            "name": "cacerts",
-            "namespace": "istio-system",
-            "labels": {
-                "app.kubernetes.io/managed-by": "lattice"
-            }
-        },
-        "data": {
-            "ca-cert.pem": b64(&intermediate.ca_cert_pem),
-            "ca-key.pem": b64(&intermediate.ca_key_pem),
-            "root-cert.pem": b64(&intermediate.root_cert_pem),
-            "cert-chain.pem": b64(&intermediate.cert_chain_pem)
-        }
-    });
-
-    Ok(serde_json::to_string_pretty(&secret).expect("serialize cacerts"))
-}
-
-/// Generate Cilium network policy manifests.
-fn generate_cilium_policy_manifests() -> Result<Vec<String>, String> {
-    let mut manifests = Vec::new();
-
-    for policy in [
-        serde_json::to_string_pretty(&cilium::generate_ztunnel_allowlist()),
-        serde_json::to_string_pretty(&cilium::generate_default_deny()),
-        serde_json::to_string_pretty(&cilium::generate_mesh_proxy_egress_policy()),
-        serde_json::to_string_pretty(&cilium::generate_eastwest_gateway_policy()),
-    ] {
-        manifests
-            .push(policy.map_err(|e| format!("Failed to serialize CiliumNetworkPolicy: {e}"))?);
-    }
-
-    Ok(manifests)
-}
-
-/// Generate Volcano manifests including optional topology discovery ConfigMap.
-fn generate_volcano_manifests(config: &InfrastructureConfig) -> Vec<String> {
-    let mut manifests = volcano::generate_volcano().to_vec();
-
-    if let Some(ref topo) = config.network_topology {
-        if let Some(cm) = volcano::generate_topology_discovery_configmap(topo, config.provider) {
-            manifests.push(cm);
-        }
-    }
-
-    manifests
-}
-
 // ---- Helpers ----
 
 /// Pre-rendered Gateway API CRDs embedded at build time.
@@ -824,36 +487,6 @@ pub fn generate_gateway_api_crds() -> &'static [String] {
     &GATEWAY_API_CRDS
 }
 
-pub(crate) fn namespace_yaml(name: &str) -> String {
-    format!(
-        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
-        name
-    )
-}
-
-/// Create a namespace YAML with Istio multi-cluster network label.
-///
-/// The `topology.istio.io/network` label tells istiod which network this
-/// namespace belongs to, required for cross-network traffic routing.
-pub(crate) fn namespace_yaml_with_network(name: &str, network: &str) -> String {
-    format!(
-        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    topology.istio.io/network: {}",
-        name, network
-    )
-}
-
-/// Egress rule allowing traffic to the kube-apiserver.
-///
-/// Required for system components (KEDA, VM operator, etc.) that need to
-/// reach the Kubernetes API from within the ambient mesh.
-/// Port 6443 is the actual endpoint port after DNAT from the ClusterIP (443).
-pub(crate) fn kube_apiserver_egress() -> EgressRule {
-    EgressRule::tcp(
-        EgressTarget::Entity("kube-apiserver".to_string()),
-        vec![6443],
-    )
-}
-
 /// Generate a LatticeMeshMember for the lattice-operator itself.
 ///
 /// Enrolls the operator in the ambient mesh so ESO (also ambient) can reach
@@ -861,7 +494,7 @@ pub(crate) fn kube_apiserver_egress() -> EgressRule {
 /// hack. Ports 8443 (bootstrap webhook) and 50051 (agent gRPC) use Webhook
 /// PeerAuth because their callers lack mesh identity.
 pub fn generate_operator_mesh_member() -> LatticeMeshMember {
-    lmm(
+    mesh_member(
         OPERATOR_NAME,
         LATTICE_SYSTEM_NAMESPACE,
         LatticeMeshMemberSpec {
@@ -927,13 +560,6 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             advertise: None,
         },
     )
-}
-
-/// Create a namespaced LatticeMeshMember.
-pub(crate) fn lmm(name: &str, namespace: &str, spec: LatticeMeshMemberSpec) -> LatticeMeshMember {
-    let mut member = LatticeMeshMember::new(name, spec);
-    member.metadata.namespace = Some(namespace.to_string());
-    member
 }
 
 /// Generate the CedarPolicy that permits vmagent's wildcard outbound.
@@ -1083,17 +709,6 @@ fn serialize_lmms(members: Vec<LatticeMeshMember>) -> Result<Vec<String>, String
                 .map_err(|e| format!("Failed to serialize LatticeMeshMember: {e}"))
         })
         .collect()
-}
-
-/// Create a namespace YAML with Istio ambient mesh enrollment.
-///
-/// Used for infrastructure namespaces (e.g. monitoring) whose pods need
-/// mTLS communication with workload pods enrolled in the ambient mesh.
-pub(crate) fn namespace_yaml_ambient(name: &str) -> String {
-    format!(
-        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    istio.io/dataplane-mode: ambient",
-        name
-    )
 }
 
 #[cfg(test)]
@@ -1290,18 +905,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn trust_domain_fits_dns_label_limit() {
-        // Generate a trust domain from a realistic CA cert PEM and verify
-        // it fits within the 63-character DNS label limit that Istio enforces.
-        let fake_pem = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh0TTDMA==\n-----END CERTIFICATE-----\n";
-        let domain = super::trust_domain_from_ca(fake_pem).expect("should parse test PEM");
-        assert!(
-            domain.len() <= 63,
-            "trust domain '{}' is {} chars, exceeds 63-char limit",
-            domain,
-            domain.len()
-        );
-        assert!(domain.starts_with("lattice."));
-    }
 }

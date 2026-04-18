@@ -9,8 +9,7 @@ use lattice_common::LABEL_NAME;
 use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
 use lattice_common::kube_utils::split_yaml_documents;
-
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 
 static VELERO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("velero")];
@@ -33,7 +32,7 @@ pub fn generate_velero() -> &'static [String] {
 ///
 /// - **velero**: backup controller, egress-only (K8s API + cloud storage)
 pub fn generate_velero_mesh_members() -> Vec<LatticeMeshMember> {
-    vec![lmm(
+    vec![mesh_member(
         "velero",
         "velero",
         LatticeMeshMemberSpec {

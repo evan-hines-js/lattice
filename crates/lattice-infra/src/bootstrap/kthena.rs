@@ -15,8 +15,7 @@ use lattice_crd::crd::{
 };
 
 use lattice_common::kube_utils::split_yaml_documents;
-
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 
 static KTHENA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("kthena-system")];
@@ -49,7 +48,7 @@ pub fn generate_kthena() -> &'static [String] {
 /// All are `ambient: true` for real SPIFFE identities and mTLS bilateral agreement.
 pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
     vec![
-        lmm(
+        mesh_member(
             "kthena-router",
             KTHENA_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -82,7 +81,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        lmm(
+        mesh_member(
             "kthena-controller-manager",
             KTHENA_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -107,7 +106,7 @@ pub fn generate_kthena_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        lmm(
+        mesh_member(
             "kthena-autoscaler",
             KTHENA_NAMESPACE,
             LatticeMeshMemberSpec {

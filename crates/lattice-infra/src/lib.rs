@@ -3,14 +3,13 @@
 //! Provides shared infrastructure used by cluster and service operators:
 //! - **PKI**: CA, certificate generation, CSR signing.
 //! - **mTLS**: TLS configuration for gRPC (re-exported at crate root).
-//! - **Bootstrap**: Helm-rendered manifest generation for components not yet
-//!   migrated to their own install crates (Cilium, Istio, ESO, Velero, etc.).
+//! - **Bootstrap**: Helm-rendered manifests for components not yet migrated
+//!   to their own install crates (GPU operator, KEDA, Kthena, metrics-server,
+//!   Prometheus, Velero).
 //!
-//! This crate MUST NOT depend on per-dependency install crates (`lattice-*`
-//! for Tetragon, future Cilium/Istio/etc). It owns only the components whose
-//! install it still renders directly. The overall aggregation of upstream
-//! registries happens at the consumer (`lattice-capi`), which is the only
-//! crate allowed to reach across every install crate.
+//! This crate MUST NOT depend on per-dependency install crates. It owns only
+//! the components whose install it still renders directly. The full aggregate
+//! of upstream registries lives at the consumer (`lattice-capi`).
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
@@ -21,31 +20,17 @@ pub mod bootstrap;
 pub mod mtls;
 pub mod pki;
 
-// Re-export mTLS types (commonly used across many crates)
 pub use mtls::{
     extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,
 };
 
 /// Container registries referenced by components this crate still renders.
 ///
-/// Covers **only** components in `bootstrap/`. Components migrated out to
-/// their own install crates (Tetragon today; future Cilium, Istio, etc.)
-/// contribute their own registries separately. The consumer (`lattice-capi`)
-/// unions across all producers.
-///
-/// LazyLock caches the scan so the ~20k-line walk across embedded manifests
-/// happens once per process.
+/// Migrated components contribute their own registries directly from their
+/// install crates. `lattice-capi` unions everything.
 pub fn bootstrap_registries() -> &'static [String] {
     static REGS: LazyLock<Vec<String>> = LazyLock::new(|| {
         let mut set: BTreeSet<String> = BTreeSet::new();
-
-        set.extend(extract_image_registries(
-            bootstrap::cert_manager::generate_cert_manager(),
-        ));
-        set.extend(extract_image_registries(
-            bootstrap::cilium::generate_cilium_manifests(),
-        ));
-        set.extend(extract_image_registries(bootstrap::eso::generate_eso()));
         set.extend(extract_image_registries(
             bootstrap::gpu::generate_gpu_stack(),
         ));
@@ -65,20 +50,6 @@ pub fn bootstrap_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             bootstrap::velero::generate_velero(),
         ));
-        set.extend(extract_image_registries(
-            bootstrap::volcano::generate_volcano(),
-        ));
-
-        // Istio manifests depend on cluster-specific config, but `image:` lines
-        // do not — a throwaway reconciler with placeholder values renders the
-        // same image refs as the real one.
-        let istio = bootstrap::istio::IstioReconciler::new(
-            "registry-scan",
-            "lattice.scan".to_string(),
-            None,
-        );
-        set.extend(extract_image_registries(istio.manifests()));
-
         set.into_iter().collect()
     });
     &REGS

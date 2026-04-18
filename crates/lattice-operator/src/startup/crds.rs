@@ -8,10 +8,11 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::{Client, CustomResourceExt};
 
 use lattice_crd::crd::{
-    BackupStore, CedarPolicy, CertIssuer, DNSProvider, ImageProvider, InfraProvider,
-    LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
-    LatticeModel, LatticePackage, LatticeQuota, LatticeRestore, LatticeService, OIDCProvider,
-    SecretProvider, TetragonInstall,
+    BackupStore, CedarPolicy, CertIssuer, CertManagerInstall, CiliumInstall, DNSProvider,
+    ESOInstall, ImageProvider, InfraProvider, IstioInstall, LatticeCluster, LatticeClusterBackup,
+    LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
+    LatticeQuota, LatticeRestore, LatticeService, OIDCProvider, SecretProvider, TetragonInstall,
+    VolcanoInstall,
 };
 
 /// CRD definition with name and resource
@@ -72,6 +73,26 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "tetragoninstalls.lattice.dev",
             crd: TetragonInstall::crd(),
+        },
+        CrdDef {
+            name: "esoinstalls.lattice.dev",
+            crd: ESOInstall::crd(),
+        },
+        CrdDef {
+            name: "certmanagerinstalls.lattice.dev",
+            crd: CertManagerInstall::crd(),
+        },
+        CrdDef {
+            name: "volcanoinstalls.lattice.dev",
+            crd: VolcanoInstall::crd(),
+        },
+        CrdDef {
+            name: "ciliuminstalls.lattice.dev",
+            crd: CiliumInstall::crd(),
+        },
+        CrdDef {
+            name: "istioinstalls.lattice.dev",
+            crd: IstioInstall::crd(),
         },
     ]
 }

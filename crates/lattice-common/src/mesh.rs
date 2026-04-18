@@ -97,6 +97,68 @@ pub fn ingress_gateway_sa_name(namespace: &str) -> String {
 }
 
 // =============================================================================
+// Bootstrap Manifest Helpers
+// =============================================================================
+//
+// Small builders for constructs that every dependency install crate needs
+// (ambient-enrolled Namespace YAML, kube-apiserver egress rule, namespaced
+// LatticeMeshMember constructor). Previously lived as `pub(crate)` helpers
+// inside lattice-infra/bootstrap; hoisted here so per-component install
+// crates can reuse them without depending on lattice-infra.
+
+use lattice_crd::crd::{
+    EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec,
+};
+
+/// Minimal Namespace YAML.
+pub fn namespace_yaml(name: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}",
+        name
+    )
+}
+
+/// Namespace YAML with the Istio multi-cluster network label.
+///
+/// `topology.istio.io/network` tells istiod which network the namespace lives
+/// on; required for cross-network routing.
+pub fn namespace_yaml_with_network(name: &str, network: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    topology.istio.io/network: {}",
+        name, network
+    )
+}
+
+/// Namespace YAML with Istio ambient mesh enrollment.
+///
+/// Sets `istio.io/dataplane-mode: ambient` so pods are ztunneled.
+pub fn namespace_yaml_ambient(name: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {}\n  labels:\n    istio.io/dataplane-mode: ambient",
+        name
+    )
+}
+
+/// Egress rule that permits traffic to the kube-apiserver (TCP 6443 on the
+/// `kube-apiserver` entity).
+///
+/// Required for system components (KEDA, VM operator, ESO, etc.) that need
+/// to reach the Kubernetes API from inside the ambient mesh.
+pub fn kube_apiserver_egress() -> EgressRule {
+    EgressRule::tcp(
+        EgressTarget::Entity("kube-apiserver".to_string()),
+        vec![6443],
+    )
+}
+
+/// Construct a namespaced `LatticeMeshMember`.
+pub fn mesh_member(name: &str, namespace: &str, spec: LatticeMeshMemberSpec) -> LatticeMeshMember {
+    let mut member = LatticeMeshMember::new(name, spec);
+    member.metadata.namespace = Some(namespace.to_string());
+    member
+}
+
+// =============================================================================
 // Trust Domain Helpers
 // =============================================================================
 

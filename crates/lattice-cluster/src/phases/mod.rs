@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use kube::runtime::controller::Action;
 use kube::runtime::events::EventType;
-use kube::{Client, Resource};
+use kube::{Client, Resource, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_capi::provider::{create_provider, CAPIManifest};
@@ -235,22 +235,6 @@ pub async fn reconcile_infrastructure(
         config.parent_grpc_port = parent.endpoint.grpc_port;
     }
 
-    let istio_ca = lattice_infra::bootstrap::resolve_istio_ca(client).await;
-    config.trust_domain = istio_ca.trust_domain;
-    config.root_ca = istio_ca.root_ca;
-
-    // Populate remote networks for Istio meshNetworks.
-    // If CRDs can't be listed, skip the entire reconcile — applying manifests
-    // with stale data could overwrite meshNetworks and break cross-cluster routing.
-    config.remote_networks = match lattice_infra::bootstrap::discover_remote_networks(client).await
-    {
-        Some(networks) => Some(networks),
-        None => {
-            debug!("Skipping infrastructure reconcile — LatticeClusterRoutes not available");
-            return Ok(());
-        }
-    };
-
     // Generate infrastructure manifests (flat list for reconciliation — infra already exists)
     let manifests = lattice_infra::bootstrap::generate_all_manifests(&config)
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
@@ -271,12 +255,45 @@ pub async fn reconcile_infrastructure(
         .await
         .map_err(|e| Error::internal(format!("failed to apply infrastructure: {}", e)))?;
 
-    // Ensure per-dependency Install CRs exist for components that have
-    // migrated out of the bootstrap path. Each component's own controller
-    // then reconciles the CR (install + future upgrade).
     lattice_tetragon::install::ensure_install(client)
         .await
         .map_err(|e| Error::internal(format!("failed to ensure TetragonInstall: {}", e)))?;
+    lattice_eso::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure ESOInstall: {}", e)))?;
+    lattice_cert_manager::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure CertManagerInstall: {}", e)))?;
+    lattice_volcano::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure VolcanoInstall: {}", e)))?;
+    lattice_cilium::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure CiliumInstall: {}", e)))?;
+    if cluster.spec.services {
+        let remote_networks = lattice_infra::bootstrap::discover_remote_networks(client).await;
+        lattice_istio::install::ensure_install(client, &cluster.name_any(), remote_networks)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure IstioInstall: {}", e)))?;
+    }
+
+    if let Some(ref topo) = cluster.spec.network_topology {
+        if let Some(cm) =
+            lattice_volcano::install::manifests::generate_topology_discovery_configmap(
+                topo,
+                cluster.spec.provider.provider_type(),
+            )
+        {
+            lattice_common::apply_manifests(client, &[cm], &options)
+                .await
+                .map_err(|e| {
+                    Error::internal(format!(
+                        "failed to apply Volcano topology discovery ConfigMap: {}",
+                        e
+                    ))
+                })?;
+        }
+    }
 
     Ok(())
 }

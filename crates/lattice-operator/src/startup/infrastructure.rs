@@ -93,13 +93,6 @@ async fn ensure_general_infrastructure(
 
     let infra_config = resolve_infra_config(client, is_bootstrap, cluster_mode, config).await?;
 
-    // If we couldn't determine remote networks (CRD list error), skip infra apply
-    // to avoid overwriting existing meshNetworks with stale data.
-    if infra_config.remote_networks.is_none() {
-        tracing::warn!("Skipping infrastructure apply — LatticeClusterRoutes not available");
-        return Ok(());
-    }
-
     let phases = bootstrap::generate_phases(&infra_config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
@@ -125,7 +118,6 @@ async fn resolve_infra_config(
     if is_bootstrap {
         return Ok(InfrastructureConfig {
             cluster_name: "bootstrap".to_string(),
-            skip_cilium_policies: true,
             skip_service_mesh: true,
             monitoring: MonitoringConfig {
                 enabled: false,
@@ -138,21 +130,13 @@ async fn resolve_infra_config(
 
     let cluster = find_lattice_cluster(client, cluster_mode).await?;
 
-    let istio_ca = lattice_infra::bootstrap::resolve_istio_ca(client).await;
-
     match &cluster {
         Some(c) => {
             let mut cfg = InfrastructureConfig::from(c);
-            cfg.trust_domain = istio_ca.trust_domain;
-            cfg.root_ca = istio_ca.root_ca;
             if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
                 cfg.parent_host = Some(parent.endpoint.host);
                 cfg.parent_grpc_port = parent.endpoint.grpc_port;
             }
-            // Populate remote networks for Istio meshNetworks.
-            // None = error listing CRDs (skip apply to avoid clobbering).
-            // Some(vec![]) = no routes exist yet (valid, apply empty networks).
-            cfg.remote_networks = lattice_infra::bootstrap::discover_remote_networks(client).await;
             tracing::info!(
                 provider = ?cfg.provider,
                 bootstrap = ?cfg.bootstrap,
@@ -172,8 +156,6 @@ async fn resolve_infra_config(
             tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
             Ok(InfrastructureConfig {
                 cluster_name,
-                trust_domain: istio_ca.trust_domain,
-                root_ca: istio_ca.root_ca,
                 monitoring: MonitoringConfig {
                     enabled: false,
                     ha: false,
@@ -192,27 +174,26 @@ async fn resolve_infra_config(
 /// CAPI depends on both being ready (cert-manager for CAPI webhooks, ESO for
 /// credential sync).
 async fn apply_prereqs_phase(client: &Client) -> anyhow::Result<()> {
-    use lattice_infra::bootstrap::{eso, InfraComponent, InfraPhase};
+    use lattice_infra::bootstrap::{InfraComponent, InfraPhase};
 
-    let config = InfrastructureConfig::default();
-    let phases = bootstrap::generate_phases(&config)
-        .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
-
-    let cert_manager_component = phases
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no phases generated"))?
-        .components
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("cert-manager phase has no components"))?;
-
+    // Blocking install of the two components CAPI depends on: cert-manager for
+    // its webhooks, ESO for InfraProvider credential sync. Both ship as their
+    // own per-dependency install crates — we pull manifests directly (not
+    // through the controller CR flow) so the bootstrap ordering is synchronous.
     let phase = InfraPhase {
         name: "prereqs",
         components: vec![
-            cert_manager_component.clone(),
+            InfraComponent {
+                name: "cert-manager",
+                version: lattice_cert_manager::install::manifests::cert_manager_version(),
+                manifests: lattice_cert_manager::install::manifests::generate_cert_manager()
+                    .to_vec(),
+                health_namespace: Some("cert-manager"),
+            },
             InfraComponent {
                 name: "eso",
-                version: eso::eso_version(),
-                manifests: eso::generate_eso().to_vec(),
+                version: lattice_eso::install::manifests::eso_version(),
+                manifests: lattice_eso::install::manifests::generate_eso().to_vec(),
                 health_namespace: Some("external-secrets"),
             },
         ],

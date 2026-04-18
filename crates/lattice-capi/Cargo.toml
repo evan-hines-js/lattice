@@ -18,6 +18,11 @@ lattice-secret-provider = { workspace = true }
 # Each migrated dependency install crate contributes its registries to the
 # upstream-mirror aggregator in `provider::registry`. Add one per migration.
 lattice-tetragon = { workspace = true }
+lattice-eso = { workspace = true }
+lattice-cert-manager = { workspace = true }
+lattice-volcano = { workspace = true }
+lattice-cilium = { workspace = true }
+lattice-istio = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

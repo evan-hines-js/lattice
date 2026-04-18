@@ -1,0 +1,27 @@
+[package]
+name = "lattice-istio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Istio ambient dependency install — charts, policies, trust-domain/cacerts, east-west gateway, controller"
+build = "build.rs"
+
+[features]
+fips = ["lattice-infra/fips"]
+
+[dependencies]
+lattice-common = { workspace = true }
+lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+lattice-infra = { workspace = true }
+
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+
+[build-dependencies]
+lattice-helm-build.workspace = true

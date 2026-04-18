@@ -12,10 +12,10 @@ use lattice_crd::crd::{
     ServiceRef,
 };
 
-use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use lattice_common::kube_utils::split_yaml_documents;
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
+use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 
 /// Well-known service name for the VMCluster components.
 /// Used as `fullnameOverride` so all downstream consumers
@@ -147,7 +147,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
 
     if ha {
         // HA mode: separate write (vminsert) and read (vmselect) targets
-        members.push(lmm(
+        members.push(mesh_member(
             "vm-write-target",
             MONITORING_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -170,7 +170,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
             },
         ));
 
-        members.push(lmm(
+        members.push(mesh_member(
             VM_READ_TARGET_LMM_NAME,
             MONITORING_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -194,7 +194,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
         ));
     } else {
         // Single-node mode: vmsingle serves both write and read
-        members.push(lmm(
+        members.push(mesh_member(
             VM_READ_TARGET_LMM_NAME,
             MONITORING_NAMESPACE,
             LatticeMeshMemberSpec {
@@ -224,7 +224,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
     } else {
         ServiceRef::new(MONITORING_NAMESPACE, VM_READ_TARGET_LMM_NAME)
     };
-    members.push(lmm(
+    members.push(mesh_member(
         "vmagent",
         MONITORING_NAMESPACE,
         LatticeMeshMemberSpec {
@@ -248,7 +248,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
     ));
 
     // victoria-metrics-operator — webhook + metrics scraped by vmagent
-    members.push(lmm(
+    members.push(mesh_member(
         "victoria-metrics-operator",
         MONITORING_NAMESPACE,
         LatticeMeshMemberSpec {
@@ -283,7 +283,7 @@ pub fn generate_monitoring_mesh_members(ha: bool) -> Vec<LatticeMeshMember> {
     ));
 
     // vm-kube-state-metrics — metrics scraped by vmagent
-    members.push(lmm(
+    members.push(mesh_member(
         "vm-kube-state-metrics",
         MONITORING_NAMESPACE,
         LatticeMeshMemberSpec {

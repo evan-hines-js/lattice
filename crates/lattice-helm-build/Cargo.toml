@@ -1,0 +1,13 @@
+[package]
+name = "lattice-helm-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Build-time helm rendering helpers — shared across per-dependency install crates' build scripts"
+
+[lib]
+doctest = false
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+toml = { workspace = true }

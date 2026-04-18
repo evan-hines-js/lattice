@@ -533,6 +533,31 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_tetragon::install::reconcile,
         "TetragonInstall",
     );
+    ctx.spawn_provider(
+        "eso-install",
+        lattice_eso::install::reconcile,
+        "ESOInstall",
+    );
+    ctx.spawn_provider(
+        "cert-manager-install",
+        lattice_cert_manager::install::reconcile,
+        "CertManagerInstall",
+    );
+    ctx.spawn_provider(
+        "volcano-install",
+        lattice_volcano::install::reconcile,
+        "VolcanoInstall",
+    );
+    ctx.spawn_provider(
+        "cilium-install",
+        lattice_cilium::install::reconcile,
+        "CiliumInstall",
+    );
+    ctx.spawn_provider(
+        "istio-install",
+        lattice_istio::install::reconcile,
+        "IstioInstall",
+    );
 
     // ── Wait for shutdown signal ──
 
