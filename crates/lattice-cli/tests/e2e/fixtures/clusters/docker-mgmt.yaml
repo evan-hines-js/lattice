@@ -37,3 +37,11 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
+---
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: docker
+  namespace: lattice-system
+spec:
+  type: docker

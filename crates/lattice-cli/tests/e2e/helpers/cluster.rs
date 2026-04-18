@@ -630,7 +630,13 @@ pub fn load_registry_credentials() -> Option<String> {
     None
 }
 
-/// Load a LatticeCluster config from a fixture file or env var
+/// Load a cluster-config fixture (multi-doc install bundle) from a file or env var.
+///
+/// Returns `(full_bundle_content, parsed_cluster)` — the full content is what
+/// gets handed to `lattice install -f`, and the parsed `LatticeCluster` is for
+/// programmatic access to the cluster spec in tests. The bundle may contain
+/// additional Lattice CRDs (InfraProvider, ImageProvider, …); those pass
+/// through to the installer unchanged.
 pub fn load_cluster_config(
     env_var: &str,
     default_fixture: &str,
@@ -647,10 +653,20 @@ pub fn load_cluster_config(
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-    let value = lattice_core::yaml::parse_yaml(&content)
+    let docs = lattice_core::yaml::parse_yaml_multi(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
-    let cluster: LatticeCluster = serde_json::from_value(value)
-        .map_err(|e| format!("Invalid cluster config in {}: {}", path.display(), e))?;
+
+    let cluster_doc = docs
+        .into_iter()
+        .find(|d| d.get("kind").and_then(|k| k.as_str()) == Some("LatticeCluster"))
+        .ok_or_else(|| {
+            format!(
+                "No LatticeCluster document found in {}",
+                path.display()
+            )
+        })?;
+    let cluster: LatticeCluster = serde_json::from_value(cluster_doc)
+        .map_err(|e| format!("Invalid LatticeCluster in {}: {}", path.display(), e))?;
 
     info!("Loaded cluster config: {}", path.display());
     Ok((content, cluster))

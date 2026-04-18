@@ -47,3 +47,19 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
+---
+# InfraProvider referenced by spec.providerRef above.
+# `credentials.id: openstack-cloud-config` points at the clouds.yaml Secret the
+# installer seeds from OS_*/OPENSTACK_* env vars.
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: openstack
+  namespace: lattice-system
+spec:
+  type: openstack
+  credentials:
+    id: openstack-cloud-config
+    provider: lattice-local
+  openstack:
+    authUrl: "https://auth.cloud.ovh.net/v3"

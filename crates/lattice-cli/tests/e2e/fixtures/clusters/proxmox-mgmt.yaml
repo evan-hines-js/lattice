@@ -69,3 +69,19 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
+---
+# InfraProvider referenced by spec.providerRef above.
+# `credentials.id: proxmox-credentials` points at the Secret the installer
+# seeds from PROXMOX_URL / PROXMOX_TOKEN / PROXMOX_SECRET env vars.
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: proxmox
+  namespace: lattice-system
+spec:
+  type: proxmox
+  credentials:
+    id: proxmox-credentials
+    provider: lattice-local
+  proxmox:
+    serverUrl: "https://10.0.0.97:8006"

@@ -55,3 +55,20 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
+---
+# InfraProvider referenced by spec.providerRef above.
+# `credentials.id: aws-credentials` points at the Secret the installer seeds
+# from AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION env vars.
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: aws
+  namespace: lattice-system
+spec:
+  type: aws
+  region: us-west-2
+  credentials:
+    id: aws-credentials
+    provider: lattice-local
+  aws:
+    sshKeyName: lattice-e2e

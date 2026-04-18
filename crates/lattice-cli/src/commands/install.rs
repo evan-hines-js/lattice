@@ -42,15 +42,9 @@ use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
 use lattice_common::kube_utils;
-use lattice_common::{
-    capi_namespace, kubeconfig_secret_name, AWS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET,
-    OPERATOR_NAME, PROXMOX_CREDENTIALS_SECRET,
-};
+use lattice_common::{capi_namespace, kubeconfig_secret_name, OPERATOR_NAME};
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_SA_TOKEN};
-use lattice_crd::crd::{
-    BootstrapProvider, InfraProvider, InfraProviderSpec, InfraProviderType, LatticeCluster,
-    LatticePackage, ProviderType,
-};
+use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 
@@ -146,9 +140,43 @@ pub struct Installer {
     config_dir: PathBuf,
     /// Run ID for this install session (used for kind cluster name and temp files)
     run_id: String,
-    /// LatticePackage resources from the config file to apply after bootstrap
-    packages: Vec<String>,
+    /// Lattice CRDs to apply to the bootstrap cluster *before* the
+    /// `LatticeCluster` is created (InfraProvider, ImageProvider,
+    /// SecretProvider, CedarPolicy, OIDCProvider, DNSProvider, CertIssuer,
+    /// BackupStore, …). Each entry is a full JSON-serialized manifest.
+    pre_cluster_docs: Vec<String>,
+    /// Lattice CRDs to apply to the pivoted management cluster after bootstrap
+    /// completes (LatticePackage). Each entry is a full JSON-serialized manifest.
+    post_bootstrap_docs: Vec<String>,
 }
+
+/// Apply-phase classification for a Lattice CRD in the install bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocPhase {
+    /// Apply to the bootstrap cluster before `LatticeCluster`.
+    PreCluster,
+    /// Apply to the management cluster after pivot.
+    PostBootstrap,
+}
+
+/// Classify a Lattice CRD kind into its install phase.
+///
+/// `LatticePackage` is the only post-bootstrap kind today; everything else
+/// (including unknown `lattice.dev` kinds) applies before the `LatticeCluster`
+/// so the operator can reference it during provisioning.
+fn classify_doc_kind(kind: &str) -> DocPhase {
+    match kind {
+        "LatticePackage" => DocPhase::PostBootstrap,
+        _ => DocPhase::PreCluster,
+    }
+}
+
+const LATTICE_API_GROUP: &str = "lattice.dev";
+
+/// Name of the Secret the installer seeds in `lattice-secrets` from
+/// `--registry-credentials-file` (or `GHCR_USER`/`GHCR_TOKEN`). The user's
+/// `ImageProvider` YAML references this via `credentials.id`.
+const REGISTRY_SEED_SECRET: &str = "image-registry-credentials";
 
 impl Installer {
     /// Create a new installer
@@ -173,42 +201,61 @@ impl Installer {
         let docs = lattice_core::yaml::parse_yaml_multi(&cluster_yaml)
             .map_err(|e| Error::validation(format!("Invalid YAML: {}", e)))?;
 
-        // Find the LatticeCluster document and collect LatticePackage documents
-        let mut cluster_value = None;
-        let mut packages = Vec::new();
+        // Bundle parser: exactly one LatticeCluster, any other lattice.dev/v1alpha1
+        // kind classified by phase. Non-lattice.dev API groups are rejected —
+        // the installer is not a generic kubectl apply.
+        let mut cluster_value: Option<serde_json::Value> = None;
+        let mut pre_cluster_docs = Vec::new();
+        let mut post_bootstrap_docs = Vec::new();
 
         for doc in docs {
+            let api_version = doc
+                .get("apiVersion")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let kind = doc.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-            match kind {
-                "LatticeCluster" => {
-                    if cluster_value.is_some() {
-                        return Err(Error::validation(
-                            "Config file must contain exactly one LatticeCluster",
-                        ));
-                    }
-                    cluster_value = Some(doc);
+
+            let group = api_version.split('/').next().unwrap_or("");
+            if group != LATTICE_API_GROUP {
+                return Err(Error::validation(format!(
+                    "Unsupported apiVersion '{api_version}' for kind '{kind}' — \
+                     install bundles only accept {LATTICE_API_GROUP} resources",
+                )));
+            }
+            if kind.is_empty() {
+                return Err(Error::validation(
+                    "Every document in the install bundle must have a `kind`",
+                ));
+            }
+
+            if kind == "LatticeCluster" {
+                if cluster_value.is_some() {
+                    return Err(Error::validation(
+                        "Install bundle must contain exactly one LatticeCluster",
+                    ));
                 }
-                "LatticePackage" => {
-                    // Validate it deserializes, then store as JSON string for apply
-                    let _: LatticePackage = serde_json::from_value(doc.clone())
-                        .map_err(|e| Error::validation(format!("Invalid LatticePackage: {}", e)))?;
-                    let json = serde_json::to_string(&doc).map_err(|e| {
-                        Error::validation(format!("Failed to serialize LatticePackage: {}", e))
-                    })?;
-                    packages.push(json);
+                cluster_value = Some(doc);
+                continue;
+            }
+
+            let json = serde_json::to_string(&doc).map_err(|e| {
+                Error::validation(format!("Failed to serialize {kind}: {e}"))
+            })?;
+            match classify_doc_kind(kind) {
+                DocPhase::PreCluster => {
+                    tracing::debug!(kind, "classified as pre-cluster resource");
+                    pre_cluster_docs.push(json);
                 }
-                _ => {
-                    return Err(Error::validation(format!(
-                        "Unsupported resource kind '{}' in config file. \
-                         Only LatticeCluster and LatticePackage are supported.",
-                        kind
-                    )));
+                DocPhase::PostBootstrap => {
+                    tracing::debug!(kind, "classified as post-bootstrap resource");
+                    post_bootstrap_docs.push(json);
                 }
             }
         }
 
-        let value = cluster_value
-            .ok_or_else(|| Error::validation("Config file must contain a LatticeCluster"))?;
+        let value = cluster_value.ok_or_else(|| {
+            Error::validation("Install bundle must contain a LatticeCluster")
+        })?;
         let mut cluster: LatticeCluster = serde_json::from_value(value)
             .map_err(|e| Error::validation(format!("Invalid LatticeCluster: {}", e)))?;
 
@@ -241,7 +288,8 @@ impl Installer {
             registry_credentials,
             config_dir,
             run_id: run_id.unwrap_or_else(generate_run_id),
-            packages,
+            pre_cluster_docs,
+            post_bootstrap_docs,
         })
     }
 
@@ -335,9 +383,10 @@ impl Installer {
 
         bootstrap_result?;
 
-        // Apply LatticePackages from config file (e.g., Flux, flux-bootstrap)
-        if !self.packages.is_empty() {
-            self.apply_packages().await?;
+        // Apply post-bootstrap resources from the install bundle (e.g.,
+        // LatticePackage for Flux bootstrap) to the pivoted mgmt cluster.
+        if !self.post_bootstrap_docs.is_empty() {
+            self.apply_post_bootstrap_docs().await?;
         }
 
         info!("Creating lattice-admin service account and fetching proxy kubeconfig...");
@@ -352,11 +401,14 @@ impl Installer {
         Ok(())
     }
 
-    /// Apply LatticePackage resources from the config file to the management cluster.
-    async fn apply_packages(&self) -> Result<()> {
+    /// Apply post-bootstrap resources (e.g., `LatticePackage`) from the
+    /// install bundle to the pivoted management cluster.
+    async fn apply_post_bootstrap_docs(&self) -> Result<()> {
         let mgmt_client = self.management_client().await?;
 
-        // Wait for LatticePackage CRD to be registered by the operator
+        // Wait for LatticePackage CRD to be registered by the operator —
+        // the only post-bootstrap kind classified today. If/when more kinds
+        // land here, wait for each CRD that's actually in the bundle.
         kube_utils::wait_for_crd(
             &mgmt_client,
             "latticepackages.lattice.dev",
@@ -366,10 +418,10 @@ impl Installer {
         .cmd_err()?;
 
         info!(
-            "Applying {} LatticePackage(s) from config file...",
-            self.packages.len()
+            "Applying {} post-bootstrap resource(s) from install bundle...",
+            self.post_bootstrap_docs.len()
         );
-        apply_with_retry(&mgmt_client, &self.packages, "LatticePackages")
+        apply_with_retry(&mgmt_client, &self.post_bootstrap_docs, "post-bootstrap resources")
             .await
             .cmd_err()?;
 
@@ -437,10 +489,10 @@ impl Installer {
         .await
         .cmd_err()?;
 
-        info!("[Phase 3/8] Creating InfraProvider and credentials...");
-        self.create_cloud_provider_with_credentials(&bootstrap_client)
-            .await?;
-        self.create_image_provider(&bootstrap_client).await?;
+        info!("[Phase 3/8] Seeding credential Secrets and applying install bundle...");
+        self.seed_provider_credentials(&bootstrap_client).await?;
+        self.seed_registry_credentials(&bootstrap_client).await?;
+        self.apply_pre_cluster_docs(&bootstrap_client).await?;
 
         info!("Waiting for CAPI to be installed...");
         self.wait_for_capi_crds(&bootstrap_client).await?;
@@ -883,22 +935,34 @@ impl Installer {
         .cmd_err()
     }
 
-    /// Create InfraProvider and provider-specific credentials.
-    ///
-    /// Must be called AFTER operator deploys CRDs but BEFORE creating LatticeCluster.
-    /// The operator waits for this InfraProvider to install CAPI providers.
-    async fn create_cloud_provider_with_credentials(&self, client: &Client) -> Result<()> {
+    /// Seed the provider's credential Secret into `lattice-secrets` as an ESO
+    /// source. The user's `InfraProvider` YAML references this Secret by name
+    /// via `credentials.id`. Docker, GCP, Azure: no-op (no credentials to seed).
+    async fn seed_provider_credentials(&self, client: &Client) -> Result<()> {
         match self.provider() {
-            ProviderType::Proxmox => self.create_proxmox_credentials(client).await,
-            ProviderType::Aws => self.create_aws_credentials(client).await,
-            ProviderType::OpenStack => self.create_openstack_credentials(client).await,
-            ProviderType::Docker => {
-                self.create_cloud_provider(client, InfraProviderType::Docker, "")
-                    .await
+            ProviderType::Proxmox => {
+                let creds = ProxmoxCredentials::from_env()
+                    .map_err(|e| Error::validation(e.to_string()))?;
+                info!("Seeding Proxmox credentials (PROXMOX_URL: {})", creds.url);
+                Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
+            ProviderType::Aws => {
+                let creds = AwsCredentials::from_env()
+                    .map_err(|e| Error::validation(e.to_string()))?;
+                info!("Seeding AWS credentials (region: {})", creds.region);
+                Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
+            }
+            ProviderType::OpenStack => {
+                let creds = OpenStackCredentials::from_env()
+                    .map_err(|e| Error::validation(e.to_string()))?;
+                info!("Seeding OpenStack credentials (cloud: {})", creds.cloud_name);
+                Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
+            }
+            ProviderType::Docker => Ok(()),
             ProviderType::Gcp | ProviderType::Azure | _ => {
                 info!(
-                    "Provider {:?} credential setup not yet implemented",
+                    "Provider {:?} has no env-var credential seeding; ensure your \
+                     InfraProvider references an existing Secret",
                     self.provider()
                 );
                 Ok(())
@@ -906,47 +970,64 @@ impl Installer {
         }
     }
 
-    async fn create_proxmox_credentials(&self, client: &Client) -> Result<()> {
-        let creds = ProxmoxCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
-        info!("PROXMOX_URL: {}", creds.url);
+    /// Seed the registry credentials (from `--registry-credentials-file` or
+    /// `GHCR_USER`/`GHCR_TOKEN`) as `image-registry-credentials` in
+    /// `lattice-secrets`. The user's `ImageProvider` YAML references this
+    /// Secret via `credentials.id: image-registry-credentials`. No-op when
+    /// no credentials were provided.
+    async fn seed_registry_credentials(&self, client: &Client) -> Result<()> {
+        use kube::api::ObjectMeta;
+        use std::collections::BTreeMap;
 
-        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
-        self.create_cloud_provider(
-            client,
-            InfraProviderType::Proxmox,
-            PROXMOX_CREDENTIALS_SECRET,
-        )
-        .await
+        let Some(ref creds) = self.registry_credentials else {
+            return Ok(());
+        };
+
+        info!("Seeding registry credentials as 'image-registry-credentials'");
+        let secret = k8s_openapi::api::core::v1::Secret {
+            metadata: ObjectMeta {
+                name: Some(REGISTRY_SEED_SECRET.to_string()),
+                namespace: Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string()),
+                labels: Some(BTreeMap::from([
+                    ("lattice.dev/secret-source".to_string(), "true".to_string()),
+                    ("lattice.dev/distribute".to_string(), "true".to_string()),
+                ])),
+                ..Default::default()
+            },
+            type_: Some(lattice_core::SECRET_TYPE_DOCKERCONFIG.to_string()),
+            data: Some(BTreeMap::from([(
+                ".dockerconfigjson".to_string(),
+                k8s_openapi::ByteString(creds.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        };
+        Self::apply_seed_secret(client, &secret).await
     }
 
-    async fn create_aws_credentials(&self, client: &Client) -> Result<()> {
-        let creds = AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
-        info!("AWS_REGION: {}", creds.region);
-
-        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
-        self.create_cloud_provider(client, InfraProviderType::AWS, AWS_CREDENTIALS_SECRET)
+    /// Apply the pre-cluster Lattice CRD docs parsed from the install bundle
+    /// (InfraProvider, ImageProvider, SecretProvider, etc.) to the bootstrap
+    /// cluster. The operator waits for these before provisioning.
+    async fn apply_pre_cluster_docs(&self, client: &Client) -> Result<()> {
+        if self.pre_cluster_docs.is_empty() {
+            return Err(Error::validation(
+                "install bundle is missing pre-cluster resources \
+                 (at least an InfraProvider matching spec.providerRef is required)",
+            ));
+        }
+        info!(
+            "Applying {} pre-cluster resource(s) from install bundle...",
+            self.pre_cluster_docs.len()
+        );
+        apply_with_retry(client, &self.pre_cluster_docs, "pre-cluster resources")
             .await
+            .cmd_err()
     }
 
-    async fn create_openstack_credentials(&self, client: &Client) -> Result<()> {
-        let creds =
-            OpenStackCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
-        info!("OpenStack cloud: {}", creds.cloud_name);
-
-        Self::apply_credentials_secret(client, &creds.to_k8s_secret()).await?;
-        self.create_cloud_provider(
-            client,
-            InfraProviderType::OpenStack,
-            OPENSTACK_CREDENTIALS_SECRET,
-        )
-        .await
-    }
-
-    /// Apply a credentials secret as an ESO source in `lattice-secrets` namespace.
+    /// Apply a Secret into the `lattice-secrets` ESO source namespace.
     ///
-    /// The local webhook ESO backend serves secrets from this namespace.
-    /// The secret must have the `lattice.dev/secret-source: "true"` label.
-    async fn apply_credentials_secret(
+    /// Secrets in this namespace are served by the local-webhook ESO backend;
+    /// the `lattice.dev/secret-source: "true"` label is required for visibility.
+    async fn apply_seed_secret(
         client: &Client,
         secret: &k8s_openapi::api::core::v1::Secret,
     ) -> Result<()> {
@@ -976,143 +1057,9 @@ impl Installer {
             )
             .await
             .map_err(|e| {
-                Error::command_failed(format!("Failed to create credentials secret: {}", e))
+                Error::command_failed(format!("Failed to seed secret '{name}': {e}"))
             })?;
 
-        Ok(())
-    }
-
-    /// Create an InfraProvider CRD with ESO credentials.
-    ///
-    /// `secret_name` is the name of the source secret in `lattice-secrets` namespace.
-    /// If empty (Docker provider), no credentials are set.
-    async fn create_cloud_provider(
-        &self,
-        client: &Client,
-        provider_type: InfraProviderType,
-        secret_name: &str,
-    ) -> Result<()> {
-        use kube::api::{Api, Patch, PatchParams};
-        let provider_ref = &self.cluster.spec.provider_ref;
-        let region = self
-            .cluster
-            .spec
-            .provider
-            .config
-            .aws
-            .as_ref()
-            .map(|aws| aws.region.clone());
-
-        let credentials = if secret_name.is_empty() {
-            None
-        } else {
-            Some(lattice_crd::crd::CredentialSpec {
-                id: secret_name.to_string(),
-                provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
-                ..Default::default()
-            })
-        };
-
-        let mut cloud_provider = InfraProvider::new(
-            provider_ref,
-            InfraProviderSpec {
-                provider_type,
-                region,
-                credentials,
-                credential_data: None,
-                aws: None,
-                proxmox: None,
-                openstack: None,
-                image_pull_secrets: Vec::new(),
-                labels: Default::default(),
-            },
-        );
-        cloud_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
-
-        let api: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        api.patch(
-            provider_ref,
-            &PatchParams::apply("lattice-cli").force(),
-            &Patch::Apply(&cloud_provider),
-        )
-        .await
-        .map_err(|e| Error::command_failed(format!("Failed to create InfraProvider: {}", e)))?;
-
-        info!("Created InfraProvider '{}'", provider_ref);
-        Ok(())
-    }
-
-    /// Create an ImageProvider CRD with a seed Secret for registry credentials.
-    ///
-    /// The seed Secret goes to `lattice-secrets` (ESO source). The ImageProvider
-    /// CRD references it via the local webhook store. The raw `lattice-registry`
-    /// Secret in `lattice-system` is created by `generate_operator_manifests` as
-    /// a bootstrap seed for the operator's initial image pull (before ESO exists).
-    /// Once ESO is running, the ImageProvider controller takes over.
-    async fn create_image_provider(&self, client: &Client) -> Result<()> {
-        let Some(ref creds) = self.registry_credentials else {
-            return Ok(());
-        };
-
-        use kube::api::{Api, ObjectMeta, Patch, PatchParams};
-        use lattice_crd::crd::{ImageProvider, ImageProviderSpec, ImageProviderType};
-        use std::collections::BTreeMap;
-
-        // Create seed Secret in lattice-secrets for ESO to serve
-        let seed_secret_name = "image-registry-credentials";
-        let seed_secret = k8s_openapi::api::core::v1::Secret {
-            metadata: ObjectMeta {
-                name: Some(seed_secret_name.to_string()),
-                namespace: Some(lattice_common::LOCAL_SECRETS_NAMESPACE.to_string()),
-                labels: Some(BTreeMap::from([
-                    ("lattice.dev/secret-source".to_string(), "true".to_string()),
-                    ("lattice.dev/distribute".to_string(), "true".to_string()),
-                ])),
-                ..Default::default()
-            },
-            type_: Some(lattice_core::SECRET_TYPE_DOCKERCONFIG.to_string()),
-            data: Some(BTreeMap::from([(
-                ".dockerconfigjson".to_string(),
-                k8s_openapi::ByteString(creds.as_bytes().to_vec()),
-            )])),
-            ..Default::default()
-        };
-        Self::apply_credentials_secret(client, &seed_secret).await?;
-
-        // Create ImageProvider CRD referencing the seed Secret
-        let mut image_provider = ImageProvider::new(
-            "default",
-            ImageProviderSpec {
-                provider_type: ImageProviderType::Generic,
-                insecure: false,
-                registry: parse_first_registry(creds).ok_or_else(|| {
-                    Error::validation(
-                        "Failed to parse registry from dockerconfigjson — \
-                         expected exactly one entry in {\"auths\":{\"registry.example.com\":{...}}}",
-                    )
-                })?,
-                credentials: Some(lattice_crd::crd::CredentialSpec {
-                    id: seed_secret_name.to_string(),
-                    provider: lattice_common::LOCAL_WEBHOOK_STORE_NAME.to_string(),
-                    ..Default::default()
-                }),
-                credential_data: None,
-                ecr: None,
-                trust: None,
-            },
-        );
-        image_provider.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
-
-        let api: Api<ImageProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        api.patch(
-            "default",
-            &PatchParams::apply("lattice-cli").force(),
-            &Patch::Apply(&image_provider),
-        )
-        .await
-        .map_err(|e| Error::command_failed(format!("Failed to create ImageProvider: {}", e)))?;
-
-        info!("Created ImageProvider 'default'");
         Ok(())
     }
 
@@ -1178,7 +1125,7 @@ impl Installer {
                 remote_key,
                 secret_path.display()
             );
-            Self::apply_credentials_secret(client, &secret).await?;
+            Self::apply_seed_secret(client, &secret).await?;
         }
 
         Ok(())
@@ -1720,34 +1667,6 @@ fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
     serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
 }
 
-/// Extract the registry hostname from a `.dockerconfigjson` string.
-///
-/// Parses `{"auths":{"ghcr.io":{...}}}` and returns `"ghcr.io"`.
-/// Returns `None` if the JSON is invalid, has no `auths`, or has multiple registries
-/// (ambiguous — the caller should specify which one).
-///
-/// Handles URL-format keys (e.g., `https://index.docker.io/v1/`) by extracting the hostname.
-fn parse_first_registry(docker_config_json: &str) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_str(docker_config_json).ok()?;
-    let auths = value.get("auths")?.as_object()?;
-    if auths.len() != 1 {
-        return None;
-    }
-    let key = auths.keys().next()?;
-    // Strip URL scheme and path if present (e.g., "https://index.docker.io/v1/" → "index.docker.io")
-    let hostname = key
-        .strip_prefix("https://")
-        .or_else(|| key.strip_prefix("http://"))
-        .unwrap_or(key)
-        .split('/')
-        .next()
-        .unwrap_or(key);
-    if hostname.is_empty() {
-        return None;
-    }
-    Some(hostname.to_string())
-}
-
 /// Build registry credentials from GHCR_USER/GHCR_TOKEN environment variables.
 fn credentials_from_env() -> Option<String> {
     use base64::Engine;
@@ -1821,6 +1740,158 @@ mod tests {
     #[test]
     fn test_parse_bootstrap_provider_invalid() {
         assert!(parse_bootstrap_provider("invalid").is_err());
+    }
+
+    // ---- Bundle parser tests --------------------------------------------------
+
+    fn build_installer(yaml: &str) -> Result<Installer> {
+        Installer::new(
+            yaml.to_string(),
+            "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            false,
+            None,
+            None,
+            PathBuf::from("."),
+            Some("test".to_string()),
+        )
+    }
+
+    fn parse_err(yaml: &str) -> String {
+        match build_installer(yaml) {
+            Ok(_) => panic!("expected parse error, got Ok"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// Minimal valid LatticeCluster YAML for bundle tests.
+    const MIN_CLUSTER: &str = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: test
+spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
+  providerRef: docker
+  provider:
+    kubernetes:
+      version: "1.32.0"
+    config:
+      docker: {}
+  nodes:
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 2
+        memoryGib: 4
+        diskGib: 20
+    workerPools: {}
+  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer
+"#;
+
+    #[test]
+    fn test_classify_doc_kind() {
+        assert_eq!(classify_doc_kind("LatticePackage"), DocPhase::PostBootstrap);
+        assert_eq!(classify_doc_kind("InfraProvider"), DocPhase::PreCluster);
+        assert_eq!(classify_doc_kind("ImageProvider"), DocPhase::PreCluster);
+        assert_eq!(classify_doc_kind("SecretProvider"), DocPhase::PreCluster);
+        // Unknown Lattice kinds default to pre-cluster (operator may need them).
+        assert_eq!(classify_doc_kind("SomeNewFutureKind"), DocPhase::PreCluster);
+    }
+
+    #[test]
+    fn test_parser_accepts_infra_provider_doc() {
+        let yaml = format!(
+            "{MIN_CLUSTER}\n---\n{}",
+            r#"apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: docker
+spec:
+  type: docker
+"#
+        );
+        let installer = build_installer(&yaml).expect("parse");
+        assert_eq!(installer.pre_cluster_docs.len(), 1);
+        assert!(installer.pre_cluster_docs[0].contains("\"kind\":\"InfraProvider\""));
+        assert!(installer.post_bootstrap_docs.is_empty());
+    }
+
+    #[test]
+    fn test_parser_classifies_multiple_docs() {
+        let yaml = format!(
+            "{MIN_CLUSTER}\n---\n{}\n---\n{}",
+            r#"apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: docker
+spec:
+  type: docker
+"#,
+            r#"apiVersion: lattice.dev/v1alpha1
+kind: LatticePackage
+metadata:
+  name: flux
+spec:
+  propagate: false
+  chart:
+    name: flux2
+    version: 2.0.0
+    repository: https://fluxcd-community.github.io/helm-charts
+"#
+        );
+        let installer = build_installer(&yaml).expect("parse");
+        assert_eq!(installer.pre_cluster_docs.len(), 1);
+        assert_eq!(installer.post_bootstrap_docs.len(), 1);
+    }
+
+    #[test]
+    fn test_parser_rejects_non_lattice_api_group() {
+        let yaml = format!(
+            "{MIN_CLUSTER}\n---\n{}",
+            r#"apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nope
+"#
+        );
+        let err = parse_err(&yaml);
+        assert!(err.contains("Unsupported apiVersion"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parser_requires_exactly_one_cluster() {
+        // Zero clusters
+        let err = parse_err(
+            r#"
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata: { name: docker }
+spec: { type: docker }
+"#,
+        );
+        assert!(err.contains("must contain a LatticeCluster"), "got: {err}");
+
+        // Two clusters
+        let yaml = format!("{MIN_CLUSTER}\n---\n{MIN_CLUSTER}");
+        let err = parse_err(&yaml);
+        assert!(
+            err.contains("exactly one LatticeCluster"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parser_rejects_doc_without_kind() {
+        let yaml = format!(
+            "{MIN_CLUSTER}\n---\n{}",
+            "apiVersion: lattice.dev/v1alpha1\nmetadata:\n  name: oops\n"
+        );
+        let err = parse_err(&yaml);
+        assert!(err.contains("must have a `kind`"), "got: {err}");
     }
 
     #[test]
