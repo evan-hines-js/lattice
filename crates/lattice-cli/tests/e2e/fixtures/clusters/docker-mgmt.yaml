@@ -45,3 +45,20 @@ metadata:
   namespace: lattice-system
 spec:
   type: docker
+
+---
+# ImageProvider referenced by LatticeService `imagePullSecrets: [default]` in
+# the e2e service fixtures. `credentials.id: image-registry-credentials` points
+# at the dockerconfigjson Secret the installer seeds from
+# `--registry-credentials-file` or `GHCR_USER`/`GHCR_TOKEN` env vars.
+apiVersion: lattice.dev/v1alpha1
+kind: ImageProvider
+metadata:
+  name: default
+  namespace: lattice-system
+spec:
+  type: ghcr
+  registry: ghcr.io
+  credentials:
+    id: image-registry-credentials
+    provider: lattice-local
