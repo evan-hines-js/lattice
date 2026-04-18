@@ -255,12 +255,13 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     // Load cluster configurations
     info!("[Setup] Loading cluster configurations...");
 
-    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
-    let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
-    let mgmt_bootstrap = mgmt_cluster.spec.provider.kubernetes.bootstrap.clone();
+    let mgmt_bundle = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let mgmt_provider: InfraProvider = mgmt_bundle.cluster.spec.provider.provider_type().into();
+    let mgmt_bootstrap = mgmt_bundle.cluster.spec.provider.kubernetes.bootstrap.clone();
 
-    let (_, mut workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let mut workload_cluster =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
+            .cluster;
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
     let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
@@ -268,8 +269,9 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
     let (mut workload2_cluster, workload2_bootstrap) = if config.skip_workload2 {
         (None, None)
     } else {
-        let (_, cluster) =
-            load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG", "docker-workload2.yaml")?;
+        let cluster =
+            load_cluster_config("LATTICE_WORKLOAD2_CLUSTER_CONFIG", "docker-workload2.yaml")?
+                .cluster;
         let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();
         (Some(cluster), Some(bootstrap))
     };
@@ -286,8 +288,7 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
         }
     }
 
-    let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
-        .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
+    let mgmt_config_content = mgmt_bundle.render()?;
 
     info!("[Setup] Configuration:");
     info!("  Management:  {} + {:?}", mgmt_provider, mgmt_bootstrap);
@@ -602,8 +603,8 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
         build_and_push_pytorch_test_image(DEFAULT_PYTORCH_TEST_IMAGE).await?;
     }
 
-    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
-    let mgmt_provider: InfraProvider = mgmt_cluster.spec.provider.provider_type().into();
+    let mgmt_bundle = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let mgmt_provider: InfraProvider = mgmt_bundle.cluster.spec.provider.provider_type().into();
 
     if mgmt_provider == InfraProvider::Docker {
         ensure_docker_network()
@@ -611,8 +612,7 @@ pub async fn setup_mgmt_only(config: &SetupConfig) -> Result<SetupResult, String
             .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
     }
 
-    let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
-        .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
+    let mgmt_config_content = mgmt_bundle.render()?;
 
     // Start chaos monkey if configured (uses provider-appropriate intervals)
     let (chaos, chaos_targets) = if config.enable_chaos {
@@ -676,8 +676,9 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     // Start with mgmt setup
     let mut result = setup_mgmt_only(config).await?;
 
-    let (_, workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let workload_cluster =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
+            .cluster;
     let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
 
     info!("[Setup] Creating workload cluster...");

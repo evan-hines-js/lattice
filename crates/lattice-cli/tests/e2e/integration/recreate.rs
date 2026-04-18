@@ -54,8 +54,9 @@ pub async fn delete_and_recreate_workload(mgmt_kubeconfig: &str) -> Result<(), S
     info!("[Recreate] GC cleanup verified. Re-creating workload cluster...");
 
     // Load the same cluster fixture used during initial setup
-    let (_, workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let workload_cluster =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
+            .cluster;
 
     let mgmt_client = client_from_kubeconfig(mgmt_kubeconfig).await?;
     let api: Api<LatticeCluster> = Api::all(mgmt_client.clone());

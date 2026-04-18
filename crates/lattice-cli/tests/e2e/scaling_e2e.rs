@@ -16,8 +16,10 @@ use super::integration;
 
 #[tokio::test]
 async fn test_scaling_e2e() {
-    let (_, workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml").unwrap();
+    let workload_cluster =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")
+            .unwrap()
+            .cluster;
     let expected_workers = workload_cluster.spec.nodes.total_workers();
 
     run_per_integration_e2e("Scaling", Duration::from_secs(1800), |ctx| async move {

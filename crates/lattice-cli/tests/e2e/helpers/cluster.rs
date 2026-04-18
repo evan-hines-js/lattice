@@ -630,17 +630,40 @@ pub fn load_registry_credentials() -> Option<String> {
     None
 }
 
-/// Load a cluster-config fixture (multi-doc install bundle) from a file or env var.
+/// A parsed install bundle: the `LatticeCluster` plus any other Lattice CRD
+/// documents that came with it (InfraProvider, ImageProvider, …).
 ///
-/// Returns `(full_bundle_content, parsed_cluster)` — the full content is what
-/// gets handed to `lattice install -f`, and the parsed `LatticeCluster` is for
-/// programmatic access to the cluster spec in tests. The bundle may contain
-/// additional Lattice CRDs (InfraProvider, ImageProvider, …); those pass
-/// through to the installer unchanged.
+/// Tests typically mutate `cluster` (e.g., disabling monitoring for fast
+/// E2E runs) and then call [`ClusterBundle::render`] to get a multi-doc string
+/// suitable for `lattice install -f`. The other docs pass through unchanged.
+pub struct ClusterBundle {
+    pub cluster: LatticeCluster,
+    other_docs: Vec<serde_json::Value>,
+}
+
+impl ClusterBundle {
+    /// Re-serialize the bundle as a multi-document YAML (JSON-in-YAML) string.
+    /// The installer's parser accepts both YAML and JSON docs.
+    pub fn render(&self) -> Result<String, String> {
+        let mut parts = Vec::with_capacity(1 + self.other_docs.len());
+        parts.push(
+            serde_json::to_string(&self.cluster)
+                .map_err(|e| format!("failed to serialize LatticeCluster: {e}"))?,
+        );
+        for doc in &self.other_docs {
+            parts.push(
+                serde_json::to_string(doc).map_err(|e| format!("failed to serialize doc: {e}"))?,
+            );
+        }
+        Ok(parts.join("\n---\n"))
+    }
+}
+
+/// Load a cluster-config fixture (multi-doc install bundle) from a file or env var.
 pub fn load_cluster_config(
     env_var: &str,
     default_fixture: &str,
-) -> Result<(String, LatticeCluster), String> {
+) -> Result<ClusterBundle, String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
         Err(_) => cluster_fixtures_dir().join(default_fixture),
@@ -656,20 +679,38 @@ pub fn load_cluster_config(
     let docs = lattice_core::yaml::parse_yaml_multi(&content)
         .map_err(|e| format!("Invalid YAML in {}: {}", path.display(), e))?;
 
-    let cluster_doc = docs
-        .into_iter()
-        .find(|d| d.get("kind").and_then(|k| k.as_str()) == Some("LatticeCluster"))
-        .ok_or_else(|| {
-            format!(
-                "No LatticeCluster document found in {}",
-                path.display()
-            )
-        })?;
-    let cluster: LatticeCluster = serde_json::from_value(cluster_doc)
-        .map_err(|e| format!("Invalid LatticeCluster in {}: {}", path.display(), e))?;
+    let mut cluster = None;
+    let mut other_docs = Vec::new();
+    for doc in docs {
+        if doc.get("kind").and_then(|k| k.as_str()) == Some("LatticeCluster") {
+            if cluster.is_some() {
+                return Err(format!(
+                    "{} contains multiple LatticeCluster documents",
+                    path.display()
+                ));
+            }
+            cluster = Some(
+                serde_json::from_value::<LatticeCluster>(doc)
+                    .map_err(|e| format!("Invalid LatticeCluster in {}: {e}", path.display()))?,
+            );
+        } else {
+            other_docs.push(doc);
+        }
+    }
 
-    info!("Loaded cluster config: {}", path.display());
-    Ok((content, cluster))
+    let cluster = cluster.ok_or_else(|| {
+        format!("No LatticeCluster document found in {}", path.display())
+    })?;
+
+    info!(
+        "Loaded cluster config: {} ({} pre-cluster doc(s))",
+        path.display(),
+        other_docs.len()
+    );
+    Ok(ClusterBundle {
+        cluster,
+        other_docs,
+    })
 }
 
 /// Load any deserializable K8s resource from a YAML fixture file in the services directory.

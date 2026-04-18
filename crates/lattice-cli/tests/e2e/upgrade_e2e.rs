@@ -106,10 +106,11 @@ async fn run_upgrade_test() -> Result<(), String> {
     let (from_version, to_version) = get_upgrade_versions();
 
     // Load configurations
-    let (_, mgmt_cluster) = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
+    let mgmt_bundle = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
-    let (_, mut workload_cluster) =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?;
+    let mut workload_cluster =
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
+            .cluster;
 
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
@@ -122,8 +123,7 @@ async fn run_upgrade_test() -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
-    let mgmt_config_content = serde_json::to_string(&mgmt_cluster)
-        .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
+    let mgmt_config_content = mgmt_bundle.render()?;
 
     // Install management cluster
     info!("[Phase 1] Installing management cluster...");

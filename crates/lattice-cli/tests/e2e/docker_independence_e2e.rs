@@ -74,10 +74,14 @@ async fn test_docker_independence() {
     init_e2e_test();
     info!("Starting independence test: workload clusters survive parent deletion");
 
-    let (_, mgmt_cluster) =
-        load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml").unwrap();
-    let (_, workload_cluster) =
-        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml").unwrap();
+    let mgmt_cluster =
+        load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")
+            .unwrap()
+            .cluster;
+    let workload_cluster =
+        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")
+            .unwrap()
+            .cluster;
     let mgmt_name = mgmt_cluster
         .metadata
         .name
@@ -130,14 +134,14 @@ async fn run_independence_test(
         .await
         .map_err(|e| format!("Failed to setup Docker network: {}", e))?;
 
-    let (_, mgmt_cluster) = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
-    let (_, workload_cluster) =
-        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?;
+    let mgmt_bundle = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
+    let workload_cluster =
+        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?
+            .cluster;
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
     let initial_workers = workload_cluster.spec.nodes.total_workers();
 
-    let mgmt_config = serde_json::to_string(&mgmt_cluster)
-        .map_err(|e| format!("Failed to serialize mgmt cluster: {}", e))?;
+    let mgmt_config = mgmt_bundle.render()?;
 
     // =========================================================================
     // Phase 1: Install Management Cluster
