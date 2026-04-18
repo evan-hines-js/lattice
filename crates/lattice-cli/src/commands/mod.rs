@@ -225,6 +225,60 @@ pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
     Ok(())
 }
 
+/// Apply just the Lattice CRD manifests to `client`.
+///
+/// Used by `uninstall` to prep a fresh kind cluster that doesn't need the full
+/// operator running, just the CRDs so copied `InfraProvider`/`ImageProvider`
+/// resources have a schema to land against.
+pub async fn apply_lattice_crds(client: &Client) -> Result<()> {
+    use lattice_cell::bootstrap::DefaultManifestGenerator;
+    use lattice_cell::bootstrap::ManifestGenerator;
+
+    let generator = DefaultManifestGenerator::new();
+    let all_manifests = generator
+        .generate(
+            "ghcr.io/evan-hines-js/lattice:latest",
+            None,
+            Some("lattice-cli"),
+            None,
+        )
+        .await
+        .map_err(|e| Error::command_failed(format!("manifest generation failed: {e}")))?;
+
+    let crd_manifests: Vec<String> = all_manifests
+        .into_iter()
+        .filter(|m| m.contains("\"kind\":\"CustomResourceDefinition\""))
+        .collect();
+
+    if crd_manifests.is_empty() {
+        return Err(Error::command_failed(
+            "no CRD manifests produced by generator".to_string(),
+        ));
+    }
+
+    lattice_common::kube_utils::apply_manifests(
+        client,
+        &crd_manifests.iter().map(String::as_str).collect::<Vec<_>>(),
+        &Default::default(),
+    )
+    .await
+    .cmd_err()?;
+
+    // Establish-wait for the two CRDs the uninstall flow actually writes to.
+    // Everything else lands as a by-product and isn't on the critical path.
+    for crd in ["infraproviders.lattice.dev", "imageproviders.lattice.dev"] {
+        lattice_common::kube_utils::wait_for_crd(
+            client,
+            crd,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .cmd_err()?;
+    }
+
+    Ok(())
+}
+
 /// Copy every Lattice CRD marked distributable (`InfraProvider`,
 /// `ImageProvider`, `SecretProvider`, `CedarPolicy`, `OIDCProvider`,
 /// `LatticePackage`) plus their backing Secrets from `source` to `target`.

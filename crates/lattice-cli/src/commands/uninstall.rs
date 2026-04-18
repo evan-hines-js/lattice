@@ -415,6 +415,13 @@ impl Uninstaller {
         info!("Installing cert-manager on kind cluster...");
         crate::commands::ensure_cert_manager(&bootstrap_client).await?;
 
+        // Install Lattice CRDs on the kind cluster so copied InfraProvider /
+        // ImageProvider resources have a schema to land against. We don't run
+        // the full operator here — this cluster only exists to host a reverse
+        // `move` and tear down.
+        info!("Installing Lattice CRDs on kind cluster...");
+        crate::commands::apply_lattice_crds(&bootstrap_client).await?;
+
         // Copy InfraProvider + ImageProvider(s) + backing Secrets from the
         // target cluster so the CAPI provider Deployments on the kind cluster
         // can pull private images and reconcile using the same ESO-backed
