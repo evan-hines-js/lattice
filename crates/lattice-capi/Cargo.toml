@@ -14,6 +14,7 @@ lattice-common = { workspace = true }
 lattice-core = { workspace = true }
 lattice-crd = { workspace = true }
 lattice-infra = { workspace = true }
+lattice-secret-provider = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

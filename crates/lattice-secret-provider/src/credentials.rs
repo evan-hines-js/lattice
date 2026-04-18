@@ -7,8 +7,10 @@ use std::collections::BTreeMap;
 
 use tracing::debug;
 
+use kube::{Api, ResourceExt};
+
 use lattice_common::ReconcileError;
-use lattice_crd::crd::CredentialSpec;
+use lattice_crd::crd::{CredentialSpec, ImageProvider, InfraProvider};
 use lattice_render::extract_secret_refs;
 
 use crate::eso::{apply_external_secret, build_external_secret, build_templated_external_secret};
@@ -144,6 +146,72 @@ pub async fn ensure_credentials(
     .map_err(|e| ReconcileError::Internal(e.to_string()))?;
 
     Ok(secret_name)
+}
+
+/// Materialize `InfraProvider.imagePullSecrets` directly in the CAPI provider
+/// namespace via ESO.
+///
+/// For each entry, reads the matching `ImageProvider` from the InfraProvider's
+/// namespace and applies an `ExternalSecret` into `target_namespace` forced to
+/// `kubernetes.io/dockerconfigjson`. Returns the synced Secret names — callers
+/// set these as `imagePullSecrets` on the provider Deployment.
+pub async fn ensure_capi_image_pull_secrets(
+    client: &kube::Client,
+    cp: &InfraProvider,
+    target_namespace: &str,
+    field_manager: &str,
+) -> Result<Vec<String>, ReconcileError> {
+    if cp.spec.image_pull_secrets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let cp_ns = cp
+        .metadata
+        .namespace
+        .as_deref()
+        .ok_or_else(|| ReconcileError::Validation("InfraProvider missing namespace".into()))?;
+    let image_providers: Api<ImageProvider> = Api::namespaced(client.clone(), cp_ns);
+
+    let mut names = Vec::with_capacity(cp.spec.image_pull_secrets.len());
+    for pull in &cp.spec.image_pull_secrets {
+        let ip = image_providers.get(&pull.name).await.map_err(|e| {
+            ReconcileError::Validation(format!(
+                "InfraProvider {}/{} references ImageProvider '{}' in {}: {}",
+                cp_ns,
+                cp.name_any(),
+                pull.name,
+                cp_ns,
+                e
+            ))
+        })?;
+
+        let credentials = ip.spec.credentials.as_ref().ok_or_else(|| {
+            ReconcileError::Validation(format!(
+                "ImageProvider '{}' has no credentials — cannot materialize pull secret in {}",
+                pull.name, target_namespace
+            ))
+        })?;
+
+        // Force dockerconfigjson so kubelet accepts the synced Secret as an
+        // imagePullSecret (mirrors the ImageProvider controller's behavior).
+        let mut creds = credentials.clone();
+        if creds.secret_type.is_none() {
+            creds.secret_type = Some(lattice_core::SECRET_TYPE_DOCKERCONFIG.to_string());
+        }
+
+        let secret_name = ensure_credentials(
+            client,
+            &ip.name_any(),
+            &creds,
+            ip.spec.credential_data.as_ref(),
+            target_namespace,
+            field_manager,
+        )
+        .await?;
+        names.push(secret_name);
+    }
+
+    Ok(names)
 }
 
 #[cfg(test)]

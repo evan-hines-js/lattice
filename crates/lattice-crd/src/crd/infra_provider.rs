@@ -74,9 +74,27 @@ pub struct InfraProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openstack: Option<OpenStackProviderConfig>,
 
+    /// ImageProviders supplying registry credentials for the CAPI provider's
+    /// own Deployment image. Each entry names an `ImageProvider` in the same
+    /// namespace as this InfraProvider; at CAPI install time the operator
+    /// creates an ExternalSecret in the CAPI provider namespace so ESO syncs
+    /// the dockerconfigjson directly there, and wires it onto the provider
+    /// Deployment's `imagePullSecrets`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_pull_secrets: Vec<ImagePullSecretRef>,
+
     /// Labels for cluster selector matching
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+}
+
+/// Reference to an `ImageProvider` supplying image pull credentials.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImagePullSecretRef {
+    /// Name of an ImageProvider resource in the same namespace as the
+    /// InfraProvider.
+    pub name: String,
 }
 
 /// Supported cloud provider types
@@ -352,6 +370,7 @@ spec:
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },
         );
@@ -372,11 +391,56 @@ spec:
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },
         );
 
         assert!(cp.credential_secret_name().is_none());
+    }
+
+    #[test]
+    fn image_pull_secrets_yaml_parsing() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: proxmox
+spec:
+  type: proxmox
+  credentials:
+    id: proxmox-creds
+    provider: lattice-local
+  proxmox:
+    serverUrl: https://pve.local:8006
+  imagePullSecrets:
+    - name: ghcr-creds
+    - name: quay-fallback
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
+        let pulls: Vec<&str> = provider
+            .spec
+            .image_pull_secrets
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(pulls, vec!["ghcr-creds", "quay-fallback"]);
+    }
+
+    #[test]
+    fn image_pull_secrets_default_empty() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: docker
+spec:
+  type: docker
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
+        assert!(provider.spec.image_pull_secrets.is_empty());
     }
 
     #[test]

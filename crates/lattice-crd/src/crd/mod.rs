@@ -57,8 +57,8 @@ pub use image_provider::{
     ImageProviderType, ImageTrustPolicy, VerificationAuthority,
 };
 pub use infra_provider::{
-    AwsProviderConfig, InfraProvider, InfraProviderPhase, InfraProviderSpec, InfraProviderStatus,
-    InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
+    AwsProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase, InfraProviderSpec,
+    InfraProviderStatus, InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,

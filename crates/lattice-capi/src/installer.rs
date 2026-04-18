@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{Api, ListParams, Patch, PatchParams};
-use kube::Client as KubeClient;
+use kube::{Client as KubeClient, ResourceExt};
 #[cfg(test)]
 use mockall::automock;
 use tracing::{debug, info, warn};
@@ -27,7 +27,7 @@ use lattice_common::{
     Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 use lattice_core::system_namespaces::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
-use lattice_crd::crd::ProviderType;
+use lattice_crd::crd::{InfraProvider, ProviderType};
 
 /// Timeout for waiting on cert-manager and provider deployments
 const DEPLOYMENT_READY_TIMEOUT: Duration = Duration::from_secs(300);
@@ -397,6 +397,74 @@ pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> 
     }
 }
 
+/// Install CAPI providers for a given `ProviderType`, wiring the
+/// `InfraProvider`'s ESO credentials and declared image pull secrets into the
+/// CAPI provider namespace. This is the single entry point used by both the
+/// CLI install path and the in-cluster operator startup — keeping them
+/// identical is important because CAPI pods start failing quickly when
+/// credentials or pull secrets are missing.
+///
+/// `cp` is optional: Docker clusters have no cloud provider, and the uninstall
+/// bootstrap path installs CAPI into a fresh kind cluster before the
+/// InfraProvider has been copied over.
+pub async fn ensure_capi_providers_for(
+    client: &KubeClient,
+    installer: &dyn CapiInstaller,
+    provider_type: ProviderType,
+    cp: Option<&InfraProvider>,
+    field_manager: &str,
+) -> Result<(), Error> {
+    tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
+
+    let target_ns = infra_provider_namespace(provider_type);
+    let mut image_pull_secret_names: Vec<String> = Vec::new();
+
+    if let Some(cp) = cp {
+        if let (Some(credentials), Some(ns)) = (cp.spec.credentials.as_ref(), target_ns) {
+            lattice_secret_provider::credentials::ensure_credentials(
+                client,
+                &cp.name_any(),
+                credentials,
+                cp.spec.credential_data.as_ref(),
+                ns,
+                field_manager,
+            )
+            .await
+            .map_err(|e| {
+                Error::capi_installation(format!("failed to sync credentials to {ns}: {e}"))
+            })?;
+        }
+
+        if let Some(ns) = target_ns {
+            image_pull_secret_names =
+                lattice_secret_provider::credentials::ensure_capi_image_pull_secrets(
+                    client,
+                    cp,
+                    ns,
+                    field_manager,
+                )
+                .await
+                .map_err(|e| {
+                    Error::capi_installation(format!(
+                        "failed to materialize image pull secrets: {e}"
+                    ))
+                })?;
+        } else if !cp.spec.image_pull_secrets.is_empty() {
+            tracing::warn!(
+                provider = ?provider_type,
+                "InfraProvider declares imagePullSecrets but provider has no CAPI namespace; ignoring"
+            );
+        }
+    }
+
+    let config =
+        CapiProviderConfig::new(provider_type)?.with_image_pull_secrets(image_pull_secret_names);
+    installer.ensure(&config).await?;
+
+    tracing::info!(infrastructure = ?provider_type, "CAPI providers installed");
+    Ok(())
+}
+
 // =============================================================================
 // Public types
 // =============================================================================
@@ -509,6 +577,11 @@ pub struct CapiProviderConfig {
     pub rke2_version: String,
     pub infra_info: InfraProviderInfo,
     pub credentials_secret_override: Option<(String, String)>,
+    /// Names of Secrets (already materialized in the infrastructure provider's
+    /// namespace by the caller) that the infrastructure provider's Deployment
+    /// should reference via `imagePullSecrets`. Used when the CAPI provider
+    /// image lives in a private registry.
+    pub image_pull_secret_names: Vec<String>,
 }
 
 impl CapiProviderConfig {
@@ -523,11 +596,20 @@ impl CapiProviderConfig {
             rke2_version: env!("RKE2_VERSION").to_string(),
             infra_info,
             credentials_secret_override: None,
+            image_pull_secret_names: Vec::new(),
         })
     }
 
     pub fn with_credentials_secret(mut self, namespace: String, name: String) -> Self {
         self.credentials_secret_override = Some((namespace, name));
+        self
+    }
+
+    /// Attach names of image pull Secrets to wire onto the infrastructure
+    /// provider's Deployment. The Secrets must already exist in the provider
+    /// namespace (typically materialized by ESO).
+    pub fn with_image_pull_secrets(mut self, names: Vec<String>) -> Self {
+        self.image_pull_secret_names = names;
         self
     }
 
@@ -573,6 +655,7 @@ impl CapiProviderConfig {
             rke2_version,
             infra_info,
             credentials_secret_override: None,
+            image_pull_secret_names: Vec::new(),
         })
     }
 
@@ -703,6 +786,7 @@ impl NativeInstaller {
         providers_dir: &Path,
         desired: &DesiredProvider,
         env_vars: &[(String, String)],
+        image_pull_secret_names: &[String],
     ) -> Result<(), Error> {
         let dir_name = provider_dir_name(&desired.name, desired.provider_type);
         let components = provider_component_files(&desired.name, desired.provider_type);
@@ -748,10 +832,71 @@ impl NativeInstaller {
         // schedule on tainted CP nodes before workers are available.
         if let Some(namespace) = provider_namespace(&desired.name, desired.provider_type) {
             patch_deployments_with_cp_toleration(client, namespace).await?;
+            if !image_pull_secret_names.is_empty() {
+                patch_deployments_with_image_pull_secrets(
+                    client,
+                    namespace,
+                    image_pull_secret_names,
+                )
+                .await?;
+            }
         }
 
         Ok(())
     }
+}
+
+/// Patch all Deployments in `namespace` to reference `names` as
+/// `imagePullSecrets` on the pod template spec. Secrets must already exist.
+async fn patch_deployments_with_image_pull_secrets(
+    client: &KubeClient,
+    namespace: &str,
+    names: &[String],
+) -> Result<(), Error> {
+    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
+    let list = match deployments.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
+        Err(e) => {
+            return Err(Error::capi_installation(format!(
+                "Failed to list deployments in {}: {}",
+                namespace, e
+            )));
+        }
+    };
+
+    let pull_refs: Vec<serde_json::Value> = names
+        .iter()
+        .map(|n| serde_json::json!({ "name": n }))
+        .collect();
+    let patch = serde_json::json!({
+        "spec": {
+            "template": {
+                "spec": { "imagePullSecrets": pull_refs }
+            }
+        }
+    });
+
+    for deploy in &list.items {
+        let name = deploy.metadata.name.as_deref().unwrap_or("unknown");
+        deployments
+            .patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
+            .await
+            .map_err(|e| {
+                Error::capi_installation(format!(
+                    "Failed to patch deployment {}/{} with image pull secrets: {}",
+                    namespace, name, e
+                ))
+            })?;
+        debug!(
+            namespace = %namespace,
+            deployment = %name,
+            pull_secrets = ?names,
+            "patched with image pull secrets"
+        );
+    }
+
+    Ok(())
 }
 
 /// Patch all Deployments in a namespace to tolerate the control-plane NoSchedule taint.
@@ -865,11 +1010,27 @@ impl CapiInstaller for NativeInstaller {
             );
             let action = actions.get(&action_key).unwrap_or(&ProviderAction::Skip);
 
+            // Only the infrastructure provider consumes InfraProvider-declared
+            // image pull secrets — core/bootstrap/control-plane providers ship
+            // from public registries.
+            let pull_secrets: &[String] =
+                if desired_provider.provider_type == CapiProviderType::Infrastructure {
+                    &config.image_pull_secret_names
+                } else {
+                    &[]
+                };
+
             match action {
                 ProviderAction::Skip => continue,
                 ProviderAction::Install => {
-                    Self::apply_provider(&client, &providers_dir, desired_provider, &env_vars)
-                        .await?;
+                    Self::apply_provider(
+                        &client,
+                        &providers_dir,
+                        desired_provider,
+                        &env_vars,
+                        pull_secrets,
+                    )
+                    .await?;
                 }
                 ProviderAction::Upgrade { from, to } => {
                     info!(
@@ -879,9 +1040,14 @@ impl CapiInstaller for NativeInstaller {
                         "Upgrading provider (re-applying manifests)"
                     );
                     // For upgrades, re-apply the manifests (SSA handles diffs)
-                    if let Err(e) =
-                        Self::apply_provider(&client, &providers_dir, desired_provider, &env_vars)
-                            .await
+                    if let Err(e) = Self::apply_provider(
+                        &client,
+                        &providers_dir,
+                        desired_provider,
+                        &env_vars,
+                        pull_secrets,
+                    )
+                    .await
                     {
                         warn!(
                             provider = %desired_provider.name,

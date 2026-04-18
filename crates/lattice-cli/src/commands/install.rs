@@ -653,7 +653,7 @@ impl Installer {
         wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
 
         info!("Installing CAPI on management cluster...");
-        self.install_capi_on_management().await?;
+        self.install_capi_on_management(&mgmt_client).await?;
 
         info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
@@ -856,8 +856,13 @@ impl Installer {
     }
 
     /// Installs CAPI controllers on the management cluster using the native installer.
-    async fn install_capi_on_management(&self) -> Result<()> {
-        crate::commands::ensure_capi_providers(self.provider()).await
+    async fn install_capi_on_management(&self, mgmt_client: &Client) -> Result<()> {
+        crate::commands::ensure_capi_providers(
+            mgmt_client,
+            self.provider(),
+            &self.cluster.spec.provider_ref,
+        )
+        .await
     }
 
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
@@ -1018,6 +1023,7 @@ impl Installer {
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },
         );

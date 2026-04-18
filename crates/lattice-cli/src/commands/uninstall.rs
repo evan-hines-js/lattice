@@ -63,6 +63,7 @@ pub struct Uninstaller {
     kubeconfig: PathBuf,
     cluster_name: String,
     provider: ProviderType,
+    provider_ref: String,
     capi_namespace: String,
     keep_bootstrap_on_failure: bool,
     /// Run ID for this uninstall session
@@ -113,12 +114,14 @@ impl Uninstaller {
             .ok_or_else(|| Error::command_failed("Cluster has no name"))?;
 
         let provider = cluster.spec.provider.provider_type();
+        let provider_ref = cluster.spec.provider_ref.clone();
         let capi_ns = capi_namespace(&cluster_name);
 
         Ok(Self {
             kubeconfig: args.kubeconfig.clone(),
             cluster_name,
             provider,
+            provider_ref,
             capi_namespace: capi_ns,
             keep_bootstrap_on_failure: args.keep_bootstrap_on_failure,
             run_id: args.run_id.clone().unwrap_or_else(generate_run_id),
@@ -412,7 +415,7 @@ impl Uninstaller {
         crate::commands::ensure_cert_manager(&bootstrap_client).await?;
 
         info!("Installing CAPI providers on kind cluster...");
-        self.install_capi_providers().await?;
+        self.install_capi_providers(&bootstrap_client).await?;
 
         // Delete LatticeCluster first to stop the operator from reconciling.
         // This prevents the operator from recreating the LoadBalancer service.
@@ -453,8 +456,9 @@ impl Uninstaller {
         Ok(())
     }
 
-    async fn install_capi_providers(&self) -> Result<()> {
-        crate::commands::ensure_capi_providers(self.provider).await
+    async fn install_capi_providers(&self, bootstrap_client: &Client) -> Result<()> {
+        crate::commands::ensure_capi_providers(bootstrap_client, self.provider, &self.provider_ref)
+            .await
     }
 }
 

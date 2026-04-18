@@ -229,9 +229,35 @@ pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
 ///
 /// cert-manager must be installed and ready before calling this function,
 /// as CAPI manifests reference cert-manager CRDs (Certificate, Issuer).
-pub async fn ensure_capi_providers(provider: lattice_crd::crd::ProviderType) -> Result<()> {
-    use lattice_capi::installer::{CapiInstaller, CapiProviderConfig, NativeInstaller};
+///
+/// Looks up the named `InfraProvider` in `lattice-system` when present and
+/// materializes its declared `imagePullSecrets` into the CAPI provider
+/// namespace via ESO so the provider Deployment can pull private images.
+/// Shares the `ensure_capi_providers_for` entry point used by the in-cluster
+/// operator startup — one install path, no drift.
+pub async fn ensure_capi_providers(
+    client: &Client,
+    provider: lattice_crd::crd::ProviderType,
+    provider_ref: &str,
+) -> Result<()> {
+    use kube::Api;
+    use lattice_capi::installer::{ensure_capi_providers_for, NativeInstaller};
+    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+    use lattice_crd::crd::InfraProvider;
 
-    let config = CapiProviderConfig::new(provider).cmd_err()?;
-    NativeInstaller::new().ensure(&config).await.cmd_err()
+    let cps: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
+    let cp = match cps.get(provider_ref).await {
+        Ok(cp) => Some(cp),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => None,
+        Err(e) => {
+            return Err(Error::command_failed(format!(
+                "failed to read InfraProvider '{provider_ref}': {e}"
+            )));
+        }
+    };
+
+    let installer = NativeInstaller::new();
+    ensure_capi_providers_for(client, &installer, provider, cp.as_ref(), "lattice-cli")
+        .await
+        .cmd_err()
 }

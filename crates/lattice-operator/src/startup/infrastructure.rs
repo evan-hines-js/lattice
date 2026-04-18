@@ -7,16 +7,14 @@
 use std::time::Duration;
 
 use kube::api::ListParams;
-use kube::{Api, Client, ResourceExt};
+use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{ParentConnectionConfig, SharedConfig};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
-use lattice_capi::installer::{CapiInstaller, CapiProviderConfig};
-use lattice_crd::crd::{
-    BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig, ProviderType,
-};
+use lattice_capi::installer::{ensure_capi_providers_for, CapiInstaller};
+use lattice_crd::crd::{BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig};
 use lattice_infra::bootstrap::{self, InfrastructureConfig};
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
@@ -45,7 +43,15 @@ pub async fn ensure_capi_infrastructure(
             let cloud_providers: Api<InfraProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
             let cp = cloud_providers.get(&c.spec.provider_ref).await.ok();
-            ensure_capi(client, provider_type, cp.as_ref(), installer).await?;
+            ensure_capi_providers_for(
+                client,
+                installer,
+                provider_type,
+                cp.as_ref(),
+                "lattice-operator",
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("CAPI installation failed: {e}"))?;
         }
     }
 
@@ -305,43 +311,13 @@ async fn ensure_capi_on_bootstrap(
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     apply_prereqs_phase(client).await?;
-    ensure_capi(client, infrastructure, Some(&cp), installer).await
-}
-
-/// Install CAPI providers with ESO credential sync to provider namespace.
-async fn ensure_capi(
-    client: &Client,
-    provider_type: ProviderType,
-    cloud_provider: Option<&InfraProvider>,
-    installer: &dyn CapiInstaller,
-) -> anyhow::Result<()> {
-    tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
-
-    if let Some(cp) = cloud_provider {
-        if let Some(ref credentials) = cp.spec.credentials {
-            let target_ns = lattice_capi::installer::infra_provider_namespace(provider_type);
-            if let Some(ns) = target_ns {
-                lattice_secret_provider::credentials::ensure_credentials(
-                    client,
-                    &cp.name_any(),
-                    credentials,
-                    cp.spec.credential_data.as_ref(),
-                    ns,
-                    "lattice-operator",
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to sync credentials to {ns}: {e}"))?;
-            }
-        }
-    }
-
-    let config = CapiProviderConfig::new(provider_type)
-        .map_err(|e| anyhow::anyhow!("failed to create CAPI config: {}", e))?;
-    installer
-        .ensure(&config)
-        .await
-        .map_err(|e| anyhow::anyhow!("CAPI installation failed: {}", e))?;
-
-    tracing::info!(infrastructure = ?provider_type, "CAPI providers installed");
-    Ok(())
+    ensure_capi_providers_for(
+        client,
+        installer,
+        infrastructure,
+        Some(&cp),
+        "lattice-operator",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("CAPI installation failed: {e}"))
 }

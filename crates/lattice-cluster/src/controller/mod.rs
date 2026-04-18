@@ -420,6 +420,7 @@ mod tests {
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },
         )
