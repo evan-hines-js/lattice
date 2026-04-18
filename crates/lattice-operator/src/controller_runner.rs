@@ -488,14 +488,23 @@ pub fn build_cluster_controller(
 
     tracing::info!("- LatticeCluster controller");
 
-    Box::pin(
-        Controller::new(
+    let (reader, writer) = reflector::store();
+    let cluster_stream = reflector(
+        writer,
+        watcher::watcher(
             clusters,
             WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-        )
-        .shutdown_on_signal()
-        .run(reconcile, error_policy, ctx)
-        .for_each(log_reconcile_result("Cluster")),
+        ),
+    )
+    .default_backoff()
+    .applied_objects()
+    .predicate_filter(predicates::generation, Default::default());
+
+    Box::pin(
+        Controller::for_stream(cluster_stream, reader)
+            .shutdown_on_signal()
+            .run(reconcile, error_policy, ctx)
+            .for_each(log_reconcile_result("Cluster")),
     )
 }
 
@@ -653,7 +662,13 @@ pub fn build_mesh_member_controller(
     let mesh_members_for_mm_watch: Api<LatticeMeshMember> = Api::all(client.clone());
     let graph_for_mm_dep_watch = graph.clone();
 
-    let mm_ctrl = Controller::new(mesh_members, watcher_config())
+    let (reader, writer) = reflector::store();
+    let mm_stream = reflector(writer, watcher::watcher(mesh_members, watcher_config()))
+        .default_backoff()
+        .applied_objects()
+        .predicate_filter(predicates::generation, Default::default());
+
+    let mm_ctrl = Controller::for_stream(mm_stream, reader)
         .watches(mesh_members_for_mm_watch, watcher_config(), move |member| {
             let graph = graph_for_mm_dep_watch.clone();
             let namespace = match member.metadata.namespace.as_deref() {
