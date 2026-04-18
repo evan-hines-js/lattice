@@ -25,6 +25,7 @@ lattice-crd.workspace = true
 lattice-agent.workspace = true
 lattice-capi.workspace = true
 lattice-cell.workspace = true
+lattice-cert-manager.workspace = true
 lattice-cluster.workspace = true
 lattice-infra.workspace = true
 lattice-move.workspace = true

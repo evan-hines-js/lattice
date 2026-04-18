@@ -96,13 +96,9 @@ async fn ensure_general_infrastructure(
     let phases = bootstrap::generate_phases(&infra_config)
         .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
 
-    tracing::info!(
-        phases = phases.len(),
-        "Applying infrastructure phases (skipping cert-manager — already applied)"
-    );
+    tracing::info!(phases = phases.len(), "Applying infrastructure phases");
 
-    // Skip phase 0 (cert-manager) — it was already applied in the blocking path.
-    bootstrap::apply_all_phases(client, &phases, 1).await?;
+    bootstrap::apply_all_phases(client, &phases).await?;
 
     tracing::info!("General infrastructure installation complete");
     Ok(())
@@ -169,37 +165,17 @@ async fn resolve_infra_config(
 
 /// Apply cert-manager and ESO concurrently, then create the local webhook store.
 ///
-/// Both are independent — ESO manages its own webhook certs. Deploying them
-/// in a single phase lets them start in parallel, reducing bootstrap time.
-/// CAPI depends on both being ready (cert-manager for CAPI webhooks, ESO for
-/// credential sync).
+/// Blocking install of the two components CAPI depends on: cert-manager for
+/// its webhooks, ESO for InfraProvider credential sync. The controller loops
+/// for these components run steady-state; they can't service pre-CAPI
+/// bootstrap because the full operator isn't up yet.
 async fn apply_prereqs_phase(client: &Client) -> anyhow::Result<()> {
-    use lattice_infra::bootstrap::{InfraComponent, InfraPhase};
-
-    // Blocking install of the two components CAPI depends on: cert-manager for
-    // its webhooks, ESO for InfraProvider credential sync. Both ship as their
-    // own per-dependency install crates — we pull manifests directly (not
-    // through the controller CR flow) so the bootstrap ordering is synchronous.
-    let phase = InfraPhase {
-        name: "prereqs",
-        components: vec![
-            InfraComponent {
-                name: "cert-manager",
-                version: lattice_cert_manager::install::manifests::cert_manager_version(),
-                manifests: lattice_cert_manager::install::manifests::generate_cert_manager()
-                    .to_vec(),
-                health_namespace: Some("cert-manager"),
-            },
-            InfraComponent {
-                name: "eso",
-                version: lattice_eso::install::manifests::eso_version(),
-                manifests: lattice_eso::install::manifests::generate_eso().to_vec(),
-                health_namespace: Some("external-secrets"),
-            },
-        ],
-    };
-
-    bootstrap::apply_phase(client, &phase).await?;
+    let (cm, eso) = tokio::join!(
+        lattice_cert_manager::install::install_blocking(client),
+        lattice_eso::install::install_blocking(client),
+    );
+    cm.map_err(|e| anyhow::anyhow!("cert-manager install failed: {e}"))?;
+    eso.map_err(|e| anyhow::anyhow!("ESO install failed: {e}"))?;
 
     lattice_secret_provider::controller::ensure_local_webhook_infrastructure(client)
         .await

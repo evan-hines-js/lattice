@@ -453,7 +453,7 @@ mod tests {
         // All build-time infra registries should be covered
         for reg in upstream_registries() {
             assert!(
-                resolved.iter().any(|m| m.upstream == reg),
+                resolved.iter().any(|m| &m.upstream == reg),
                 "infra registry {} should be covered",
                 reg
             );
@@ -484,7 +484,7 @@ mod tests {
             "_default catch-all entry must be present for air-gapped"
         );
         for reg in upstream_registries() {
-            assert!(resolved.iter().any(|m| m.upstream == reg));
+            assert!(resolved.iter().any(|m| &m.upstream == reg));
         }
     }
 

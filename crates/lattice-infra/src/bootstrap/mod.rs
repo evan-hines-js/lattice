@@ -454,21 +454,14 @@ pub async fn apply_phase(
 }
 
 /// Apply all phases sequentially, waiting for health gates between each phase.
-///
-/// Returns the combined `InfraComponentStatus` entries for all components.
-/// If `skip_first_n` is set, skips that many phases (useful when cert-manager
-/// was already applied in the blocking path).
 pub async fn apply_all_phases(
     client: &kube::Client,
     phases: &[InfraPhase],
-    skip_first_n: usize,
 ) -> anyhow::Result<Vec<InfraComponentStatus>> {
     let mut statuses = Vec::new();
-
-    for phase in phases.iter().skip(skip_first_n) {
+    for phase in phases {
         statuses.extend(apply_phase(client, phase).await?);
     }
-
     Ok(statuses)
 }
 
@@ -716,13 +709,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_namespace_yaml() {
-        let ns = namespace_yaml("test");
-        assert!(ns.contains("kind: Namespace"));
-        assert!(ns.contains("name: test"));
-    }
-
-    #[test]
     fn test_gateway_api_crds() {
         let crds = generate_gateway_api_crds();
         assert!(!crds.is_empty());
@@ -734,15 +720,6 @@ mod tests {
         let config = InfrastructureConfig::default();
         let phases = generate_phases(&config).expect("should generate phases");
 
-        // cert-manager is always phase 0
-        assert_eq!(phases[0].name, "cert-manager");
-        assert_eq!(phases[0].components[0].name, "cert-manager");
-        assert_eq!(
-            phases[0].components[0].health_namespace,
-            Some("cert-manager")
-        );
-
-        // All phases should have at least one component
         for phase in &phases {
             assert!(
                 !phase.components.is_empty(),

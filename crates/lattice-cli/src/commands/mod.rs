@@ -210,19 +210,13 @@ pub async fn kube_client_from_kubeconfig(
 
 /// Ensure cert-manager is installed and ready.
 ///
-/// Applies the cert-manager phase (phase 0 of the infrastructure pipeline)
-/// with its health gate. Must complete before CAPI providers are installed.
+/// Applies cert-manager's manifests and gates on its Deployments reporting
+/// Available. Must complete before CAPI providers or copied resources land,
+/// because every downstream webhook expects cert-manager to be healthy.
 pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
-    let config = lattice_infra::bootstrap::InfrastructureConfig::default();
-    let phases = lattice_infra::bootstrap::generate_phases(&config).cmd_err()?;
-    let cert_manager_phase = phases
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no phases generated"))
-        .cmd_err()?;
-    lattice_infra::bootstrap::apply_phase(client, cert_manager_phase)
+    lattice_cert_manager::install::install_blocking(client)
         .await
-        .cmd_err()?;
-    Ok(())
+        .cmd_err()
 }
 
 /// Apply just the Lattice CRD manifests to `client`.
