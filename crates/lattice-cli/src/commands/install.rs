@@ -709,8 +709,8 @@ impl Installer {
 
         info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
-        self.copy_cloud_provider_to_management(bootstrap_client, &mgmt_client)
-            .await?;
+        info!("Copying distributable resources to management cluster...");
+        crate::commands::copy_lattice_resources(bootstrap_client, &mgmt_client, "bootstrap").await?;
 
         Ok(())
     }
@@ -743,42 +743,6 @@ impl Installer {
             .map_err(|e| Error::command_failed(e.to_string()))
     }
 
-    /// Copy InfraProvider and its credentials secret from bootstrap to management cluster
-    async fn copy_cloud_provider_to_management(
-        &self,
-        bootstrap_client: &Client,
-        mgmt_client: &Client,
-    ) -> Result<()> {
-        use lattice_agent::apply_distributed_resources;
-        use lattice_cell::fetch_distributable_resources;
-
-        // Fetch all distributable resources (InfraProviders, SecretProviders, CedarPolicies, OIDCProviders, secrets)
-        // Use "bootstrap" as the origin cluster name since this is the initial install
-        let resources = fetch_distributable_resources(bootstrap_client, "bootstrap")
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to fetch resources: {}", e)))?;
-
-        if resources.is_empty() {
-            info!("No InfraProviders or SecretProviders to copy");
-            return Ok(());
-        }
-
-        info!(
-            "Copying {} InfraProvider(s), {} SecretProvider(s), {} CedarPolicy(s), {} OIDCProvider(s), {} secret(s) to management cluster",
-            resources.cloud_providers.len(),
-            resources.secrets_providers.len(),
-            resources.cedar_policies.len(),
-            resources.oidc_providers.len(),
-            resources.secrets.len()
-        );
-
-        // Apply to management cluster
-        apply_distributed_resources(mgmt_client, &resources)
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to apply resources: {}", e)))?;
-
-        Ok(())
-    }
 
     /// Fetches the management cluster kubeconfig from the bootstrap cluster secret,
     /// rewriting the server URL for Docker provider if needed.

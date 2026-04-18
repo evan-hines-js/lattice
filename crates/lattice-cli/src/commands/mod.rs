@@ -225,6 +225,53 @@ pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
     Ok(())
 }
 
+/// Copy every Lattice CRD marked distributable (`InfraProvider`,
+/// `ImageProvider`, `SecretProvider`, `CedarPolicy`, `OIDCProvider`,
+/// `LatticePackage`) plus their backing Secrets from `source` to `target`.
+///
+/// Used in both directions:
+/// - **install**: bootstrap kind → pivoted mgmt cluster (seeds what the user
+///   authored in the install YAML onto the long-lived cluster).
+/// - **uninstall**: target mgmt cluster → fresh kind cluster (so `lattice move`
+///   can run CAPI providers that need private images).
+///
+/// `origin_cluster` tags inherited resources with their source cluster name.
+pub async fn copy_lattice_resources(
+    source: &Client,
+    target: &Client,
+    origin_cluster: &str,
+) -> Result<()> {
+    use lattice_agent::apply_distributed_resources;
+    use lattice_cell::fetch_distributable_resources;
+
+    let resources = fetch_distributable_resources(source, origin_cluster)
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to fetch resources: {e}")))?;
+
+    if resources.is_empty() {
+        debug!("No distributable resources to copy");
+        return Ok(());
+    }
+
+    debug!(
+        "Copying {} InfraProvider(s), {} ImageProvider(s), {} SecretProvider(s), \
+         {} CedarPolicy(s), {} OIDCProvider(s), {} LatticePackage(s), {} secret(s)",
+        resources.cloud_providers.len(),
+        resources.image_providers.len(),
+        resources.secrets_providers.len(),
+        resources.cedar_policies.len(),
+        resources.oidc_providers.len(),
+        resources.packages.len(),
+        resources.secrets.len()
+    );
+
+    apply_distributed_resources(target, &resources)
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to apply resources: {e}")))?;
+
+    Ok(())
+}
+
 /// Ensure CAPI providers are installed for the given provider type.
 ///
 /// cert-manager must be installed and ready before calling this function,

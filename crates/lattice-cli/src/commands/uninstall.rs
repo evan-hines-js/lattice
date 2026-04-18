@@ -410,9 +410,23 @@ impl Uninstaller {
 
     async fn run_uninstall(&self) -> Result<()> {
         let bootstrap_client = self.bootstrap_client().await?;
+        let target_client = self.target_client().await?;
 
         info!("Installing cert-manager on kind cluster...");
         crate::commands::ensure_cert_manager(&bootstrap_client).await?;
+
+        // Copy InfraProvider + ImageProvider(s) + backing Secrets from the
+        // target cluster so the CAPI provider Deployments on the kind cluster
+        // can pull private images and reconcile using the same ESO-backed
+        // credentials. Must happen before `ensure_capi_providers` so the
+        // operator on the kind cluster sees the resources it needs.
+        info!("Copying distributable resources from target to kind cluster...");
+        crate::commands::copy_lattice_resources(
+            &target_client,
+            &bootstrap_client,
+            &self.cluster_name,
+        )
+        .await?;
 
         info!("Installing CAPI providers on kind cluster...");
         self.install_capi_providers(&bootstrap_client).await?;
