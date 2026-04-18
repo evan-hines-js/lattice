@@ -74,6 +74,10 @@ pub struct InfraProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openstack: Option<OpenStackProviderConfig>,
 
+    /// Basis-specific configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<BasisProviderConfig>,
+
     /// ImageProviders supplying registry credentials for the CAPI provider's
     /// own Deployment image. Each entry names an `ImageProvider` in the same
     /// namespace as this InfraProvider; at CAPI install time the operator
@@ -110,6 +114,8 @@ pub enum InfraProviderType {
     OpenStack,
     /// Docker/Kind (local development)
     Docker,
+    /// Basis (minimal bare-metal VM scheduler)
+    Basis,
 }
 
 impl std::fmt::Display for InfraProviderType {
@@ -119,6 +125,7 @@ impl std::fmt::Display for InfraProviderType {
             Self::Proxmox => write!(f, "Proxmox"),
             Self::OpenStack => write!(f, "OpenStack"),
             Self::Docker => write!(f, "Docker"),
+            Self::Basis => write!(f, "Basis"),
         }
     }
 }
@@ -174,6 +181,18 @@ pub struct OpenStackProviderConfig {
     /// Floating IP pool for external access
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub floating_ip_pool: Option<String>,
+}
+
+/// Basis-specific provider configuration.
+///
+/// Carries only the connection info needed to reach a Basis controller —
+/// the controller owns scheduling, IP allocation, and VIP reservation
+/// itself, so there's nothing else to configure at the account level.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct BasisProviderConfig {
+    /// gRPC endpoint of the Basis controller, e.g. `https://10.0.0.1:7443`.
+    pub server_url: String,
 }
 
 /// InfraProvider status
@@ -286,6 +305,21 @@ impl InfraProviderSpec {
             InfraProviderType::Docker => {
                 // Docker providers require no credentials or provider-specific config
             }
+            InfraProviderType::Basis => {
+                if self.credentials.is_none() {
+                    return Err(crate::ValidationError::new(
+                        "Basis provider requires credentials",
+                    ));
+                }
+                let basis = self.basis.as_ref().ok_or_else(|| {
+                    crate::ValidationError::new("basis config required when type is basis")
+                })?;
+                if basis.server_url.is_empty() {
+                    return Err(crate::ValidationError::new(
+                        "basis.serverUrl cannot be empty",
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -359,6 +393,30 @@ spec:
     }
 
     #[test]
+    fn basis_provider_yaml() {
+        let yaml = r#"
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: homelab-basis
+spec:
+  type: basis
+  credentials:
+    id: basis-credentials
+    provider: lattice-local
+  basis:
+    serverUrl: https://10.0.0.206:7443
+"#;
+        let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
+        let provider: InfraProvider = serde_json::from_value(value).expect("parse");
+        assert_eq!(provider.spec.provider_type, InfraProviderType::Basis);
+        assert_eq!(
+            provider.spec.basis.as_ref().expect("basis config").server_url,
+            "https://10.0.0.206:7443"
+        );
+    }
+
+    #[test]
     fn k8s_secret_ref_with_credentials() {
         let cp = InfraProvider::new(
             "aws-prod",
@@ -370,6 +428,7 @@ spec:
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },
@@ -391,6 +450,7 @@ spec:
                 aws: None,
                 proxmox: None,
                 openstack: None,
+                basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
             },

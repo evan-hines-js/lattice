@@ -57,8 +57,9 @@ pub use image_provider::{
     ImageProviderType, ImageTrustPolicy, VerificationAuthority,
 };
 pub use infra_provider::{
-    AwsProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase, InfraProviderSpec,
-    InfraProviderStatus, InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
+    AwsProviderConfig, BasisProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase,
+    InfraProviderSpec, InfraProviderStatus, InfraProviderType, OpenStackProviderConfig,
+    ProxmoxProviderConfig,
 };
 pub use install::cert_manager::{CertManagerInstall, CertManagerInstallSpec};
 pub use install::cilium::{CiliumInstall, CiliumInstallSpec};
@@ -110,8 +111,8 @@ pub use package::{
     PackageMeshPort, PackagePhase,
 };
 pub use providers::{
-    AdditionalNetwork, AwsConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig,
-    ProxmoxConfig,
+    AdditionalNetwork, AwsConfig, BasisConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig,
+    OpenStackConfig, ProxmoxConfig,
 };
 pub use quota::{
     LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,

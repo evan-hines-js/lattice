@@ -271,6 +271,8 @@ pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
 pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
 /// Secret name for OpenStack credentials
 pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
+/// Secret name for Basis mTLS credentials (cert/key/ca PEMs + serverUrl)
+pub const BASIS_CREDENTIALS_SECRET: &str = "basis-credentials";
 
 // CAPI provider secret names (target secrets in provider namespaces)
 // These are the names expected by each CAPI provider

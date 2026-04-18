@@ -81,6 +81,10 @@ fn main() {
         versions.providers["infrastructure-openstack"].version
     );
     println!(
+        "cargo:rustc-env=CAPI_BASIS_VERSION={}",
+        versions.providers["infrastructure-basis"].version
+    );
+    println!(
         "cargo:rustc-env=IPAM_IN_CLUSTER_VERSION={}",
         versions.providers["ipam-in-cluster"].version
     );

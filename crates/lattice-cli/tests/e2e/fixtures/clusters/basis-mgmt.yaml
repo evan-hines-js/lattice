@@ -1,0 +1,80 @@
+# Basis management cluster for E2E testing
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-mgmt
+spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
+  monitoring:
+    enabled: false
+  backups:
+    enabled: false
+  providerRef: basis
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+    config:
+      basis:
+        ipv4Pool: "default"
+  registryMirrors:
+    - upstream: docker.io
+      mirror: "http://10.0.0.131:5555"
+    - upstream: ghcr.io
+      mirror: "http://10.0.0.131:5556"
+  nodes:
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 4
+        memoryGib: 8
+        diskGib: 40
+    workerPools:
+      default:
+        replicas: 1
+        instanceType:
+          cores: 4
+          memoryGib: 8
+          diskGib: 80
+  parentConfig:
+    grpcPort: 50051
+    bootstrapPort: 8443
+    service:
+      type: LoadBalancer
+---
+# InfraProvider referenced by spec.providerRef above.
+# `credentials.id: basis-credentials` points at the Secret the installer seeds
+# from BASIS_CONTROLLER_URL / BASIS_CLIENT_CERT / BASIS_CLIENT_KEY / BASIS_CA_CERT
+# env vars. `imagePullSecrets: [default]` wires the GHCR creds in the `default`
+# ImageProvider below onto the basis-capi-provider Deployment — the image lives
+# at ghcr.io/evan-hines-js/basis-capi-provider which requires auth.
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: basis
+  namespace: lattice-system
+spec:
+  type: basis
+  credentials:
+    id: basis-credentials
+    provider: lattice-local
+  basis:
+    serverUrl: "https://10.0.0.206:7443"
+  imagePullSecrets:
+    - name: default
+---
+# ImageProvider referenced by the basis InfraProvider above AND by LatticeService
+# `imagePullSecrets: [default]` in e2e service fixtures. `credentials.id:
+# image-registry-credentials` points at the dockerconfigjson Secret the installer
+# seeds from `--registry-credentials-file` or `GHCR_USER`/`GHCR_TOKEN` env vars.
+apiVersion: lattice.dev/v1alpha1
+kind: ImageProvider
+metadata:
+  name: default
+  namespace: lattice-system
+spec:
+  type: ghcr
+  registry: ghcr.io
+  credentials:
+    id: image-registry-credentials
+    provider: lattice-local

@@ -6,13 +6,16 @@
 //! - CAPD (Docker/Kind) - local development only
 //! - CAPMOX (Proxmox) - on-premises virtualization
 //! - CAPO (OpenStack) - private/public cloud
+//! - Basis (lattos/basis) - minimal bare-metal VM scheduler
 
 mod aws;
+mod basis;
 mod docker;
 mod openstack;
 mod proxmox;
 
 pub use aws::AwsConfig;
+pub use basis::BasisConfig;
 pub use docker::DockerConfig;
 pub use openstack::OpenStackConfig;
 pub use proxmox::{AdditionalNetwork, Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};

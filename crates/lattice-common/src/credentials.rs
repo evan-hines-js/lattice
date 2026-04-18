@@ -16,7 +16,7 @@ use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::{
-    AWS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
+    AWS_CREDENTIALS_SECRET, BASIS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
     PROXMOX_CREDENTIALS_SECRET,
 };
 
@@ -239,6 +239,79 @@ impl CredentialProvider for ProxmoxCredentials {
         string_data.insert("url".to_string(), self.url.clone());
         string_data.insert("token".to_string(), (*self.token).clone());
         string_data.insert("secret".to_string(), (*self.secret).clone());
+
+        build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
+    }
+}
+
+/// Basis credentials for the Basis CAPI provider.
+///
+/// mTLS client certificate/key plus the controller's CA. `server_url` is the
+/// gRPC endpoint of the Basis controller (e.g. `https://10.0.0.97:7443`) and
+/// is templated into the provider's Deployment as `BASIS_CONTROLLER_URL`;
+/// `cert`/`key`/`ca` are mounted into the Deployment as files.
+#[derive(Debug, Clone)]
+pub struct BasisCredentials {
+    /// gRPC URL of the Basis controller
+    pub server_url: String,
+    /// Client certificate PEM
+    pub client_cert: Zeroizing<String>,
+    /// Client private key PEM (zeroized on drop)
+    pub client_key: Zeroizing<String>,
+    /// Controller CA certificate PEM
+    pub ca_cert: String,
+}
+
+impl CredentialProvider for BasisCredentials {
+    const PROVIDER_TYPE: &'static str = "basis";
+    const SECRET_NAME: &'static str = BASIS_CREDENTIALS_SECRET;
+
+    fn from_env() -> Result<Self, CredentialError> {
+        Ok(Self {
+            server_url: std::env::var("BASIS_CONTROLLER_URL")
+                .map_err(|_| CredentialError::EnvVarNotSet("BASIS_CONTROLLER_URL"))?,
+            client_cert: Zeroizing::new(
+                std::env::var("BASIS_CLIENT_CERT")
+                    .map_err(|_| CredentialError::EnvVarNotSet("BASIS_CLIENT_CERT"))?,
+            ),
+            client_key: Zeroizing::new(
+                std::env::var("BASIS_CLIENT_KEY")
+                    .map_err(|_| CredentialError::EnvVarNotSet("BASIS_CLIENT_KEY"))?,
+            ),
+            ca_cert: std::env::var("BASIS_CA_CERT")
+                .map_err(|_| CredentialError::EnvVarNotSet("BASIS_CA_CERT"))?,
+        })
+    }
+
+    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
+        Ok(Self {
+            server_url: data
+                .get("serverUrl")
+                .cloned()
+                .ok_or(CredentialError::MissingField("serverUrl"))?,
+            client_cert: Zeroizing::new(
+                data.get("cert")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("cert"))?,
+            ),
+            client_key: Zeroizing::new(
+                data.get("key")
+                    .cloned()
+                    .ok_or(CredentialError::MissingField("key"))?,
+            ),
+            ca_cert: data
+                .get("ca")
+                .cloned()
+                .ok_or(CredentialError::MissingField("ca"))?,
+        })
+    }
+
+    fn to_k8s_secret(&self) -> Secret {
+        let mut string_data = BTreeMap::new();
+        string_data.insert("serverUrl".to_string(), self.server_url.clone());
+        string_data.insert("cert".to_string(), (*self.client_cert).clone());
+        string_data.insert("key".to_string(), (*self.client_key).clone());
+        string_data.insert("ca".to_string(), self.ca_cert.clone());
 
         build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
     }

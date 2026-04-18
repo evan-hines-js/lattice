@@ -24,9 +24,12 @@ use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
+    Error, AWS_CAPA_CREDENTIALS_SECRET, BASIS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET,
+    PROXMOX_CREDENTIALS_SECRET,
 };
-use lattice_core::system_namespaces::{CAPA_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE};
+use lattice_core::system_namespaces::{
+    CAPA_NAMESPACE, CAPI_BASIS_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
+};
 use lattice_crd::crd::{InfraProvider, ProviderType};
 
 /// Timeout for waiting on cert-manager and provider deployments
@@ -48,6 +51,7 @@ fn provider_dir_name(name: &str, provider_type: CapiProviderType) -> &'static st
         ("proxmox", CapiProviderType::Infrastructure) => "infrastructure-proxmox",
         ("aws", CapiProviderType::Infrastructure) => "infrastructure-aws",
         ("openstack", CapiProviderType::Infrastructure) => "infrastructure-openstack",
+        ("basis", CapiProviderType::Infrastructure) => "infrastructure-basis",
         ("in-cluster", _) => "ipam-in-cluster",
         _ => "unknown",
     }
@@ -65,6 +69,7 @@ fn provider_namespace(name: &str, provider_type: CapiProviderType) -> Option<&'s
         ("proxmox", CapiProviderType::Infrastructure) => Some(CAPMOX_NAMESPACE),
         ("aws", CapiProviderType::Infrastructure) => Some(CAPA_NAMESPACE),
         ("openstack", CapiProviderType::Infrastructure) => Some(CAPO_NAMESPACE),
+        ("basis", CapiProviderType::Infrastructure) => Some(CAPI_BASIS_NAMESPACE),
         ("in-cluster", _) => Some("capi-ipam-in-cluster-system"),
         _ => None,
     }
@@ -87,6 +92,7 @@ fn provider_component_files(
         ("proxmox", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("aws", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("openstack", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
+        ("basis", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("in-cluster", _) => &["ipam-components.yaml"],
         _ => &[],
     }
@@ -259,6 +265,7 @@ const KNOWN_PROVIDERS: &[(&str, CapiProviderType)] = &[
     ("proxmox", CapiProviderType::Infrastructure),
     ("openstack", CapiProviderType::Infrastructure),
     ("aws", CapiProviderType::Infrastructure),
+    ("basis", CapiProviderType::Infrastructure),
     ("in-cluster", CapiProviderType::Infrastructure),
 ];
 
@@ -393,6 +400,7 @@ pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> 
         ProviderType::Aws => Some(CAPA_NAMESPACE),
         ProviderType::Proxmox => Some(CAPMOX_NAMESPACE),
         ProviderType::OpenStack => Some(CAPO_NAMESPACE),
+        ProviderType::Basis => Some(CAPI_BASIS_NAMESPACE),
         _ => None,
     }
 }
@@ -594,6 +602,15 @@ impl InfraProviderInfo {
                 ],
                 needs_ipam: true,
             }),
+            ProviderType::Basis => Ok(Self {
+                name: "basis",
+                version: env!("CAPI_BASIS_VERSION").to_string(),
+                credentials_secret: Some((CAPI_BASIS_NAMESPACE, BASIS_CREDENTIALS_SECRET)),
+                // `serverUrl` is templated into the components YAML; cert/key/ca
+                // are mounted from the Secret as files in the Deployment spec.
+                credentials_env_map: &[("serverUrl", "BASIS_CONTROLLER_URL")],
+                needs_ipam: false,
+            }),
             ProviderType::Gcp | ProviderType::Azure | _ => Err(Error::capi_installation(format!(
                 "Provider {:?} is not yet implemented",
                 provider
@@ -666,6 +683,7 @@ impl CapiProviderConfig {
             ProviderType::Docker => "docker",
             ProviderType::OpenStack => "openstack",
             ProviderType::Proxmox => "proxmox",
+            ProviderType::Basis => "basis",
             ProviderType::Gcp | ProviderType::Azure | _ => {
                 return Err(Error::capi_installation(format!(
                     "Provider {:?} is not yet implemented",

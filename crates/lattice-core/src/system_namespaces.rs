@@ -21,6 +21,8 @@ pub const CAPA_NAMESPACE: &str = "capa-system";
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
 /// CAPI provider namespace for OpenStack
 pub const CAPO_NAMESPACE: &str = "capo-system";
+/// CAPI provider namespace for Basis
+pub const CAPI_BASIS_NAMESPACE: &str = "capi-basis-system";
 /// Velero backup namespace
 pub const VELERO_NAMESPACE: &str = "velero";
 
@@ -47,6 +49,7 @@ pub const CAPI: &[&str] = &[
     CAPO_NAMESPACE,
     CAPA_NAMESPACE,
     CAPMOX_NAMESPACE,
+    CAPI_BASIS_NAMESPACE,
     "capi-ipam-in-cluster-system",
 ];
 

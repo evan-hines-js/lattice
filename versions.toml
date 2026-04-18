@@ -191,6 +191,13 @@ version = "0.14.1"
 repo = "kubernetes-sigs/cluster-api-provider-openstack"
 components = ["infrastructure-components.yaml", "metadata.yaml"]
 
+[providers.infrastructure-basis]
+# Basis infrastructure provider (basis-capi-provider)
+# Source: https://github.com/lattos/basis
+version = "0.1.0"
+repo = "lattos/basis"
+components = ["infrastructure-components.yaml", "metadata.yaml"]
+
 [providers.ipam-in-cluster]
 # IPAM in-cluster provider (required by CAPMOX)
 version = "1.0.3"

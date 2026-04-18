@@ -38,7 +38,7 @@ use lattice_cell::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator,
 };
 use lattice_common::credentials::{
-    AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
+    AwsCredentials, BasisCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
 use lattice_common::kube_utils;
 use lattice_common::{capi_namespace, kubeconfig_secret_name, OPERATOR_NAME};
@@ -886,6 +886,12 @@ impl Installer {
                 let creds = OpenStackCredentials::from_env()
                     .map_err(|e| Error::validation(e.to_string()))?;
                 info!("Seeding OpenStack credentials (cloud: {})", creds.cloud_name);
+                Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
+            }
+            ProviderType::Basis => {
+                let creds = BasisCredentials::from_env()
+                    .map_err(|e| Error::validation(e.to_string()))?;
+                info!("Seeding Basis credentials (BASIS_CONTROLLER_URL: {})", creds.server_url);
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::Docker => Ok(()),

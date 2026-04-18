@@ -17,12 +17,14 @@
 //! ```
 
 mod aws;
+mod basis;
 mod docker;
 mod openstack;
 mod proxmox;
 pub mod registry;
 
 pub use aws::AwsProvider;
+pub use basis::BasisProvider;
 pub use docker::DockerProvider;
 pub use openstack::OpenStackProvider;
 pub use proxmox::ProxmoxProvider;
@@ -1464,6 +1466,7 @@ pub trait Provider: Send + Sync {
 pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<Box<dyn Provider>> {
     match provider_type {
         ProviderType::Aws => Ok(Box::new(AwsProvider::with_namespace(namespace))),
+        ProviderType::Basis => Ok(Box::new(BasisProvider::with_namespace(namespace))),
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
         ProviderType::OpenStack => Ok(Box::new(OpenStackProvider::with_namespace(namespace))),
         ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),

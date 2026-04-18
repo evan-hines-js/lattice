@@ -1,0 +1,43 @@
+# Basis workload2 cluster for E2E hierarchy testing
+# Provisioned from workload1 to test deep cluster hierarchy
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeCluster
+metadata:
+  name: e2e-workload2
+  labels:
+    lattice.dev/environment: e2e-test
+    lattice.dev/region: basis
+spec:
+  latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
+  monitoring:
+    enabled: true
+    ha: false
+  backups:
+    enabled: false
+  providerRef: basis
+  provider:
+    kubernetes:
+      version: "1.32.0"
+      bootstrap: kubeadm
+    config:
+      basis:
+        ipv4Pool: "default"
+  registryMirrors:
+    - upstream: docker.io
+      mirror: "http://10.0.0.131:5555"
+    - upstream: ghcr.io
+      mirror: "http://10.0.0.131:5556"
+  nodes:
+    controlPlane:
+      replicas: 1
+      instanceType:
+        cores: 4
+        memoryGib: 8
+        diskGib: 40
+    workerPools:
+      default:
+        replicas: 1
+        instanceType:
+          cores: 4
+          memoryGib: 8
+          diskGib: 80

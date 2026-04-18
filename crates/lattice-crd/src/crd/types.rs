@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 use super::cluster::MonitoringConfig;
-use super::providers::{AwsConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
+use super::providers::{AwsConfig, BasisConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
 
 // =============================================================================
 // Cluster Config
@@ -46,12 +46,17 @@ pub enum ProviderType {
     Gcp,
     /// Microsoft Azure
     Azure,
+    /// Basis - minimal bare-metal VM scheduler
+    Basis,
 }
 
 impl ProviderType {
     /// Returns true if this provider is for on-premises infrastructure
     pub fn is_on_prem(&self) -> bool {
-        matches!(self, Self::Docker | Self::Proxmox | Self::OpenStack)
+        matches!(
+            self,
+            Self::Docker | Self::Proxmox | Self::OpenStack | Self::Basis
+        )
     }
 
     /// Returns true if this provider is for public cloud
@@ -82,7 +87,7 @@ impl ProviderType {
             Self::Azure => {
                 // Azure uses Standard LB by default, no special annotations needed
             }
-            Self::Docker | Self::Proxmox | Self::OpenStack => {
+            Self::Docker | Self::Proxmox | Self::OpenStack | Self::Basis => {
                 // On-prem uses Cilium L2 announcements, no cloud LB annotations
             }
         }
@@ -92,11 +97,11 @@ impl ProviderType {
     /// Returns the Kubernetes topology key for pod spread constraints.
     ///
     /// Cloud providers automatically set `topology.kubernetes.io/zone` on nodes.
-    /// On-prem providers (Docker, Proxmox) don't have zones, so we spread by hostname.
-    /// OpenStack supports availability zones like cloud providers.
+    /// Bare-metal providers (Docker, Proxmox, Basis) don't have zones, so we
+    /// spread by hostname. OpenStack supports availability zones like cloud providers.
     pub fn topology_spread_key(&self) -> &'static str {
         match self {
-            Self::Docker | Self::Proxmox => "kubernetes.io/hostname",
+            Self::Docker | Self::Proxmox | Self::Basis => "kubernetes.io/hostname",
             Self::Aws | Self::Gcp | Self::Azure | Self::OpenStack => "topology.kubernetes.io/zone",
         }
     }
@@ -113,8 +118,9 @@ impl std::str::FromStr for ProviderType {
             "aws" => Ok(Self::Aws),
             "gcp" => Ok(Self::Gcp),
             "azure" => Ok(Self::Azure),
+            "basis" => Ok(Self::Basis),
             _ => Err(crate::ValidationError::new(format!(
-                "invalid provider type: {s}, expected one of: docker, proxmox, openstack, aws, gcp, azure"
+                "invalid provider type: {s}, expected one of: docker, proxmox, openstack, aws, gcp, azure, basis"
             ))),
         }
     }
@@ -129,6 +135,7 @@ impl std::fmt::Display for ProviderType {
             Self::Aws => write!(f, "aws"),
             Self::Gcp => write!(f, "gcp"),
             Self::Azure => write!(f, "azure"),
+            Self::Basis => write!(f, "basis"),
         }
     }
 }
@@ -186,7 +193,7 @@ impl ProviderSpec {
 /// Provider-specific configuration
 ///
 /// Exactly one provider must be specified. Uses `config.docker: {}` format.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// AWS public cloud
@@ -201,6 +208,9 @@ pub struct ProviderConfig {
     /// Proxmox VE on-premises virtualization
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxConfig>,
+    /// Basis bare-metal VM scheduler
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<BasisConfig>,
 }
 
 impl ProviderConfig {
@@ -208,39 +218,39 @@ impl ProviderConfig {
     pub fn aws(config: AwsConfig) -> Self {
         Self {
             aws: Some(config),
-            docker: None,
-            openstack: None,
-            proxmox: None,
+            ..Default::default()
         }
     }
 
     /// Create a Docker provider config
     pub fn docker() -> Self {
         Self {
-            aws: None,
             docker: Some(DockerConfig::default()),
-            openstack: None,
-            proxmox: None,
+            ..Default::default()
         }
     }
 
     /// Create an OpenStack provider config
     pub fn openstack(config: OpenStackConfig) -> Self {
         Self {
-            aws: None,
-            docker: None,
             openstack: Some(config),
-            proxmox: None,
+            ..Default::default()
         }
     }
 
     /// Create a Proxmox provider config
     pub fn proxmox(config: ProxmoxConfig) -> Self {
         Self {
-            aws: None,
-            docker: None,
-            openstack: None,
             proxmox: Some(config),
+            ..Default::default()
+        }
+    }
+
+    /// Create a Basis provider config
+    pub fn basis(config: BasisConfig) -> Self {
+        Self {
+            basis: Some(config),
+            ..Default::default()
         }
     }
 
@@ -255,21 +265,23 @@ impl ProviderConfig {
     pub fn provider_type(&self) -> ProviderType {
         if self.aws.is_some() {
             ProviderType::Aws
-        } else if self.docker.is_some() {
-            ProviderType::Docker
         } else if self.openstack.is_some() {
             ProviderType::OpenStack
         } else if self.proxmox.is_some() {
             ProviderType::Proxmox
+        } else if self.basis.is_some() {
+            ProviderType::Basis
         } else {
+            // Docker is the default both when explicitly set and when
+            // no variant is provided.
             ProviderType::Docker
         }
     }
 
     /// Get the Cilium LB-IPAM CIDR from the provider config, if configured.
     ///
-    /// Only on-prem providers (Docker, Proxmox) support this. Cloud providers
-    /// use native load balancers and don't need Cilium LB-IPAM.
+    /// Only bare-metal providers support this. Cloud providers use native
+    /// load balancers and don't need Cilium LB-IPAM.
     pub fn lb_cidr(&self) -> Option<&str> {
         if let Some(ref docker) = self.docker {
             return docker.lb_cidr.as_deref();
@@ -282,19 +294,18 @@ impl ProviderConfig {
 
     /// Validate that exactly one provider is configured
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
-        let count = [
+        let set_variants = [
             self.aws.is_some(),
             self.docker.is_some(),
             self.openstack.is_some(),
             self.proxmox.is_some(),
-        ]
-        .iter()
-        .filter(|&&x| x)
-        .count();
+            self.basis.is_some(),
+        ];
+        let count = set_variants.iter().filter(|&&x| x).count();
 
         if count == 0 {
             return Err(crate::ValidationError::new(
-                "provider config must specify exactly one provider (aws, docker, openstack, or proxmox)",
+                "provider config must specify exactly one provider (aws, docker, openstack, proxmox, or basis)",
             ));
         }
         if count > 1 {
@@ -2067,12 +2078,7 @@ mod tests {
 
         #[test]
         fn test_validate_no_provider() {
-            let config = ProviderConfig {
-                aws: None,
-                docker: None,
-                openstack: None,
-                proxmox: None,
-            };
+            let config = ProviderConfig::default();
             let result = config.validate();
             assert!(result.is_err());
             assert!(result
@@ -2090,8 +2096,7 @@ mod tests {
                     ..Default::default()
                 }),
                 docker: Some(DockerConfig::default()),
-                openstack: None,
-                proxmox: None,
+                ..Default::default()
             };
             let result = config.validate();
             assert!(result.is_err());
@@ -2100,14 +2105,23 @@ mod tests {
 
         #[test]
         fn test_provider_type_defaults_to_docker() {
-            let config = ProviderConfig {
-                aws: None,
-                docker: None,
-                openstack: None,
-                proxmox: None,
-            };
             // Even when no provider is set, provider_type returns Docker as default
-            assert_eq!(config.provider_type(), ProviderType::Docker);
+            assert_eq!(
+                ProviderConfig::default().provider_type(),
+                ProviderType::Docker
+            );
+        }
+
+        #[test]
+        fn test_basis_config() {
+            let basis = BasisConfig {
+                ipv4_pool: "default".to_string(),
+            };
+            let config = ProviderConfig::basis(basis);
+            assert!(config.basis.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Basis);
+            assert!(config.validate().is_ok());
+            assert_eq!(config.lb_cidr(), None);
         }
     }
 
