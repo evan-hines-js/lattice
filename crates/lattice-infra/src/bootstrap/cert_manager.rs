@@ -6,7 +6,9 @@
 
 use std::sync::LazyLock;
 
-use super::{namespace_yaml, split_yaml_documents};
+use lattice_common::kube_utils::split_yaml_documents;
+
+use super::namespace_yaml;
 
 static CERT_MANAGER_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml("cert-manager")];

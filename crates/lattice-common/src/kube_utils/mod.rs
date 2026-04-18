@@ -41,14 +41,15 @@ pub use client::{create_client, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
 // waiting.rs
 pub use waiting::{
     crd_exists, get_secret_data, secret_exists, wait_for_all_deployments, wait_for_crd,
-    wait_for_deployment, wait_for_nodes_ready, wait_for_secret,
+    wait_for_daemonset, wait_for_deployment, wait_for_nodes_ready, wait_for_secret,
 };
 // namespace.rs
 pub use namespace::ensure_namespace;
 
 // manifest.rs
 pub use manifest::{
-    apply_manifest_with_retry, apply_manifests, is_deployment_json, kind_priority, ApplyOptions,
+    apply_manifest_with_retry, apply_manifests, extract_image_registries, extract_registry_host,
+    is_deployment_json, kind_priority, split_yaml_documents, ApplyOptions,
 };
 
 // batch.rs

@@ -13,7 +13,7 @@ use lattice_common::policy::cilium::{
     EnableDefaultDeny, EndpointSelector, MatchExpression,
 };
 
-use super::split_yaml_documents;
+use lattice_common::kube_utils::split_yaml_documents;
 use lattice_core::system_namespaces;
 
 /// Pre-rendered Cilium manifests, split into individual YAML documents.

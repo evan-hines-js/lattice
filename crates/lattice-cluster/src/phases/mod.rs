@@ -271,6 +271,13 @@ pub async fn reconcile_infrastructure(
         .await
         .map_err(|e| Error::internal(format!("failed to apply infrastructure: {}", e)))?;
 
+    // Ensure per-dependency Install CRs exist for components that have
+    // migrated out of the bootstrap path. Each component's own controller
+    // then reconciles the CR (install + future upgrade).
+    lattice_tetragon::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure TetragonInstall: {}", e)))?;
+
     Ok(())
 }
 

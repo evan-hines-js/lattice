@@ -15,7 +15,7 @@ use lattice_common::policy::istio::{
 use lattice_common::OPERATOR_NAME;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
-use super::split_yaml_documents;
+use lattice_common::kube_utils::split_yaml_documents;
 
 /// Pre-rendered static Istio manifests (base, cni) — no dynamic values.
 static ISTIO_STATIC_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {

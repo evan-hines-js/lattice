@@ -1,12 +1,13 @@
-//! Tetragon Helm chart embedding and cluster-wide baseline TracingPolicy
+//! Tetragon helm chart + baseline TracingPolicy manifest generation.
 //!
-//! Generates a TracingPolicy that blocks dangerous kernel operations for
-//! Lattice-managed workload pods using kprobes on LSM hooks. System pods are
-//! excluded via podSelector (only pods with managed-by=lattice are targeted).
+//! The helm chart is pre-rendered at build time (see `build.rs`) and embedded
+//! via `include_str!`. The baseline TracingPolicy targets Lattice-managed pods
+//! only (via `podSelector`), so system pods without `managed-by=lattice` are
+//! automatically excluded — no need to list system namespaces.
 
 use std::sync::LazyLock;
 
-use super::split_yaml_documents;
+use lattice_common::kube_utils::split_yaml_documents;
 use lattice_common::policy::tetragon::{
     KprobeSpec, PodSelector, Selector, TracingPolicy, TracingPolicySpec,
 };
@@ -15,16 +16,17 @@ static TETRAGON_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/tetragon.yaml")))
 });
 
+/// Tetragon chart version pinned at build time from `versions.toml`.
 pub fn tetragon_version() -> &'static str {
     env!("TETRAGON_VERSION")
 }
 
-/// Pre-rendered Tetragon Helm chart manifests
+/// Pre-rendered Tetragon helm chart manifests.
 pub fn generate_tetragon() -> &'static [String] {
     &TETRAGON_MANIFESTS
 }
 
-/// LSM hooks unconditionally blocked for workload pods
+/// LSM hooks unconditionally blocked for workload pods.
 const BLOCKED_HOOKS: &[&str] = &[
     "security_ptrace_access_check",
     "security_kernel_module_request",
@@ -32,7 +34,7 @@ const BLOCKED_HOOKS: &[&str] = &[
     "security_sb_umount",
 ];
 
-/// Cluster-wide baseline TracingPolicy blocking dangerous operations via LSM hooks
+/// Cluster-wide baseline TracingPolicy blocking dangerous operations via LSM hooks.
 ///
 /// Uses podSelector to target only Lattice-managed workload pods, automatically
 /// excluding system pods (kube-system, cilium-system, istio-system, etc.) which

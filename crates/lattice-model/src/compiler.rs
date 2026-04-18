@@ -277,7 +277,7 @@ async fn compile_workload(
     let template = lattice_workload::pod_template_to_json(compiled.pod_template)
         .map_err(ModelError::Serialization)?;
 
-    let policies = lattice_tetragon::compile_tracing_policies(
+    let policies = lattice_tetragon_policy::compile_tracing_policies(
         workload_name,
         ctx.namespace,
         workload,

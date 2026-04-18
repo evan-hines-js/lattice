@@ -22,6 +22,7 @@ lattice-secret-provider = { workspace = true }
 lattice-move = { workspace = true }
 lattice-proto = { workspace = true }
 lattice-cache = { workspace = true }
+lattice-tetragon = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

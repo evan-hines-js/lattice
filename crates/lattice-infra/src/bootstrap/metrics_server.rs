@@ -6,7 +6,7 @@
 
 use std::sync::LazyLock;
 
-use super::split_yaml_documents;
+use lattice_common::kube_utils::split_yaml_documents;
 
 static METRICS_SERVER_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     split_yaml_documents(include_str!(concat!(

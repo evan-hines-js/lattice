@@ -1,53 +1,85 @@
-//! Infrastructure components for Lattice
+//! Infrastructure components for Lattice.
 //!
-//! This crate provides shared infrastructure used by both cluster and service operators:
+//! Provides shared infrastructure used by cluster and service operators:
+//! - **PKI**: CA, certificate generation, CSR signing.
+//! - **mTLS**: TLS configuration for gRPC (re-exported at crate root).
+//! - **Bootstrap**: Helm-rendered manifest generation for components not yet
+//!   migrated to their own install crates (Cilium, Istio, ESO, Velero, etc.).
 //!
-//! - **PKI**: Certificate authority, certificate generation, CSR signing
-//! - **Bootstrap**: Manifest generation for Cilium, Istio, Gateway API, ESO, Velero, etc.
-//!
-//! Note: cert-manager and CAPI providers are installed via the native CAPI installer,
-//! which manages their lifecycle including upgrades.
-//!
-//! # Architecture
-//!
-//! The infrastructure components are designed to be stateless where possible,
-//! with persistence handled at the operator level (e.g., CA secrets stored in K8s).
-//!
-//! # Public API
-//!
-//! ## Bootstrap
-//! Access via `lattice_infra::bootstrap::*`:
-//! - [`bootstrap::InfrastructureConfig`]: Configuration for infrastructure manifest generation
-//! - [`bootstrap::IstioConfig`], [`bootstrap::IstioReconciler`]: Istio manifest generation
-//! - [`bootstrap::cilium`]: Cilium manifests and network policy generators
-//! - [`bootstrap::eso`]: External Secrets Operator manifests
-//! - [`bootstrap::generate_phases`]: Phased generator (used by operator startup)
-//! - [`bootstrap::generate_all_manifests`]: Flat generator (used by cluster controller reconciliation)
-//! - [`bootstrap::apply_phase`]: Apply a single phase with health gates
-//! - [`bootstrap::apply_all_phases`]: Apply all phases sequentially
-//!
-//! ## PKI
-//! - [`pki::CertificateAuthority`]: CA operations for signing CSRs
-//! - [`pki::PkiError`]: Error type for PKI operations
-//!
-//! ## mTLS
-//! - [`mtls::ServerMtlsConfig`], [`mtls::ClientMtlsConfig`]: TLS configuration for gRPC
-//! - [`mtls::MtlsError`]: Error type for mTLS operations
+//! This crate MUST NOT depend on per-dependency install crates (`lattice-*`
+//! for Tetragon, future Cilium/Istio/etc). It owns only the components whose
+//! install it still renders directly. The overall aggregation of upstream
+//! registries happens at the consumer (`lattice-capi`), which is the only
+//! crate allowed to reach across every install crate.
+
+use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
+use lattice_common::kube_utils::extract_image_registries;
 
 pub mod bootstrap;
 pub mod mtls;
 pub mod pki;
 
-/// Upstream container registries extracted at build time from all rendered Helm charts.
-/// Used by lattice-capi to generate containerd mirror configuration.
-pub fn upstream_registries() -> Vec<&'static str> {
-    env!("UPSTREAM_REGISTRIES")
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 // Re-export mTLS types (commonly used across many crates)
 pub use mtls::{
     extract_cluster_id_from_cert, verify_cert_chain, ClientMtlsConfig, MtlsError, ServerMtlsConfig,
 };
+
+/// Container registries referenced by components this crate still renders.
+///
+/// Covers **only** components in `bootstrap/`. Components migrated out to
+/// their own install crates (Tetragon today; future Cilium, Istio, etc.)
+/// contribute their own registries separately. The consumer (`lattice-capi`)
+/// unions across all producers.
+///
+/// LazyLock caches the scan so the ~20k-line walk across embedded manifests
+/// happens once per process.
+pub fn bootstrap_registries() -> &'static [String] {
+    static REGS: LazyLock<Vec<String>> = LazyLock::new(|| {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+
+        set.extend(extract_image_registries(
+            bootstrap::cert_manager::generate_cert_manager(),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::cilium::generate_cilium_manifests(),
+        ));
+        set.extend(extract_image_registries(bootstrap::eso::generate_eso()));
+        set.extend(extract_image_registries(
+            bootstrap::gpu::generate_gpu_stack(),
+        ));
+        set.extend(extract_image_registries(bootstrap::keda::generate_keda()));
+        set.extend(extract_image_registries(
+            bootstrap::kthena::generate_kthena(),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::metrics_server::generate_metrics_server(),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::prometheus::generate_prometheus(true),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::prometheus::generate_prometheus(false),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::velero::generate_velero(),
+        ));
+        set.extend(extract_image_registries(
+            bootstrap::volcano::generate_volcano(),
+        ));
+
+        // Istio manifests depend on cluster-specific config, but `image:` lines
+        // do not — a throwaway reconciler with placeholder values renders the
+        // same image refs as the real one.
+        let istio = bootstrap::istio::IstioReconciler::new(
+            "registry-scan",
+            "lattice.scan".to_string(),
+            None,
+        );
+        set.extend(extract_image_registries(istio.manifests()));
+
+        set.into_iter().collect()
+    });
+    &REGS
+}

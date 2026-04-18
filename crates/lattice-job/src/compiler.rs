@@ -171,7 +171,7 @@ pub async fn compile_job(
             mesh_members.push(mm);
         }
 
-        let policies = lattice_tetragon::compile_tracing_policies(
+        let policies = lattice_tetragon_policy::compile_tracing_policies(
             &task_full_name,
             namespace,
             &task_spec.workload,

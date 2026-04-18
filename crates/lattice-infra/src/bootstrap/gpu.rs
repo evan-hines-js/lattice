@@ -9,7 +9,9 @@ use std::sync::LazyLock;
 use lattice_common::LABEL_NAME;
 use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
+use lattice_common::kube_utils::split_yaml_documents;
+
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
 
 /// Pre-rendered GPU stack manifests (GPU Operator) with namespaces.
 static GPU_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
@@ -78,8 +80,8 @@ pub fn generate_gpu_mesh_members() -> Vec<LatticeMeshMember> {
 /// - ServiceAccount + ClusterRole + ClusterRoleBinding
 /// - NODE_NAME env from Downward API
 pub fn generate_gpu_monitor_daemonset(image: &str) -> Vec<String> {
-    let mut rbac = super::split_yaml_documents(include_str!("../../manifests/gpu-monitor-sa.yaml"));
-    rbac.extend(super::split_yaml_documents(include_str!(
+    let mut rbac = split_yaml_documents(include_str!("../../manifests/gpu-monitor-sa.yaml"));
+    rbac.extend(split_yaml_documents(include_str!(
         "../../manifests/gpu-monitor-rbac.yaml"
     )));
 

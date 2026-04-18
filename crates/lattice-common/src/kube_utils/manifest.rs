@@ -314,6 +314,99 @@ pub fn is_deployment_json(manifest: &str) -> bool {
     }
 }
 
+/// Split a multi-document YAML string into individual documents.
+///
+/// For parsing external YAML sources (helm output, CRD files). Filters out
+/// empty documents, comment-only blocks, and Helm test/delete hooks — but keeps
+/// `pre-install`/`pre-upgrade` hooks because they contain setup resources (e.g.
+/// cert-generation Jobs) that work fine applied as regular resources.
+///
+/// Normalizes output so every document has a leading `---` for kubectl apply
+/// compatibility.
+///
+/// Not for JSON-typed resources from structured Rust generators — those are
+/// added to manifest lists directly.
+pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
+    yaml.split("\n---")
+        .map(|doc| doc.trim())
+        .filter(|doc| {
+            let keep = !doc.is_empty() && doc.contains("kind:") && !is_filtered_helm_hook(doc);
+            if !keep && !doc.is_empty() {
+                tracing::debug!(
+                    doc_preview = &doc[..doc.len().min(100)],
+                    "Filtered out YAML document"
+                );
+            }
+            keep
+        })
+        .map(|doc| {
+            if doc.starts_with("---") {
+                doc.to_string()
+            } else {
+                format!("---\n{}", doc)
+            }
+        })
+        .collect()
+}
+
+/// Extract the registry host from a container image reference.
+///
+/// Images without a dot, colon, or `localhost` in the first path component are
+/// implicitly from docker.io (e.g. `nginx` → `docker.io`).
+pub fn extract_registry_host(image_ref: &str) -> String {
+    let parts: Vec<&str> = image_ref.splitn(2, '/').collect();
+    if parts.len() == 1 {
+        return "docker.io".to_string();
+    }
+    let first = parts[0];
+    if first.contains('.') || first.contains(':') || first == "localhost" {
+        first.to_string()
+    } else {
+        "docker.io".to_string()
+    }
+}
+
+/// Scan rendered manifests for `image:` lines and return the unique set of
+/// registry hosts they reference.
+///
+/// Used to build containerd mirror configuration — every registry that the
+/// cluster's managed dependencies pull from needs a mirror entry. Each
+/// dependency install crate exposes its rendered manifests, and the caller
+/// aggregates across all of them.
+pub fn extract_image_registries<S: AsRef<str>>(
+    manifests: &[S],
+) -> std::collections::BTreeSet<String> {
+    let mut registries = std::collections::BTreeSet::new();
+    for manifest in manifests {
+        for line in manifest.as_ref().lines() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed.strip_prefix("image:") else {
+                continue;
+            };
+            let image_ref = rest.trim().trim_matches(|c| c == '"' || c == '\'');
+            if !image_ref.is_empty() {
+                registries.insert(extract_registry_host(image_ref));
+            }
+        }
+    }
+    registries
+}
+
+/// True if a YAML document is a Helm hook that should be filtered from regular apply.
+///
+/// Keeps `pre-install`/`pre-upgrade` hooks (setup resources like cert-generation
+/// Jobs). Filters test, delete, and other hook types that only make sense during
+/// `helm install`/`helm delete`.
+fn is_filtered_helm_hook(doc: &str) -> bool {
+    if !doc.contains("helm.sh/hook") {
+        return false;
+    }
+    if doc.contains("pre-install") || doc.contains("pre-upgrade") {
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +524,96 @@ metadata:
         let manifest = "{not valid json";
         let result = parse_manifest(manifest);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn split_yaml_documents_handles_multi_doc() {
+        let yaml = "kind: A\n---\nkind: B\n---\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn split_yaml_documents_keeps_pre_install_hook() {
+        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-install\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 2);
+    }
+
+    #[test]
+    fn split_yaml_documents_filters_test_hook() {
+        let yaml =
+            "kind: Pod\nmetadata:\n  annotations:\n    helm.sh/hook: test\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+    }
+
+    #[test]
+    fn split_yaml_documents_filters_pre_delete_hook() {
+        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-delete\n---\nkind: Deployment\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+    }
+
+    #[test]
+    fn split_yaml_documents_filters_empty_and_commentless_docs() {
+        let yaml = "\n---\n# comment only\n---\nkind: ConfigMap\nmetadata:\n  name: x\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+    }
+
+    #[test]
+    fn split_yaml_documents_normalizes_leading_separator() {
+        let yaml = "kind: A\n";
+        let docs = split_yaml_documents(yaml);
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].starts_with("---"));
+    }
+
+    #[test]
+    fn extract_registry_host_implicit_docker_io() {
+        assert_eq!(extract_registry_host("nginx"), "docker.io");
+        assert_eq!(extract_registry_host("nginx:latest"), "docker.io");
+        assert_eq!(extract_registry_host("library/nginx"), "docker.io");
+    }
+
+    #[test]
+    fn extract_registry_host_recognizes_hosts() {
+        assert_eq!(extract_registry_host("quay.io/cilium/tetragon"), "quay.io");
+        assert_eq!(
+            extract_registry_host("ghcr.io/user/img:v1"),
+            "ghcr.io"
+        );
+        assert_eq!(
+            extract_registry_host("registry.k8s.io/coredns:1"),
+            "registry.k8s.io"
+        );
+    }
+
+    #[test]
+    fn extract_registry_host_with_port() {
+        assert_eq!(
+            extract_registry_host("localhost:5000/my/app"),
+            "localhost:5000"
+        );
+        assert_eq!(extract_registry_host("localhost/x"), "localhost");
+    }
+
+    #[test]
+    fn extract_image_registries_dedups_across_manifests() {
+        let m1 = "containers:\n  - image: quay.io/cilium/tetragon:1\n";
+        let m2 = "spec:\n  image: quay.io/cilium/cilium:2\n";
+        let m3 = "image: ghcr.io/user/op:latest";
+        let regs = extract_image_registries(&[m1, m2, m3]);
+        assert_eq!(regs.len(), 2);
+        assert!(regs.contains("quay.io"));
+        assert!(regs.contains("ghcr.io"));
+    }
+
+    #[test]
+    fn extract_image_registries_handles_quoted_refs() {
+        let m = r#"image: "registry.k8s.io/coredns:v1""#;
+        let regs = extract_image_registries(&[m]);
+        assert!(regs.contains("registry.k8s.io"));
     }
 }

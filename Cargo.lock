@@ -3210,6 +3210,7 @@ dependencies = [
  "lattice-crd",
  "lattice-infra",
  "lattice-secret-provider",
+ "lattice-tetragon",
  "mockall",
  "rand 0.10.1",
  "serde",
@@ -3385,6 +3386,7 @@ dependencies = [
  "lattice-move",
  "lattice-proto",
  "lattice-secret-provider",
+ "lattice-tetragon",
  "mockall",
  "parking_lot",
  "pem",
@@ -3628,7 +3630,7 @@ dependencies = [
  "lattice-render",
  "lattice-secret-provider",
  "lattice-template",
- "lattice-tetragon",
+ "lattice-tetragon-policy",
  "lattice-volcano",
  "lattice-workload",
  "mockall",
@@ -3682,7 +3684,7 @@ dependencies = [
  "lattice-graph",
  "lattice-quota",
  "lattice-secret-provider",
- "lattice-tetragon",
+ "lattice-tetragon-policy",
  "lattice-volcano",
  "lattice-workload",
  "mockall",
@@ -3764,6 +3766,7 @@ dependencies = [
  "lattice-quota",
  "lattice-secret-provider",
  "lattice-service",
+ "lattice-tetragon",
  "lattice-webhook",
  "mockall",
  "parking_lot",
@@ -3913,7 +3916,7 @@ dependencies = [
  "lattice-render",
  "lattice-secret-provider",
  "lattice-template",
- "lattice-tetragon",
+ "lattice-tetragon-policy",
  "lattice-volcano",
  "lattice-workload",
  "mockall",
@@ -3942,6 +3945,21 @@ dependencies = [
 
 [[package]]
 name = "lattice-tetragon"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-crd",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-tetragon-policy"
 version = "0.1.0"
 dependencies = [
  "lattice-common",

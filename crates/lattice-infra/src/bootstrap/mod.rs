@@ -21,7 +21,6 @@ pub mod keda;
 pub mod kthena;
 pub mod metrics_server;
 pub mod prometheus;
-pub mod tetragon;
 pub mod velero;
 pub mod volcano;
 
@@ -31,6 +30,7 @@ use std::sync::LazyLock;
 use kube::ResourceExt;
 use tracing::{debug, info};
 
+use lattice_common::kube_utils::split_yaml_documents;
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_WEBHOOK_PORT, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
     OPERATOR_NAME, VMAGENT_SA_NAME,
@@ -453,18 +453,9 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
             },
         ];
 
-        // Tetragon (DaemonSet in kube-system, no namespace health gate)
-        let mut tetragon_manifests = tetragon::generate_tetragon().to_vec();
-        tetragon_manifests.push(
-            serde_json::to_string_pretty(&tetragon::generate_baseline_tracing_policy())
-                .map_err(|e| format!("Failed to serialize baseline TracingPolicy: {e}"))?,
-        );
-        components.push(InfraComponent {
-            name: "tetragon",
-            version: tetragon::tetragon_version(),
-            manifests: tetragon_manifests,
-            health_namespace: None, // DaemonSet, not deployments
-        });
+        // Tetragon has migrated to its own install crate — the TetragonInstall
+        // controller reconciles it via a CR created by the LatticeCluster
+        // orchestrator. See `lattice_tetragon::install`.
 
         // Mesh policies for core components (ESO, Volcano, Kthena)
         // These must be in Phase 2 because these namespaces are subject to
@@ -1105,69 +1096,9 @@ pub(crate) fn namespace_yaml_ambient(name: &str) -> String {
     )
 }
 
-/// Split a multi-document YAML string into individual documents.
-///
-/// Only used for parsing external YAML sources (helm output, CRD files).
-/// Filters out empty documents and comment-only blocks.
-/// Normalizes output to always have `---` prefix for kubectl apply compatibility.
-///
-/// Helm hooks: `pre-install` and `pre-upgrade` hooks are kept because they
-/// contain setup resources (e.g. cert-generation Jobs) that work fine when
-/// applied as regular resources — the retry loop handles ordering. Test and
-/// delete hooks are filtered since they don't make sense outside `helm install`.
-///
-/// Note: JSON policies from our typed generators are added directly to manifest
-/// lists and never go through this function.
-pub fn split_yaml_documents(yaml: &str) -> Vec<String> {
-    yaml.split("\n---")
-        .map(|doc| doc.trim())
-        .filter(|doc| {
-            let keep = !doc.is_empty() && doc.contains("kind:") && !is_filtered_helm_hook(doc);
-            if !keep && !doc.is_empty() {
-                tracing::debug!(
-                    doc_preview = &doc[..doc.len().min(100)],
-                    "Filtered out YAML document"
-                );
-            }
-            keep
-        })
-        .map(|doc| {
-            if doc.starts_with("---") {
-                doc.to_string()
-            } else {
-                format!("---\n{}", doc)
-            }
-        })
-        .collect()
-}
-
-/// Returns true if a YAML document is a Helm hook that should be filtered out.
-///
-/// We keep pre-install/pre-upgrade hooks (setup resources like cert-generation Jobs)
-/// and filter test/delete hooks that only make sense during `helm install/delete`.
-fn is_filtered_helm_hook(doc: &str) -> bool {
-    if !doc.contains("helm.sh/hook") {
-        return false;
-    }
-    // Keep pre-install and pre-upgrade hooks — they set up prerequisites
-    // and work fine as regular resources applied alongside everything else
-    if doc.contains("pre-install") || doc.contains("pre-upgrade") {
-        return false;
-    }
-    // Filter test hooks, delete hooks, and any other hook types
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_split_yaml_documents() {
-        let yaml = "kind: A\n---\nkind: B\n---\n";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 2);
-    }
 
     #[test]
     fn test_namespace_yaml() {
@@ -1181,28 +1112,6 @@ mod tests {
         let crds = generate_gateway_api_crds();
         assert!(!crds.is_empty());
         assert!(crds.iter().any(|c| c.contains("CustomResourceDefinition")));
-    }
-
-    #[test]
-    fn helm_hooks_pre_install_kept() {
-        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-install\n---\nkind: Deployment\n";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 2, "pre-install hooks should be kept");
-    }
-
-    #[test]
-    fn helm_hooks_test_filtered() {
-        let yaml =
-            "kind: Pod\nmetadata:\n  annotations:\n    helm.sh/hook: test\n---\nkind: Deployment\n";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 1, "test hooks should be filtered");
-    }
-
-    #[test]
-    fn helm_hooks_pre_delete_filtered() {
-        let yaml = "kind: Job\nmetadata:\n  annotations:\n    helm.sh/hook: pre-delete\n---\nkind: Deployment\n";
-        let docs = split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 1, "pre-delete hooks should be filtered");
     }
 
     #[test]

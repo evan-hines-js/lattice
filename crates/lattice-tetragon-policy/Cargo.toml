@@ -1,0 +1,13 @@
+[package]
+name = "lattice-tetragon-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Workload → Tetragon TracingPolicy compiler (per-workload runtime enforcement)"
+
+[dependencies]
+lattice-common = { workspace = true }
+lattice-crd = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

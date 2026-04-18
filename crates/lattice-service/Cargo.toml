@@ -20,7 +20,7 @@ lattice-volcano = { workspace = true }
 lattice-workload = { workspace = true }
 lattice-quota = { workspace = true }
 lattice-cache = { workspace = true }
-lattice-tetragon = { workspace = true }
+lattice-tetragon-policy = { workspace = true }
 lattice-cost = { workspace = true }
 lattice-render = { workspace = true }
 lattice-template = { workspace = true }

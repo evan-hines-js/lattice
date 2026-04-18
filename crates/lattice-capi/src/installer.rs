@@ -772,14 +772,6 @@ impl NativeInstaller {
         Ok(manifests)
     }
 
-    /// Split a multi-document YAML string into individual documents.
-    fn split_yaml_documents(yaml: &str) -> Vec<String> {
-        yaml.split("\n---")
-            .map(|doc| doc.trim().to_string())
-            .filter(|doc| !doc.is_empty())
-            .collect()
-    }
-
     /// Apply a single provider's manifests with env var substitution.
     async fn apply_provider(
         client: &KubeClient,
@@ -797,7 +789,7 @@ impl NativeInstaller {
         let mut all_documents = Vec::new();
         for raw in &raw_manifests {
             let substituted = substitute_vars(raw, env_vars);
-            all_documents.extend(Self::split_yaml_documents(&substituted));
+            all_documents.extend(kube_utils::split_yaml_documents(&substituted));
         }
 
         info!(
@@ -1164,23 +1156,6 @@ mod tests {
         let vars = vec![("Y".to_string(), "override".to_string())];
         let result = substitute_vars(yaml, &vars);
         assert_eq!(result, "a=1 b=override c=3");
-    }
-
-    #[test]
-    fn split_yaml_documents_handles_multi_doc() {
-        let yaml = "kind: A\n---\nkind: B\n---\nkind: C";
-        let docs = NativeInstaller::split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 3);
-        assert_eq!(docs[0], "kind: A");
-        assert_eq!(docs[1], "kind: B");
-        assert_eq!(docs[2], "kind: C");
-    }
-
-    #[test]
-    fn split_yaml_documents_filters_empty() {
-        let yaml = "kind: A\n---\n\n---\nkind: B";
-        let docs = NativeInstaller::split_yaml_documents(yaml);
-        assert_eq!(docs.len(), 2);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use lattice_crd::crd::{
     BackupStore, CedarPolicy, CertIssuer, DNSProvider, ImageProvider, InfraProvider,
     LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
     LatticeModel, LatticePackage, LatticeQuota, LatticeRestore, LatticeService, OIDCProvider,
-    SecretProvider,
+    SecretProvider, TetragonInstall,
 };
 
 /// CRD definition with name and resource
@@ -68,6 +68,10 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "latticeclusterroutes.lattice.dev",
             crd: LatticeClusterRoutes::crd(),
+        },
+        CrdDef {
+            name: "tetragoninstalls.lattice.dev",
+            crd: TetragonInstall::crd(),
         },
     ]
 }

@@ -12,7 +12,9 @@ use lattice_crd::crd::{
     ServiceRef,
 };
 
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
+use lattice_common::kube_utils::split_yaml_documents;
+
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
 
 static ESO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("external-secrets")];

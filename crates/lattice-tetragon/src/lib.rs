@@ -1,11 +1,11 @@
-//! Tetragon runtime enforcement policy compiler
+//! Tetragon dependency install.
 //!
-//! Generates `TracingPolicyNamespaced` resources from workload specs
-//! for kernel-level enforcement via eBPF kprobes on LSM hooks.
-//! Third layer of Lattice defense-in-depth: L4 Cilium → L7 Istio → kernel Tetragon.
+//! Owns the Tetragon helm chart manifests and the cluster-wide baseline
+//! TracingPolicy that blocks dangerous LSM-hook operations for all
+//! Lattice-managed pods. Future work (Phase 2): the TetragonInstall controller
+//! that reconciles the TetragonInstall CRD through install → ready → upgrade.
 //!
-//! Designed to be called from any workload controller (LatticeService, LatticeJob, LatticeModel).
+//! The workload-level TracingPolicy compiler is a separate concern and lives in
+//! `lattice-tetragon-policy`.
 
-mod compiler;
-
-pub use compiler::compile_tracing_policies;
+pub mod install;

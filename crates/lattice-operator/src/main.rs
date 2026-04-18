@@ -528,6 +528,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_backup::service_backup_controller::reconcile,
         "ServiceBackup",
     );
+    ctx.spawn_provider(
+        "tetragon-install",
+        lattice_tetragon::install::reconcile,
+        "TetragonInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

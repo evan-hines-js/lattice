@@ -11,6 +11,7 @@ mod dns_provider;
 mod external_endpoint;
 mod image_provider;
 mod infra_provider;
+pub mod install;
 mod issuer;
 mod job;
 mod mesh_member;
@@ -60,6 +61,8 @@ pub use infra_provider::{
     AwsProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase, InfraProviderSpec,
     InfraProviderStatus, InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
+pub use install::tetragon::{TetragonInstall, TetragonInstallSpec, TetragonInstallStatus};
+pub use install::{HealthGate, InstallPhase, UpgradeAttempt, UpgradeOutcome, UpgradePolicy};
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
     IssuerType, VaultIssuerSpec,

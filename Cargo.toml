@@ -21,6 +21,7 @@ members = [
     "crates/lattice-workload",
     "crates/lattice-mesh-member",
     "crates/lattice-tetragon",
+    "crates/lattice-tetragon-policy",
     "crates/lattice-volcano",
     "crates/lattice-job",
     "crates/lattice-model",
@@ -66,6 +67,7 @@ lattice-backup = { path = "crates/lattice-backup" }
 lattice-workload = { path = "crates/lattice-workload" }
 lattice-mesh-member = { path = "crates/lattice-mesh-member" }
 lattice-tetragon = { path = "crates/lattice-tetragon" }
+lattice-tetragon-policy = { path = "crates/lattice-tetragon-policy" }
 lattice-volcano = { path = "crates/lattice-volcano" }
 lattice-job = { path = "crates/lattice-job" }
 lattice-model = { path = "crates/lattice-model" }

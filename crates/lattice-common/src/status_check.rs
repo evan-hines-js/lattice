@@ -7,10 +7,10 @@
 use lattice_crd::crd::{
     BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus, ClusterBackupPhase,
     DNSProviderPhase, DNSProviderStatus, ImageProviderPhase, ImageProviderStatus,
-    InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeClusterBackupStatus,
+    InfraProviderPhase, InfraProviderStatus, InstallPhase, JobPhase, LatticeClusterBackupStatus,
     LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus, LatticeRestoreStatus,
     LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase, SecretProviderPhase,
-    SecretProviderStatus, ServicePhase,
+    SecretProviderStatus, ServicePhase, TetragonInstallStatus,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -80,6 +80,7 @@ impl_status_fields!(LatticeRestoreStatus, RestorePhase);
 impl_status_fields!(DNSProviderStatus, DNSProviderPhase);
 impl_status_fields!(ImageProviderStatus, ImageProviderPhase);
 impl_status_fields!(CertIssuerStatus, CertIssuerPhase);
+impl_status_fields!(TetragonInstallStatus, InstallPhase);
 
 #[cfg(test)]
 mod tests {

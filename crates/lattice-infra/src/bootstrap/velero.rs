@@ -8,7 +8,9 @@ use std::sync::LazyLock;
 use lattice_common::LABEL_NAME;
 use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
+use lattice_common::kube_utils::split_yaml_documents;
+
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
 
 static VELERO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("velero")];

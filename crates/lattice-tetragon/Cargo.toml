@@ -3,12 +3,29 @@ name = "lattice-tetragon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tetragon runtime enforcement policy compiler for Lattice"
+description = "Tetragon dependency install — helm manifests, baseline TracingPolicy, controller"
+build = "build.rs"
 
 [dependencies]
 lattice-common = { workspace = true }
 lattice-crd = { workspace = true }
+
+# Kubernetes
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
 serde_json = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[build-dependencies]
+toml.workspace = true
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -4,7 +4,7 @@
 //! Sets compile-time environment variables for chart versions.
 
 use serde::Deserialize;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -205,38 +205,6 @@ fn ensure_charts_downloaded(charts_dir: &Path, versions: &Versions) {
     }
 }
 
-/// Extract the registry host from a container image reference.
-///
-/// Images without a dot, colon, or "localhost" in the first path component are
-/// implicitly from docker.io (e.g., "nginx" → "docker.io").
-fn extract_registry_host(image_ref: &str) -> String {
-    let parts: Vec<&str> = image_ref.splitn(2, '/').collect();
-    if parts.len() == 1 {
-        return "docker.io".to_string();
-    }
-    let first = parts[0];
-    if first.contains('.') || first.contains(':') || first == "localhost" {
-        first.to_string()
-    } else {
-        "docker.io".to_string()
-    }
-}
-
-/// Scan rendered Helm YAML for `image:` lines and collect unique registry hosts.
-fn extract_registries_from_yaml(yaml: &str) -> BTreeSet<String> {
-    let mut registries = BTreeSet::new();
-    for line in yaml.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("image:") {
-            let image_ref = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-            if !image_ref.is_empty() {
-                registries.insert(extract_registry_host(image_ref));
-            }
-        }
-    }
-    registries
-}
-
 fn main() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set");
@@ -282,10 +250,6 @@ fn main() {
     println!(
         "cargo:rustc-env=GPU_OPERATOR_VERSION={}",
         versions.charts["gpu-operator"].version
-    );
-    println!(
-        "cargo:rustc-env=TETRAGON_VERSION={}",
-        versions.charts["tetragon"].version
     );
     println!(
         "cargo:rustc-env=KEDA_VERSION={}",
@@ -614,33 +578,7 @@ fn main() {
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
-    // 12. Tetragon (runtime enforcement via eBPF kprobes)
-    //
-    // crds.installMethod=helm renders TracingPolicy/TracingPolicyNamespaced CRDs
-    // inline. Tetragon's default ("operator") defers CRD creation to the
-    // tetragon-operator pod, which races with anything applying TracingPolicy
-    // resources right after install.
-    let yaml = run_helm_template(
-        "tetragon",
-        &chart(&format!(
-            "tetragon-{}.tgz",
-            versions.charts["tetragon"].version
-        )),
-        "kube-system",
-        &[
-            "--set",
-            "tetragon.enablePolicyFilter=true",
-            "--set",
-            "tetragon.enablePolicyFilterDebug=false",
-            "--set",
-            "rthooks.enabled=false",
-            "--set",
-            "crds.installMethod=helm",
-        ],
-    );
-    std::fs::write(out_dir.join("tetragon.yaml"), yaml).expect("write tetragon.yaml");
-
-    // 13. cert-manager (with control-plane tolerations so it schedules on tainted CP nodes)
+    // cert-manager (with control-plane tolerations so it schedules on tainted CP nodes)
     let yaml = run_helm_template(
         "cert-manager",
         &chart(&format!(
@@ -826,30 +764,10 @@ fn main() {
     std::fs::write(out_dir.join("gateway-api-crds.yaml"), gw_content)
         .expect("write gateway-api-crds.yaml");
 
-    // --- Extract upstream registries from all rendered YAML ---
-    let yaml_files = [
-        "cilium.yaml",
-        "istio-base.yaml",
-        "istio-cni.yaml",
-        "istiod.yaml",
-        "ztunnel.yaml",
-        "external-secrets.yaml",
-        "velero.yaml",
-        "gpu-operator.yaml",
-        "hami.yaml",
-        "victoria-metrics-ha.yaml",
-        "victoria-metrics-single.yaml",
-        "keda.yaml",
-        "tetragon.yaml",
-        "cert-manager.yaml",
-        "metrics-server.yaml",
-    ];
-    let mut all_registries = BTreeSet::new();
-    for file in &yaml_files {
-        if let Ok(content) = std::fs::read_to_string(out_dir.join(file)) {
-            all_registries.extend(extract_registries_from_yaml(&content));
-        }
-    }
-    let registries_csv = all_registries.into_iter().collect::<Vec<_>>().join(",");
-    println!("cargo:rustc-env=UPSTREAM_REGISTRIES={}", registries_csv);
+    // Upstream registry aggregation is done at runtime in
+    // `lattice_infra::upstream_registries` using the single canonical extractor
+    // `lattice_common::kube_utils::extract_image_registries`. This keeps
+    // extraction logic in one place (unit-tested) regardless of which crate
+    // renders a given dependency's manifests. LazyLock in the accessor means
+    // the scan happens once per process at first call.
 }

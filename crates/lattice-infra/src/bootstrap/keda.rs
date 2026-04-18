@@ -11,7 +11,9 @@ use lattice_crd::crd::{
     ServiceRef,
 };
 
-use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient, split_yaml_documents};
+use lattice_common::kube_utils::split_yaml_documents;
+
+use super::{kube_apiserver_egress, lmm, namespace_yaml_ambient};
 use lattice_common::MONITORING_NAMESPACE;
 
 /// Namespace for KEDA components.

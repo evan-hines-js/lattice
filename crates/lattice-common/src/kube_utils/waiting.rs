@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
 use k8s_openapi::api::core::v1::{Node, Secret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, ListParams};
@@ -132,6 +132,52 @@ pub async fn wait_for_deployment(
                     Err(e) => Err(Error::internal_with_context(
                         "wait_for_deployment",
                         format!("Failed to get deployment {}: {}", name, e),
+                    )),
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// Wait for a DaemonSet to have all desired pods ready.
+///
+/// Ready when `status.numberReady == status.desiredNumberScheduled` and
+/// `desiredNumberScheduled > 0`. Missing DS (404) is treated as "not ready yet"
+/// so callers can reconcile ahead of the DS being applied.
+pub async fn wait_for_daemonset(
+    client: &Client,
+    name: &str,
+    namespace: &str,
+    timeout: Duration,
+) -> Result<(), Error> {
+    let daemonsets: Api<DaemonSet> = Api::namespaced(client.clone(), namespace);
+    let name_owned = name.to_string();
+
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!("Timeout waiting for DaemonSet {} to be ready", name),
+        || {
+            let daemonsets = daemonsets.clone();
+            let name = name_owned.clone();
+            async move {
+                match daemonsets.get(&name).await {
+                    Ok(ds) => {
+                        let ready = ds
+                            .status
+                            .as_ref()
+                            .map(|s| s.desired_number_scheduled > 0 && s.number_ready == s.desired_number_scheduled)
+                            .unwrap_or(false);
+                        Ok(ready)
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 404 => {
+                        trace!("DaemonSet {} not found yet", name);
+                        Ok(false)
+                    }
+                    Err(e) => Err(Error::internal_with_context(
+                        "wait_for_daemonset",
+                        format!("Failed to get DaemonSet {}: {}", name, e),
                     )),
                 }
             }

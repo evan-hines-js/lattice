@@ -3,9 +3,35 @@
 //! Generates containerd hosts.toml files (kubeadm) or RKE2 registries.yaml
 //! so that all image pulls are redirected through private mirrors.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::LazyLock;
 
+use lattice_common::kube_utils::extract_image_registries;
 use lattice_crd::crd::RegistryMirror;
+
+/// All container registries referenced by every Lattice-managed dependency.
+///
+/// Unions `lattice_infra::bootstrap_registries()` (components still rendered
+/// in `lattice-infra`) with each migrated install crate's registries. This is
+/// the one place in the codebase that knows the full set; `lattice-infra` only
+/// knows its own slice, and each install crate only knows its own slice.
+///
+/// Add one `extend(...)` per migrated component as they come online.
+fn upstream_registries() -> &'static [String] {
+    static REGS: LazyLock<Vec<String>> = LazyLock::new(|| {
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        set.extend(
+            lattice_infra::bootstrap_registries()
+                .iter()
+                .cloned(),
+        );
+        set.extend(extract_image_registries(
+            lattice_tetragon::install::manifests::generate_tetragon(),
+        ));
+        set.into_iter().collect()
+    });
+    &REGS
+}
 
 /// A resolved mirror entry with credentials already read from secrets.
 #[derive(Clone, Debug)]
@@ -91,7 +117,7 @@ pub fn resolve_mirrors(
             .and_then(|id| resolved_credentials.get(id))
             .cloned();
         let (infra_host, infra_plain_http) = parse_mirror_scheme(&infra.mirror);
-        for reg in lattice_infra::upstream_registries() {
+        for reg in upstream_registries() {
             if !covered_upstreams.contains(reg) {
                 covered_upstreams.insert(reg.to_string());
                 result.push(ResolvedMirror {
@@ -115,7 +141,7 @@ pub fn resolve_mirrors(
         let (wildcard_host, wildcard_plain_http) = parse_mirror_scheme(&wildcard.mirror);
 
         // Fill remaining infra registries with explicit entries
-        for reg in lattice_infra::upstream_registries() {
+        for reg in upstream_registries() {
             if !covered_upstreams.contains(reg) {
                 covered_upstreams.insert(reg.to_string());
                 result.push(ResolvedMirror {
@@ -406,7 +432,7 @@ mod tests {
         let resolved = resolve_mirrors(&spec_mirrors, &std::collections::HashMap::new());
 
         // All build-time infra registries should be covered
-        for reg in lattice_infra::upstream_registries() {
+        for reg in upstream_registries() {
             assert!(
                 resolved.iter().any(|m| m.upstream == reg),
                 "infra registry {} should be covered",
@@ -438,7 +464,7 @@ mod tests {
             resolved.iter().any(|m| m.upstream == "_default"),
             "_default catch-all entry must be present for air-gapped"
         );
-        for reg in lattice_infra::upstream_registries() {
+        for reg in upstream_registries() {
             assert!(resolved.iter().any(|m| m.upstream == reg));
         }
     }
