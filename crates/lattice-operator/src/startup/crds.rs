@@ -135,6 +135,20 @@ fn service_only_crds() -> Vec<CrdDef> {
     ]
 }
 
+/// Every Lattice CRD manifest as JSON, regardless of operator mode.
+///
+/// Used by out-of-process tooling (`lattice uninstall`) that needs Lattice CRDs
+/// applied to a bare kind cluster without running the full operator. Keeps the
+/// CRD list single-sourced with `ensure_cluster_crds`/`ensure_service_crds`.
+pub fn all_crd_manifests() -> Vec<String> {
+    let mut all = common_crds();
+    all.extend(cluster_only_crds());
+    all.extend(service_only_crds());
+    all.into_iter()
+        .map(|def| serde_json::to_string(&def.crd).expect("serialize CRD"))
+        .collect()
+}
+
 /// Install a set of CRDs using server-side apply
 async fn install_crds(client: &Client, crds_to_install: Vec<CrdDef>) -> anyhow::Result<()> {
     let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
