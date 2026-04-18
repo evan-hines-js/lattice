@@ -19,20 +19,19 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{info, warn};
 
-use lattice_common::kube_utils::{self, wait_for_deployment};
+use lattice_common::install::patch_install_status;
+use lattice_common::kube_utils::wait_for_deployment;
 use lattice_common::{
     apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
     REQUEUE_CRD_NOT_FOUND_SECS, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
-use lattice_crd::crd::{InstallPhase, IstioInstall, IstioInstallStatus};
+use lattice_crd::crd::{InstallPhase, InstallStatus, IstioInstall};
 
 use super::{manifests, trust_domain};
 
 const FIELD_MANAGER: &str = "lattice-istio-install-controller";
-
 const ISTIO_NAMESPACE: &str = "istio-system";
 const ISTIOD_DEPLOYMENT: &str = "istiod";
-
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn reconcile(
@@ -73,12 +72,11 @@ pub async fn reconcile(
 
     info!(
         install = %name,
-        version = %install.spec.version,
+        version = %install.spec.base.version,
         cluster = %install.spec.cluster_name,
         trust_domain = %td,
         "Reconciling IstioInstall"
     );
-
     write_status(
         &ctx.client,
         &install,
@@ -139,14 +137,14 @@ pub async fn reconcile(
     match wait_for_deployment(&ctx.client, ISTIOD_DEPLOYMENT, ISTIO_NAMESPACE, READY_TIMEOUT).await
     {
         Ok(()) => {
-            info!(install = %name, version = %install.spec.version, "IstioInstall Ready");
+            info!(install = %name, version = %install.spec.base.version, "IstioInstall Ready");
             write_status(
                 &ctx.client,
                 &install,
                 InstallPhase::Ready,
                 None,
                 generation,
-                Some(&install.spec.version),
+                Some(&install.spec.base.version),
                 Some(&td),
             )
             .await?;
@@ -179,30 +177,21 @@ async fn write_status(
     observed_version: Option<&str>,
     trust_domain: Option<&str>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        install.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        Some(observed_generation),
-    ) {
-        return Ok(());
-    }
-
-    let status = IstioInstallStatus {
+    let status = InstallStatus {
         phase,
         observed_generation: Some(observed_generation),
         observed_version: observed_version.map(str::to_string),
-        target_version: Some(install.spec.version.clone()),
-        trust_domain: trust_domain.map(str::to_string),
+        target_version: Some(install.spec.base.version.clone()),
         message,
+        trust_domain: trust_domain.map(str::to_string),
         conditions: Vec::new(),
         last_upgrade: None,
     };
-
-    kube_utils::patch_cluster_resource_status::<IstioInstall>(
+    patch_install_status::<IstioInstall>(
         client,
         &install.name_any(),
-        &status,
+        install.status.as_ref(),
+        status,
         FIELD_MANAGER,
     )
     .await

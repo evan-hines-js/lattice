@@ -1,17 +1,14 @@
 //! CertManagerInstall CRD — desired state for the cert-manager install.
 //!
-//! Singleton cluster-scoped CRD. The `lattice-cert-manager` crate owns the
-//! controller. Distinct from `CertIssuer`, which is a user-facing CRD for
-//! declaring certificate issuers that cert-manager then honors.
+//! Distinct from `CertIssuer`, the user-facing CRD that represents issuers
+//! (ACME, CA, Vault, self-signed) cert-manager should honor.
 
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{InstallPhase, UpgradeAttempt, UpgradePolicy};
-use crate::crd::types::Condition;
+use super::{InstallSpecBase, InstallStatus};
 
-/// Desired state for the cert-manager install on this cluster.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "lattice.dev",
@@ -19,7 +16,7 @@ use crate::crd::types::Condition;
     kind = "CertManagerInstall",
     plural = "certmanagerinstalls",
     shortname = "cmi",
-    status = "CertManagerInstallStatus",
+    status = "InstallStatus",
     namespaced = false,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Version","type":"string","jsonPath":".status.observedVersion"}"#,
@@ -28,29 +25,6 @@ use crate::crd::types::Condition;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct CertManagerInstallSpec {
-    /// Desired cert-manager version.
-    pub version: String,
-
-    /// Upgrade strategy overrides.
-    #[serde(default)]
-    pub upgrade_policy: UpgradePolicy,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CertManagerInstallStatus {
-    #[serde(default)]
-    pub phase: InstallPhase,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_generation: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditions: Vec<Condition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_upgrade: Option<UpgradeAttempt>,
+    #[serde(flatten)]
+    pub base: InstallSpecBase,
 }

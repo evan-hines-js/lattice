@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod resources;
 pub mod retry;
 pub mod routing;
+pub mod install;
 pub mod status_check;
 pub mod telemetry;
 pub mod watcher;

@@ -16,6 +16,50 @@ pub mod volcano;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::types::Condition;
+
+/// Desired-state fields every dependency Install CRD carries.
+///
+/// Per-component specs embed this via `#[serde(flatten)]` and add
+/// component-specific fields alongside (e.g. Istio's `cluster_name`).
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSpecBase {
+    /// Desired version of the managed dependency.
+    pub version: String,
+    /// Upgrade strategy overrides.
+    #[serde(default)]
+    pub upgrade_policy: UpgradePolicy,
+}
+
+/// Observed-state shape shared by every Install CRD.
+///
+/// Every dependency reports the same lifecycle fields — adding per-component
+/// diagnostic fields here lets one controller expose them (e.g. Istio's
+/// derived `trust_domain`) without spawning a new status type per CRD.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallStatus {
+    #[serde(default)]
+    pub phase: InstallPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Istio-specific: trust domain currently in use (derived from `lattice-ca`).
+    /// Other controllers leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_upgrade: Option<UpgradeAttempt>,
+}
+
 /// Lifecycle phase of a dependency Install CRD.
 ///
 /// Every per-dependency controller drives its CR through the same phases, even

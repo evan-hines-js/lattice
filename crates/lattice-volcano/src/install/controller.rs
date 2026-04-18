@@ -3,8 +3,7 @@
 //! Gates Ready on the Deployments in `volcano-system` (admission, controllers,
 //! scheduler) reporting Available. The vGPU device plugin DaemonSet is GPU-
 //! node-only and may legitimately have zero desired pods on clusters without
-//! GPU nodes, so we don't block Ready on it — if GPU workloads show up later,
-//! the scheduler and device plugin coordinate independently.
+//! GPU nodes, so we don't block Ready on it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,19 +12,18 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{info, warn};
 
-use lattice_common::kube_utils::{self, wait_for_all_deployments};
+use lattice_common::install::patch_install_status;
+use lattice_common::kube_utils::wait_for_all_deployments;
 use lattice_common::{
     apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
-use lattice_crd::crd::{InstallPhase, VolcanoInstall, VolcanoInstallStatus};
+use lattice_crd::crd::{InstallPhase, InstallStatus, VolcanoInstall};
 
 use super::manifests;
 
 const FIELD_MANAGER: &str = "lattice-volcano-install-controller";
-
 const VOLCANO_NAMESPACE: &str = "volcano-system";
-
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn reconcile(
@@ -46,8 +44,7 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
     }
 
-    info!(install = %name, version = %install.spec.version, "Reconciling VolcanoInstall");
-
+    info!(install = %name, version = %install.spec.base.version, "Reconciling VolcanoInstall");
     write_status(
         &ctx.client,
         &install,
@@ -82,14 +79,14 @@ pub async fn reconcile(
 
     match wait_for_all_deployments(&ctx.client, VOLCANO_NAMESPACE, READY_TIMEOUT).await {
         Ok(()) => {
-            info!(install = %name, version = %install.spec.version, "VolcanoInstall Ready");
+            info!(install = %name, version = %install.spec.base.version, "VolcanoInstall Ready");
             write_status(
                 &ctx.client,
                 &install,
                 InstallPhase::Ready,
                 None,
                 generation,
-                Some(&install.spec.version),
+                Some(&install.spec.base.version),
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
@@ -118,29 +115,21 @@ async fn write_status(
     observed_generation: i64,
     observed_version: Option<&str>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        install.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        Some(observed_generation),
-    ) {
-        return Ok(());
-    }
-
-    let status = VolcanoInstallStatus {
+    let status = InstallStatus {
         phase,
         observed_generation: Some(observed_generation),
         observed_version: observed_version.map(str::to_string),
-        target_version: Some(install.spec.version.clone()),
+        target_version: Some(install.spec.base.version.clone()),
         message,
+        trust_domain: None,
         conditions: Vec::new(),
         last_upgrade: None,
     };
-
-    kube_utils::patch_cluster_resource_status::<VolcanoInstall>(
+    patch_install_status::<VolcanoInstall>(
         client,
         &install.name_any(),
-        &status,
+        install.status.as_ref(),
+        status,
         FIELD_MANAGER,
     )
     .await

@@ -293,7 +293,6 @@ mod tests {
         let combined = render.join("\n");
         assert!(!combined.contains("__LATTICE_CLUSTER_NAME__"));
         assert!(!combined.contains("__LATTICE_TRUST_DOMAIN__"));
-        assert!(!combined.contains("__LATTICE_MESH_NETWORKS__"));
         assert!(combined.contains("my-cluster"));
         assert!(combined.contains("lattice.abc"));
     }

@@ -1,12 +1,9 @@
 //! TetragonInstall reconciler — Phase 1: install-only.
 //!
-//! Watches `TetragonInstall` CRs and drives them through:
-//!   `Pending → Installing → Ready` (or → `Failed` on error).
-//!
-//! Phase 1 scope only: version-change/upgrade handling, auto-rollback, and the
-//! baseline TracingPolicy GC are Phase 2 work. This controller currently
-//! reapplies manifests on every observable spec change and marks Ready once
-//! the tetragon DaemonSet reports all pods ready.
+//! Phase 1 scope only: version-change / upgrade handling + auto-rollback land
+//! in Phase 2. The reconciler currently reapplies manifests on every observed
+//! spec change and marks Ready once the tetragon DaemonSet reports all pods
+//! ready.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,29 +12,23 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{info, warn};
 
-use lattice_common::kube_utils::{self, wait_for_daemonset};
+use lattice_common::install::patch_install_status;
+use lattice_common::kube_utils::wait_for_daemonset;
 use lattice_common::{
     apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
-use lattice_crd::crd::{InstallPhase, TetragonInstall, TetragonInstallStatus};
+use lattice_crd::crd::{InstallPhase, InstallStatus, TetragonInstall};
 
 use super::manifests;
 
 const FIELD_MANAGER: &str = "lattice-tetragon-install-controller";
-
-/// Namespace the Tetragon helm chart renders into (set in build.rs).
 const TETRAGON_NAMESPACE: &str = "kube-system";
-
-/// Name of the Tetragon agent DaemonSet — the readiness gate for "Ready".
 const TETRAGON_DS: &str = "tetragon";
-
-/// Time budget for the DaemonSet to converge before marking Failed.
-/// Tetragon loads eBPF programs per node, so first-install on a fresh cluster
-/// can legitimately take several minutes.
+/// Tetragon loads eBPF programs per node; first install on a fresh cluster can
+/// legitimately take several minutes.
 const READY_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Reconcile a TetragonInstall resource.
 pub async fn reconcile(
     install: Arc<TetragonInstall>,
     ctx: Arc<ControllerContext>,
@@ -47,7 +38,6 @@ pub async fn reconcile(
         ReconcileError::Validation("TetragonInstall missing metadata.generation".into())
     })?;
 
-    // Skip work if spec unchanged and already Ready.
     if status_check::is_status_unchanged(
         install.status.as_ref(),
         &InstallPhase::Ready,
@@ -57,9 +47,7 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
     }
 
-    info!(install = %name, version = %install.spec.version, "Reconciling TetragonInstall");
-
-    // Transition to Installing so status reflects in-flight work.
+    info!(install = %name, version = %install.spec.base.version, "Reconciling TetragonInstall");
     write_status(
         &ctx.client,
         &install,
@@ -70,7 +58,6 @@ pub async fn reconcile(
     )
     .await?;
 
-    // Render and apply manifests: helm chart output + cluster-wide baseline policy.
     let mut mfs = manifests::generate_tetragon().to_vec();
     mfs.push(
         serde_json::to_string_pretty(&manifests::generate_baseline_tracing_policy())
@@ -93,17 +80,16 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
-    // Gate Ready on the agent DaemonSet reporting all pods ready.
     match wait_for_daemonset(&ctx.client, TETRAGON_DS, TETRAGON_NAMESPACE, READY_TIMEOUT).await {
         Ok(()) => {
-            info!(install = %name, version = %install.spec.version, "TetragonInstall Ready");
+            info!(install = %name, version = %install.spec.base.version, "TetragonInstall Ready");
             write_status(
                 &ctx.client,
                 &install,
                 InstallPhase::Ready,
                 None,
                 generation,
-                Some(&install.spec.version),
+                Some(&install.spec.base.version),
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
@@ -124,8 +110,6 @@ pub async fn reconcile(
     }
 }
 
-/// Patch status only when it would change — avoids reconcile storms from
-/// stamping a fresh `lastTransitionTime` on every loop.
 async fn write_status(
     client: &Client,
     install: &TetragonInstall,
@@ -134,29 +118,21 @@ async fn write_status(
     observed_generation: i64,
     observed_version: Option<&str>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        install.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        Some(observed_generation),
-    ) {
-        return Ok(());
-    }
-
-    let status = TetragonInstallStatus {
+    let status = InstallStatus {
         phase,
         observed_generation: Some(observed_generation),
         observed_version: observed_version.map(str::to_string),
-        target_version: Some(install.spec.version.clone()),
+        target_version: Some(install.spec.base.version.clone()),
         message,
+        trust_domain: None,
         conditions: Vec::new(),
         last_upgrade: None,
     };
-
-    kube_utils::patch_cluster_resource_status::<TetragonInstall>(
+    patch_install_status::<TetragonInstall>(
         client,
         &install.name_any(),
-        &status,
+        install.status.as_ref(),
+        status,
         FIELD_MANAGER,
     )
     .await

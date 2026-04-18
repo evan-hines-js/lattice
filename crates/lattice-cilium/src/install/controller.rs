@@ -11,21 +11,19 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{info, warn};
 
-use lattice_common::kube_utils::{self, wait_for_daemonset};
+use lattice_common::install::patch_install_status;
+use lattice_common::kube_utils::wait_for_daemonset;
 use lattice_common::{
     apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
     REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
 };
-use lattice_crd::crd::{CiliumInstall, CiliumInstallStatus, InstallPhase};
+use lattice_crd::crd::{CiliumInstall, InstallPhase, InstallStatus};
 
 use super::manifests;
 
 const FIELD_MANAGER: &str = "lattice-cilium-install-controller";
-
 const CILIUM_NAMESPACE: &str = "kube-system";
-
 const CILIUM_DS: &str = "cilium";
-
 /// Cilium rolls per-node, each pod loading eBPF + reconciling endpoints.
 /// Generous budget for slower nodes / large clusters.
 const READY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -48,8 +46,7 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
     }
 
-    info!(install = %name, version = %install.spec.version, "Reconciling CiliumInstall");
-
+    info!(install = %name, version = %install.spec.base.version, "Reconciling CiliumInstall");
     write_status(
         &ctx.client,
         &install,
@@ -90,14 +87,14 @@ pub async fn reconcile(
 
     match wait_for_daemonset(&ctx.client, CILIUM_DS, CILIUM_NAMESPACE, READY_TIMEOUT).await {
         Ok(()) => {
-            info!(install = %name, version = %install.spec.version, "CiliumInstall Ready");
+            info!(install = %name, version = %install.spec.base.version, "CiliumInstall Ready");
             write_status(
                 &ctx.client,
                 &install,
                 InstallPhase::Ready,
                 None,
                 generation,
-                Some(&install.spec.version),
+                Some(&install.spec.base.version),
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
@@ -126,29 +123,21 @@ async fn write_status(
     observed_generation: i64,
     observed_version: Option<&str>,
 ) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        install.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        Some(observed_generation),
-    ) {
-        return Ok(());
-    }
-
-    let status = CiliumInstallStatus {
+    let status = InstallStatus {
         phase,
         observed_generation: Some(observed_generation),
         observed_version: observed_version.map(str::to_string),
-        target_version: Some(install.spec.version.clone()),
+        target_version: Some(install.spec.base.version.clone()),
         message,
+        trust_domain: None,
         conditions: Vec::new(),
         last_upgrade: None,
     };
-
-    kube_utils::patch_cluster_resource_status::<CiliumInstall>(
+    patch_install_status::<CiliumInstall>(
         client,
         &install.name_any(),
-        &status,
+        install.status.as_ref(),
+        status,
         FIELD_MANAGER,
     )
     .await

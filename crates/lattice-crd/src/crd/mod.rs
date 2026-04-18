@@ -61,15 +61,16 @@ pub use infra_provider::{
     AwsProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase, InfraProviderSpec,
     InfraProviderStatus, InfraProviderType, OpenStackProviderConfig, ProxmoxProviderConfig,
 };
-pub use install::cert_manager::{
-    CertManagerInstall, CertManagerInstallSpec, CertManagerInstallStatus,
+pub use install::cert_manager::{CertManagerInstall, CertManagerInstallSpec};
+pub use install::cilium::{CiliumInstall, CiliumInstallSpec};
+pub use install::eso::{ESOInstall, ESOInstallSpec};
+pub use install::istio::{IstioInstall, IstioInstallSpec};
+pub use install::tetragon::{TetragonInstall, TetragonInstallSpec};
+pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec};
+pub use install::{
+    HealthGate, InstallPhase, InstallSpecBase, InstallStatus, UpgradeAttempt, UpgradeOutcome,
+    UpgradePolicy,
 };
-pub use install::cilium::{CiliumInstall, CiliumInstallSpec, CiliumInstallStatus};
-pub use install::istio::{IstioInstall, IstioInstallSpec, IstioInstallStatus};
-pub use install::eso::{ESOInstall, ESOInstallSpec, ESOInstallStatus};
-pub use install::tetragon::{TetragonInstall, TetragonInstallSpec, TetragonInstallStatus};
-pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec, VolcanoInstallStatus};
-pub use install::{HealthGate, InstallPhase, UpgradeAttempt, UpgradeOutcome, UpgradePolicy};
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
     IssuerType, VaultIssuerSpec,

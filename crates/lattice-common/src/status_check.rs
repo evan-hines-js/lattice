@@ -5,14 +5,12 @@
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
 use lattice_crd::crd::{
-    BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus,
-    CertManagerInstallStatus, CiliumInstallStatus, ClusterBackupPhase, DNSProviderPhase,
-    DNSProviderStatus, ESOInstallStatus, ImageProviderPhase, ImageProviderStatus,
-    InfraProviderPhase, InfraProviderStatus, InstallPhase, IstioInstallStatus, JobPhase,
+    BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus, ClusterBackupPhase,
+    DNSProviderPhase, DNSProviderStatus, ImageProviderPhase, ImageProviderStatus,
+    InfraProviderPhase, InfraProviderStatus, InstallPhase, InstallStatus, JobPhase,
     LatticeClusterBackupStatus, LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus,
     LatticeRestoreStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase,
-    SecretProviderPhase, SecretProviderStatus, ServicePhase, TetragonInstallStatus,
-    VolcanoInstallStatus,
+    SecretProviderPhase, SecretProviderStatus, ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -82,12 +80,7 @@ impl_status_fields!(LatticeRestoreStatus, RestorePhase);
 impl_status_fields!(DNSProviderStatus, DNSProviderPhase);
 impl_status_fields!(ImageProviderStatus, ImageProviderPhase);
 impl_status_fields!(CertIssuerStatus, CertIssuerPhase);
-impl_status_fields!(TetragonInstallStatus, InstallPhase);
-impl_status_fields!(ESOInstallStatus, InstallPhase);
-impl_status_fields!(CertManagerInstallStatus, InstallPhase);
-impl_status_fields!(VolcanoInstallStatus, InstallPhase);
-impl_status_fields!(CiliumInstallStatus, InstallPhase);
-impl_status_fields!(IstioInstallStatus, InstallPhase);
+impl_status_fields!(InstallStatus, InstallPhase);
 
 #[cfg(test)]
 mod tests {
