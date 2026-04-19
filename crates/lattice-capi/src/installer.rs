@@ -397,6 +397,33 @@ pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> 
     }
 }
 
+/// Install every component CAPI depends on before `ensure_capi_providers_for`
+/// can succeed: cert-manager (webhooks), ESO (ExternalSecret CRDs used for
+/// provider credential sync), and the local-webhook `ClusterSecretStore`
+/// (ESO's fallback backend when no external vault is configured).
+///
+/// Single entry point used by both the in-cluster operator startup and the
+/// CLI uninstall flow — the uninstall kind cluster needs the same
+/// prerequisites as a real bootstrap cluster because both end up calling
+/// [`ensure_capi_providers_for`].
+pub async fn ensure_capi_prereqs(client: &KubeClient) -> Result<(), Error> {
+    let (cm, eso) = tokio::join!(
+        lattice_cert_manager::install::install_blocking(client),
+        lattice_eso::install::install_blocking(client),
+    );
+    cm.map_err(|e| Error::capi_installation(format!("cert-manager install failed: {e}")))?;
+    eso.map_err(|e| Error::capi_installation(format!("ESO install failed: {e}")))?;
+
+    lattice_secret_provider::controller::ensure_local_webhook_infrastructure(client)
+        .await
+        .map_err(|e| {
+            Error::capi_installation(format!("local-webhook ClusterSecretStore failed: {e}"))
+        })?;
+
+    info!("cert-manager, ESO, and local-webhook ClusterSecretStore ready");
+    Ok(())
+}
+
 /// Install CAPI providers for a given `ProviderType`, wiring the
 /// `InfraProvider`'s ESO credentials and declared image pull secrets into the
 /// CAPI provider namespace. This is the single entry point used by both the
@@ -415,6 +442,12 @@ pub async fn ensure_capi_providers_for(
     field_manager: &str,
 ) -> Result<(), Error> {
     tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
+
+    // cert-manager + ESO + local-webhook are unconditional prerequisites for
+    // every CAPI install. Running them here means no caller can forget — each
+    // install_blocking is idempotent (SSA re-apply) so calling this from an
+    // operator that already ran prereqs in startup is cheap.
+    ensure_capi_prereqs(client).await?;
 
     let target_ns = infra_provider_namespace(provider_type);
     let mut image_pull_secret_names: Vec<String> = Vec::new();

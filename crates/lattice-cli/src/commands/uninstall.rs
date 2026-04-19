@@ -412,13 +412,11 @@ impl Uninstaller {
         let bootstrap_client = self.bootstrap_client().await?;
         let target_client = self.target_client().await?;
 
-        info!("Installing cert-manager on kind cluster...");
-        crate::commands::ensure_cert_manager(&bootstrap_client).await?;
-
         // Install Lattice CRDs on the kind cluster so copied InfraProvider /
         // ImageProvider resources have a schema to land against. We don't run
         // the full operator here — this cluster only exists to host a reverse
-        // `move` and tear down.
+        // `move` and tear down. CAPI prereqs (cert-manager + ESO +
+        // local-webhook) are installed by `ensure_capi_providers` below.
         info!("Installing Lattice CRDs on kind cluster...");
         crate::commands::apply_lattice_crds(&bootstrap_client).await?;
 

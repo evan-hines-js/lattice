@@ -208,17 +208,6 @@ pub async fn kube_client_from_kubeconfig(
     Client::try_from(config).cmd_err()
 }
 
-/// Ensure cert-manager is installed and ready.
-///
-/// Applies cert-manager's manifests and gates on its Deployments reporting
-/// Available. Must complete before CAPI providers or copied resources land,
-/// because every downstream webhook expects cert-manager to be healthy.
-pub async fn ensure_cert_manager(client: &kube::Client) -> Result<()> {
-    lattice_cert_manager::install::install_blocking(client)
-        .await
-        .cmd_err()
-}
-
 /// Apply just the Lattice CRD manifests to `client`.
 ///
 /// Used by `uninstall` to prep a fresh kind cluster that doesn't need the full

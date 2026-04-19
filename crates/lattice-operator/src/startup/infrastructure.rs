@@ -39,7 +39,6 @@ pub async fn ensure_capi_infrastructure(
         let cluster = find_lattice_cluster(client, capi_installer.is_some()).await?;
 
         if let (Some(installer), Some(c)) = (capi_installer, &cluster) {
-            apply_prereqs_phase(client).await?;
             let provider_type = c.spec.provider.provider_type();
             let cloud_providers: Api<InfraProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -132,28 +131,6 @@ async fn resolve_skip_mesh(
     }
 }
 
-/// Apply cert-manager and ESO concurrently, then create the local webhook store.
-///
-/// Blocking install of the two components CAPI depends on: cert-manager for
-/// its webhooks, ESO for InfraProvider credential sync. The controller loops
-/// for these components run steady-state; they can't service pre-CAPI
-/// bootstrap because the full operator isn't up yet.
-async fn apply_prereqs_phase(client: &Client) -> anyhow::Result<()> {
-    let (cm, eso) = tokio::join!(
-        lattice_cert_manager::install::install_blocking(client),
-        lattice_eso::install::install_blocking(client),
-    );
-    cm.map_err(|e| anyhow::anyhow!("cert-manager install failed: {e}"))?;
-    eso.map_err(|e| anyhow::anyhow!("ESO install failed: {e}"))?;
-
-    lattice_secret_provider::controller::ensure_local_webhook_infrastructure(client)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to create local webhook infrastructure: {}", e))?;
-
-    tracing::info!("cert-manager, ESO, and local webhook ClusterSecretStore ready");
-    Ok(())
-}
-
 /// Find the LatticeCluster instance.
 ///
 /// When `required` is true (cluster/all mode), retries forever with
@@ -236,7 +213,6 @@ async fn ensure_capi_on_bootstrap(
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    apply_prereqs_phase(client).await?;
     ensure_capi_providers_for(
         client,
         installer,
