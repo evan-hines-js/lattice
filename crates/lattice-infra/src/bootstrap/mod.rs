@@ -11,7 +11,6 @@
 //!
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
-pub mod gpu;
 pub mod kthena;
 pub mod prometheus;
 
@@ -286,30 +285,6 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
 
         phases.push(InfraPhase {
             name: "monitoring",
-            components,
-        });
-    }
-
-    // Phase 4: GPU (conditional)
-    if config.gpu {
-        let mut components = vec![InfraComponent {
-            name: "gpu-operator",
-            version: gpu::gpu_operator_version(),
-            manifests: gpu::generate_gpu_stack().to_vec(),
-            health_namespace: Some("gpu-operator"),
-        }];
-
-        if !config.skip_service_mesh {
-            components.push(InfraComponent {
-                name: "gpu-mesh-policies",
-                version: "1",
-                manifests: serialize_lmms(gpu::generate_gpu_mesh_members())?,
-                health_namespace: None,
-            });
-        }
-
-        phases.push(InfraPhase {
-            name: "gpu",
             components,
         });
     }

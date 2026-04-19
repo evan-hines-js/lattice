@@ -9,10 +9,11 @@ use kube::{Client, CustomResourceExt};
 
 use lattice_crd::crd::{
     BackupStore, CedarPolicy, CertIssuer, CertManagerInstall, CiliumInstall, DNSProvider,
-    ESOInstall, ImageProvider, InfraProvider, IstioInstall, LatticeCluster, LatticeClusterBackup,
-    LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
-    KedaInstall, LatticeQuota, LatticeRestore, LatticeService, MetricsServerInstall, OIDCProvider,
-    SecretProvider, TetragonInstall, VeleroInstall, VolcanoInstall,
+    ESOInstall, GpuOperatorInstall, ImageProvider, InfraProvider, IstioInstall, KedaInstall,
+    LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob, LatticeMeshMember,
+    LatticeModel, LatticePackage, LatticeQuota, LatticeRestore, LatticeService,
+    MetricsServerInstall, OIDCProvider, SecretProvider, TetragonInstall, VeleroInstall,
+    VolcanoInstall,
 };
 
 /// CRD definition with name and resource
@@ -105,6 +106,10 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "kedainstalls.lattice.dev",
             crd: KedaInstall::crd(),
+        },
+        CrdDef {
+            name: "gpuoperatorinstalls.lattice.dev",
+            crd: GpuOperatorInstall::crd(),
         },
     ]
 }

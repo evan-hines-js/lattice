@@ -9,6 +9,7 @@
 pub mod cert_manager;
 pub mod cilium;
 pub mod eso;
+pub mod gpu_operator;
 pub mod istio;
 pub mod keda;
 pub mod metrics_server;

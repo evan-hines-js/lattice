@@ -46,6 +46,7 @@ members = [
     "crates/lattice-volcano-policy",
     "crates/lattice-cilium",
     "crates/lattice-istio",
+    "crates/lattice-gpu-operator",
     "crates/lattice-keda",
     "crates/lattice-metrics-server",
     "crates/lattice-velero",
@@ -101,6 +102,7 @@ lattice-cert-manager = { path = "crates/lattice-cert-manager" }
 lattice-volcano-policy = { path = "crates/lattice-volcano-policy" }
 lattice-cilium = { path = "crates/lattice-cilium" }
 lattice-istio = { path = "crates/lattice-istio" }
+lattice-gpu-operator = { path = "crates/lattice-gpu-operator" }
 lattice-keda = { path = "crates/lattice-keda" }
 lattice-metrics-server = { path = "crates/lattice-metrics-server" }
 lattice-velero = { path = "crates/lattice-velero" }

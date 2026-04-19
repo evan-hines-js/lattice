@@ -3211,6 +3211,7 @@ dependencies = [
  "lattice-core",
  "lattice-crd",
  "lattice-eso",
+ "lattice-gpu-operator",
  "lattice-infra",
  "lattice-istio",
  "lattice-keda",
@@ -3424,6 +3425,7 @@ dependencies = [
  "lattice-core",
  "lattice-crd",
  "lattice-eso",
+ "lattice-gpu-operator",
  "lattice-infra",
  "lattice-istio",
  "lattice-keda",
@@ -3611,6 +3613,20 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-gpu-operator"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -3873,6 +3889,7 @@ dependencies = [
  "lattice-crd",
  "lattice-dns-provider",
  "lattice-eso",
+ "lattice-gpu-operator",
  "lattice-graph",
  "lattice-image-provider",
  "lattice-infra",

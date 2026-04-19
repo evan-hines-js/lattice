@@ -56,6 +56,9 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_keda::install::manifests::generate_keda(),
         ));
+        set.extend(extract_image_registries(
+            lattice_gpu_operator::install::manifests::generate_gpu_stack(),
+        ));
         set.into_iter().collect()
     });
     &REGS

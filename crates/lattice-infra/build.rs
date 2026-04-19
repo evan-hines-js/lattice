@@ -232,10 +232,6 @@ fn main() {
         versions.resources["gateway-api"].version
     );
     println!(
-        "cargo:rustc-env=GPU_OPERATOR_VERSION={}",
-        versions.charts["gpu-operator"].version
-    );
-    println!(
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
         versions.charts["victoria-metrics-k8s-stack"].version
     );
@@ -251,33 +247,6 @@ fn main() {
 
     // Helper to build chart path
     let chart = |filename: &str| charts_dir.join(filename);
-
-    // 8. GPU Operator
-    let yaml = run_helm_template(
-        "gpu-operator",
-        &chart(&format!(
-            "gpu-operator-v{}.tgz",
-            versions.charts["gpu-operator"].version
-        )),
-        "gpu-operator",
-        &[
-            "--set",
-            "driver.enabled=false",
-            "--set",
-            "toolkit.enabled=true",
-            "--set",
-            "devicePlugin.enabled=true",
-            "--set",
-            "nfd.enabled=true",
-            "--set",
-            "dcgmExporter.enabled=true",
-            "--set",
-            "migManager.enabled=false",
-            "--set",
-            "gfd.enabled=true",
-        ],
-    );
-    std::fs::write(out_dir.join("gpu-operator.yaml"), yaml).expect("write gpu-operator.yaml");
 
     // 10a. VictoriaMetrics K8s Stack — HA mode (VMCluster with 2 replicas each)
     let yaml = run_helm_template(

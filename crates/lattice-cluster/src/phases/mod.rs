@@ -291,6 +291,12 @@ pub async fn reconcile_infrastructure(
             .map_err(|e| Error::internal(format!("failed to ensure VeleroInstall: {}", e)))?;
     }
 
+    if cluster.spec.gpu {
+        lattice_gpu_operator::install::ensure_install(client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure GpuOperatorInstall: {}", e)))?;
+    }
+
     if let Some(ref topo) = cluster.spec.network_topology {
         if let Some(cm) =
             lattice_volcano::install::manifests::generate_topology_discovery_configmap(

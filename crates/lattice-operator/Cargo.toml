@@ -57,6 +57,7 @@ lattice-cert-manager.workspace = true
 lattice-volcano.workspace = true
 lattice-cilium.workspace = true
 lattice-istio.workspace = true
+lattice-gpu-operator.workspace = true
 lattice-keda.workspace = true
 lattice-metrics-server.workspace = true
 lattice-velero.workspace = true

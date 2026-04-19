@@ -573,6 +573,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_keda::install::reconcile,
         "KedaInstall",
     );
+    ctx.spawn_provider(
+        "gpu-operator-install",
+        lattice_gpu_operator::install::reconcile,
+        "GpuOperatorInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

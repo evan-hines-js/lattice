@@ -63,6 +63,7 @@ pub use infra_provider::{
 pub use install::cert_manager::{CertManagerInstall, CertManagerInstallSpec};
 pub use install::cilium::{CiliumInstall, CiliumInstallSpec};
 pub use install::eso::{ESOInstall, ESOInstallSpec};
+pub use install::gpu_operator::{GpuOperatorInstall, GpuOperatorInstallSpec};
 pub use install::istio::{IstioInstall, IstioInstallSpec};
 pub use install::keda::{KedaInstall, KedaInstallSpec};
 pub use install::metrics_server::{MetricsServerInstall, MetricsServerInstallSpec};
