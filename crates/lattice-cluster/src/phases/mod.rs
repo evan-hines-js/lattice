@@ -223,24 +223,13 @@ pub async fn reconcile_infrastructure(
     client: &Client,
     cluster: &LatticeCluster,
 ) -> Result<(), Error> {
-    use lattice_common::ParentConnectionConfig;
-    use lattice_infra::bootstrap::InfrastructureConfig;
-
-    let mut config = InfrastructureConfig::from(cluster);
-
-    // Read parent config if it exists (indicates we have an upstream parent cell)
-    if let Some(parent) = ParentConnectionConfig::read(client).await? {
-        config.parent_host = Some(parent.endpoint.host);
-        config.parent_grpc_port = parent.endpoint.grpc_port;
-    }
-
-    // Generate infrastructure manifests (flat list for reconciliation — infra already exists)
-    let manifests = lattice_infra::bootstrap::generate_all_manifests(&config)
+    let skip_mesh = !cluster.spec.services;
+    let manifests = lattice_infra::bootstrap::bootstrap_manifests(skip_mesh)
         .map_err(|e| Error::internal(format!("failed to generate infrastructure: {}", e)))?;
 
     debug!(
-        cluster = %config.cluster_name,
-        parent_host = ?config.parent_host,
+        cluster = %cluster.name_any(),
+        skip_mesh,
         count = manifests.len(),
         "reconciling infrastructure manifests"
     );

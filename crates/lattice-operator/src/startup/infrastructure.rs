@@ -2,7 +2,8 @@
 //!
 //! Infrastructure is installed in two stages:
 //! - `ensure_capi_infrastructure`: blocking — cert-manager, ESO, credential sync, CAPI
-//! - `spawn_general_infrastructure`: background — remaining phases with health gates
+//! - `spawn_general_infrastructure`: background — bootstrap manifests (Gateway
+//!   API CRDs, operator mesh enrollment, cluster-access Cedar policy).
 
 use std::time::Duration;
 
@@ -10,12 +11,12 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
-use lattice_common::{ParentConnectionConfig, SharedConfig};
+use lattice_common::SharedConfig;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_capi::installer::{ensure_capi_providers_for, CapiInstaller};
-use lattice_crd::crd::{BackupsConfig, InfraProvider, LatticeCluster, MonitoringConfig};
-use lattice_infra::bootstrap::{self, InfrastructureConfig};
+use lattice_crd::crd::{InfraProvider, LatticeCluster};
+use lattice_infra::bootstrap;
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
 
@@ -77,7 +78,12 @@ pub fn spawn_general_infrastructure(
 /// established quickly; infrastructure manifests can wait.
 const INFRA_STAGGER_DELAY: Duration = Duration::from_secs(5);
 
-/// Internal: resolve config and apply infrastructure phases.
+/// Apply bootstrap manifests (Gateway API CRDs + operator mesh enrollment +
+/// cluster-access Cedar policy).
+///
+/// Bootstrap clusters have no mesh and skip everything. Non-bootstrap clusters
+/// that opted out of services (`LatticeCluster.spec.services = false`) also
+/// skip. Everyone else applies the full set.
 async fn ensure_general_infrastructure(
     client: &Client,
     cluster_mode: bool,
@@ -87,79 +93,42 @@ async fn ensure_general_infrastructure(
     // Controllers are starting concurrently and need to establish ~16 watches.
     tokio::time::sleep(INFRA_STAGGER_DELAY).await;
 
-    let is_bootstrap = config.is_bootstrap_cluster;
+    let skip_mesh = resolve_skip_mesh(client, cluster_mode, config).await;
+    tracing::info!(skip_mesh, "applying bootstrap manifests");
 
-    tracing::info!(is_bootstrap, "Installing general infrastructure...");
+    let manifests = bootstrap::bootstrap_manifests(skip_mesh)
+        .map_err(|e| anyhow::anyhow!("failed to generate bootstrap manifests: {e}"))?;
+    if manifests.is_empty() {
+        return Ok(());
+    }
 
-    let infra_config = resolve_infra_config(client, is_bootstrap, cluster_mode, config).await?;
+    lattice_common::apply_manifests(
+        client,
+        &manifests,
+        &lattice_common::ApplyOptions::default(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to apply bootstrap manifests: {e}"))?;
 
-    let phases = bootstrap::generate_phases(&infra_config)
-        .map_err(|e| anyhow::anyhow!("failed to generate infrastructure: {}", e))?;
-
-    tracing::info!(phases = phases.len(), "Applying infrastructure phases");
-
-    bootstrap::apply_all_phases(client, &phases).await?;
-
-    tracing::info!("General infrastructure installation complete");
     Ok(())
 }
 
-/// Resolve infrastructure config from cluster CRD or environment.
-async fn resolve_infra_config(
+/// Decide whether this boot should skip mesh-related bootstrap manifests.
+///
+/// Bootstrap clusters never have mesh. Otherwise we look for a LatticeCluster
+/// and honor `spec.services`; if there's no cluster yet (pre-pivot race), we
+/// default to keeping mesh on since that's the steady state.
+async fn resolve_skip_mesh(
     client: &Client,
-    is_bootstrap: bool,
     cluster_mode: bool,
     config: &SharedConfig,
-) -> anyhow::Result<InfrastructureConfig> {
-    if is_bootstrap {
-        return Ok(InfrastructureConfig {
-            cluster_name: "bootstrap".to_string(),
-            skip_service_mesh: true,
-            monitoring: MonitoringConfig {
-                enabled: false,
-                ha: false,
-            },
-            backups: BackupsConfig { enabled: false },
-            ..Default::default()
-        });
+) -> bool {
+    if config.is_bootstrap_cluster {
+        return true;
     }
-
-    let cluster = find_lattice_cluster(client, cluster_mode).await?;
-
-    match &cluster {
-        Some(c) => {
-            let mut cfg = InfrastructureConfig::from(c);
-            if let Ok(Some(parent)) = ParentConnectionConfig::read(client).await {
-                cfg.parent_host = Some(parent.endpoint.host);
-                cfg.parent_grpc_port = parent.endpoint.grpc_port;
-            }
-            tracing::info!(
-                provider = ?cfg.provider,
-                bootstrap = ?cfg.bootstrap,
-                cluster = %cfg.cluster_name,
-                parent_host = ?cfg.parent_host,
-                monitoring = ?cfg.monitoring,
-                backups = ?cfg.backups,
-                "config from LatticeCluster CRD"
-            );
-            Ok(cfg)
-        }
-        None => {
-            let cluster_name = config
-                .cluster_name_required()
-                .map_err(|e| anyhow::anyhow!("{} (required for infrastructure generation)", e))?
-                .to_string();
-            tracing::info!(cluster = %cluster_name, "no LatticeCluster CRD, using env config");
-            Ok(InfrastructureConfig {
-                cluster_name,
-                monitoring: MonitoringConfig {
-                    enabled: false,
-                    ha: false,
-                },
-                backups: BackupsConfig { enabled: false },
-                ..Default::default()
-            })
-        }
+    match find_lattice_cluster(client, cluster_mode).await {
+        Ok(Some(c)) => !c.spec.services,
+        _ => false,
     }
 }
 
