@@ -18,6 +18,16 @@ use serde::{Deserialize, Serialize};
 
 use super::types::Condition;
 
+/// Common access to the install-spec fields every dependency controller reads.
+///
+/// Each dependency CRD has a bespoke `Spec` (Istio adds `cluster_name`, etc.),
+/// but the shared install helper only needs the target version and the last
+/// reported status. Implementations are one-liners forwarding to `spec.base`.
+pub trait InstallResource {
+    fn spec_base(&self) -> &InstallSpecBase;
+    fn install_status(&self) -> Option<&InstallStatus>;
+}
+
 /// Desired-state fields every dependency Install CRD carries.
 ///
 /// Per-component specs embed this via `#[serde(flatten)]` and add

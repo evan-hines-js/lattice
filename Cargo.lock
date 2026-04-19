@@ -3350,6 +3350,7 @@ dependencies = [
  "lattice-agent",
  "lattice-capi",
  "lattice-cell",
+ "lattice-cert-manager",
  "lattice-cluster",
  "lattice-common",
  "lattice-core",

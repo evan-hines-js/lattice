@@ -67,8 +67,8 @@ pub use install::istio::{IstioInstall, IstioInstallSpec};
 pub use install::tetragon::{TetragonInstall, TetragonInstallSpec};
 pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec};
 pub use install::{
-    HealthGate, InstallPhase, InstallSpecBase, InstallStatus, UpgradeAttempt, UpgradeOutcome,
-    UpgradePolicy,
+    HealthGate, InstallPhase, InstallResource, InstallSpecBase, InstallStatus, UpgradeAttempt,
+    UpgradeOutcome, UpgradePolicy,
 };
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,

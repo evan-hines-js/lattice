@@ -8,22 +8,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
-use tracing::{info, warn};
 
-use lattice_common::install::patch_install_status;
-use lattice_common::kube_utils::wait_for_daemonset;
-use lattice_common::{
-    apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
-    REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
+use lattice_common::install::{
+    run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig,
 };
-use lattice_crd::crd::{CiliumInstall, InstallPhase, InstallStatus};
+use lattice_common::{ControllerContext, ReconcileError};
+use lattice_crd::crd::CiliumInstall;
 
 use super::manifests;
 
 const FIELD_MANAGER: &str = "lattice-cilium-install-controller";
-const CILIUM_NAMESPACE: &str = "kube-system";
-const CILIUM_DS: &str = "cilium";
+const NAMESPACE: &str = "kube-system";
+const DAEMONSET: &str = "cilium";
 /// Cilium rolls per-node, each pod loading eBPF + reconciling endpoints.
 /// Generous budget for slower nodes / large clusters.
 const READY_TIMEOUT: Duration = Duration::from_secs(600);
@@ -32,114 +28,32 @@ pub async fn reconcile(
     install: Arc<CiliumInstall>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
-    let name = install.name_any();
-    let generation = install.metadata.generation.ok_or_else(|| {
-        ReconcileError::Validation("CiliumInstall missing metadata.generation".into())
-    })?;
-
-    if status_check::is_status_unchanged(
-        install.status.as_ref(),
-        &InstallPhase::Ready,
-        None,
-        Some(generation),
-    ) {
-        return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
-    }
-
-    info!(install = %name, version = %install.spec.base.version, "Reconciling CiliumInstall");
-    write_status(
-        &ctx.client,
-        &install,
-        InstallPhase::Installing,
-        None,
-        generation,
-        None,
-    )
-    .await?;
-
-    let mut mfs = manifests::generate_cilium_manifests().to_vec();
+    let mut manifests: Vec<String> = manifests::generate_cilium_manifests().to_vec();
     for policy in [
         serde_json::to_string_pretty(&manifests::generate_ztunnel_allowlist()),
         serde_json::to_string_pretty(&manifests::generate_default_deny()),
         serde_json::to_string_pretty(&manifests::generate_mesh_proxy_egress_policy()),
         serde_json::to_string_pretty(&manifests::generate_eastwest_gateway_policy()),
     ] {
-        mfs.push(
+        manifests.push(
             policy.map_err(|e| {
                 ReconcileError::Validation(format!("serialize Cilium policy: {e}"))
             })?,
         );
     }
 
-    if let Err(e) = apply_manifests(&ctx.client, &mfs, &ApplyOptions::default()).await {
-        warn!(install = %name, error = %e, "CiliumInstall apply failed");
-        write_status(
-            &ctx.client,
-            &install,
-            InstallPhase::Failed,
-            Some(format!("apply failed: {e}")),
-            generation,
-            None,
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
-    }
-
-    match wait_for_daemonset(&ctx.client, CILIUM_DS, CILIUM_NAMESPACE, READY_TIMEOUT).await {
-        Ok(()) => {
-            info!(install = %name, version = %install.spec.base.version, "CiliumInstall Ready");
-            write_status(
-                &ctx.client,
-                &install,
-                InstallPhase::Ready,
-                None,
-                generation,
-                Some(&install.spec.base.version),
-            )
-            .await?;
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
-        }
-        Err(e) => {
-            warn!(install = %name, error = %e, "Cilium agent DS not ready in time");
-            write_status(
-                &ctx.client,
-                &install,
-                InstallPhase::Failed,
-                Some(format!("agent DS not ready: {e}")),
-                generation,
-                None,
-            )
-            .await?;
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
-        }
-    }
-}
-
-async fn write_status(
-    client: &Client,
-    install: &CiliumInstall,
-    phase: InstallPhase,
-    message: Option<String>,
-    observed_generation: i64,
-    observed_version: Option<&str>,
-) -> Result<(), ReconcileError> {
-    let status = InstallStatus {
-        phase,
-        observed_generation: Some(observed_generation),
-        observed_version: observed_version.map(str::to_string),
-        target_version: Some(install.spec.base.version.clone()),
-        message,
+    run_simple_install_reconcile(SimpleInstallConfig {
+        install,
+        ctx,
+        field_manager: FIELD_MANAGER,
+        log_kind: "CiliumInstall",
+        manifests,
+        readiness: ReadinessCheck::DaemonSet {
+            name: DAEMONSET,
+            namespace: NAMESPACE,
+            timeout: READY_TIMEOUT,
+        },
         trust_domain: None,
-        conditions: Vec::new(),
-        last_upgrade: None,
-    };
-    patch_install_status::<CiliumInstall>(
-        client,
-        &install.name_any(),
-        install.status.as_ref(),
-        status,
-        FIELD_MANAGER,
-    )
+    })
     .await
-    .map_err(ReconcileError::Kube)
 }

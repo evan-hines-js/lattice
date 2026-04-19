@@ -4,7 +4,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{InstallSpecBase, InstallStatus};
+use super::{InstallResource, InstallSpecBase, InstallStatus};
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
@@ -24,4 +24,13 @@ use super::{InstallSpecBase, InstallStatus};
 pub struct ESOInstallSpec {
     #[serde(flatten)]
     pub base: InstallSpecBase,
+}
+
+impl InstallResource for ESOInstall {
+    fn spec_base(&self) -> &InstallSpecBase {
+        &self.spec.base
+    }
+    fn install_status(&self) -> Option<&InstallStatus> {
+        self.status.as_ref()
+    }
 }

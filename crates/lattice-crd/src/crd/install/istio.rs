@@ -9,7 +9,7 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{InstallSpecBase, InstallStatus};
+use super::{InstallResource, InstallSpecBase, InstallStatus};
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
@@ -39,4 +39,13 @@ pub struct IstioInstallSpec {
     /// cluster's `meshNetworks`. `None` preserves existing `meshNetworks`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_networks: Option<Vec<String>>,
+}
+
+impl InstallResource for IstioInstall {
+    fn spec_base(&self) -> &InstallSpecBase {
+        &self.spec.base
+    }
+    fn install_status(&self) -> Option<&InstallStatus> {
+        self.status.as_ref()
+    }
 }
