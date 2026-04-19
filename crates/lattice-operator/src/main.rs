@@ -568,6 +568,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_velero::install::reconcile,
         "VeleroInstall",
     );
+    ctx.spawn_provider(
+        "keda-install",
+        lattice_keda::install::reconcile,
+        "KedaInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

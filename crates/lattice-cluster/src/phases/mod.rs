@@ -280,6 +280,9 @@ pub async fn reconcile_infrastructure(
         lattice_metrics_server::install::ensure_install(client)
             .await
             .map_err(|e| Error::internal(format!("failed to ensure MetricsServerInstall: {}", e)))?;
+        lattice_keda::install::ensure_install(client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure KedaInstall: {}", e)))?;
     }
 
     if cluster.spec.backups.enabled {

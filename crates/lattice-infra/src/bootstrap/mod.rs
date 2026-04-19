@@ -12,7 +12,6 @@
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
 pub mod gpu;
-pub mod keda;
 pub mod kthena;
 pub mod prometheus;
 
@@ -258,25 +257,17 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
 
     // Phase 3: monitoring (conditional)
     if config.monitoring.enabled {
-        let mut components = vec![
-            InfraComponent {
-                name: "victoria-metrics",
-                version: prometheus::victoria_metrics_version(),
-                manifests: prometheus::generate_prometheus(config.monitoring.ha).to_vec(),
-                health_namespace: Some("monitoring"),
-            },
-            InfraComponent {
-                name: "keda",
-                version: keda::keda_version(),
-                manifests: keda::generate_keda().to_vec(),
-                health_namespace: Some("keda"),
-            },
-        ];
+        let mut components = vec![InfraComponent {
+            name: "victoria-metrics",
+            version: prometheus::victoria_metrics_version(),
+            manifests: prometheus::generate_prometheus(config.monitoring.ha).to_vec(),
+            health_namespace: Some("monitoring"),
+        }];
 
-        // Mesh policies for monitoring components (keda + monitoring only)
+        // Mesh policies for the VictoriaMetrics stack (vmagent wildcard Cedar +
+        // LMMs for vmagent/vm-read-target). KEDA's LMMs moved to its install crate.
         if !config.skip_service_mesh {
             let mut mesh_manifests = Vec::new();
-            mesh_manifests.extend(serialize_lmms(keda::generate_keda_mesh_members())?);
             mesh_manifests.extend(serialize_lmms(
                 prometheus::generate_monitoring_mesh_members(config.monitoring.ha),
             )?);

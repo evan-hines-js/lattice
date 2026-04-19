@@ -10,6 +10,7 @@ pub mod cert_manager;
 pub mod cilium;
 pub mod eso;
 pub mod istio;
+pub mod keda;
 pub mod metrics_server;
 pub mod tetragon;
 pub mod velero;

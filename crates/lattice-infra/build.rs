@@ -236,10 +236,6 @@ fn main() {
         versions.charts["gpu-operator"].version
     );
     println!(
-        "cargo:rustc-env=KEDA_VERSION={}",
-        versions.charts["keda"].version
-    );
-    println!(
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
         versions.charts["victoria-metrics-k8s-stack"].version
     );
@@ -346,34 +342,6 @@ fn main() {
     );
     std::fs::write(out_dir.join("victoria-metrics-single.yaml"), yaml)
         .expect("write victoria-metrics-single.yaml");
-
-    // 11. KEDA (event-driven autoscaler)
-    let yaml = run_helm_template(
-        "keda",
-        &chart(&format!("keda-{}.tgz", versions.charts["keda"].version)),
-        "keda",
-        &[
-            "--set",
-            "tolerations[0].key=node-role.kubernetes.io/control-plane",
-            "--set",
-            "tolerations[0].operator=Exists",
-            "--set",
-            "tolerations[0].effect=NoSchedule",
-            "--set",
-            "webhooks.tolerations[0].key=node-role.kubernetes.io/control-plane",
-            "--set",
-            "webhooks.tolerations[0].operator=Exists",
-            "--set",
-            "webhooks.tolerations[0].effect=NoSchedule",
-            "--set",
-            "metricsServer.tolerations[0].key=node-role.kubernetes.io/control-plane",
-            "--set",
-            "metricsServer.tolerations[0].operator=Exists",
-            "--set",
-            "metricsServer.tolerations[0].effect=NoSchedule",
-        ],
-    );
-    std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
 
     // Kthena model serving (Volcano subproject for disaggregated inference)
     let yaml = run_helm_template(

@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_common::{LABEL_NAME, MONITORING_NAMESPACE, OPERATOR_NAME, VMAGENT_SA_NAME};
+use lattice_common::{
+    LABEL_NAME, MONITORING_NAMESPACE, OPERATOR_NAME, VMAGENT_SA_NAME, VM_READ_TARGET_LMM_NAME,
+};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
@@ -15,7 +17,9 @@ use lattice_crd::crd::{
 use lattice_common::kube_utils::split_yaml_documents;
 use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 
-use super::keda::{KEDA_NAMESPACE, VM_READ_TARGET_LMM_NAME};
+/// Namespace that KEDA lands in. Referenced here so the vmselect read-path
+/// LMM allows KEDA as a caller. Goes away with VictoriaMetrics migration.
+const KEDA_NAMESPACE: &str = "keda";
 
 /// Well-known service name for the VMCluster components.
 /// Used as `fullnameOverride` so all downstream consumers

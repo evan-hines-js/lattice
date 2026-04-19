@@ -53,6 +53,9 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_velero::install::manifests::generate_velero(),
         ));
+        set.extend(extract_image_registries(
+            lattice_keda::install::manifests::generate_keda(),
+        ));
         set.into_iter().collect()
     });
     &REGS

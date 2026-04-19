@@ -1,28 +1,20 @@
-//! KEDA manifest generation
-//!
-//! Embeds pre-rendered KEDA manifests from build time.
-//! KEDA provides event-driven autoscaling via ScaledObject triggers.
+//! KEDA helm chart + mesh enrollment manifests.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
+use lattice_common::kube_utils::split_yaml_documents;
+use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
+use lattice_common::{MONITORING_NAMESPACE, VM_READ_TARGET_LMM_NAME};
 use lattice_crd::crd::{
     LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth,
     ServiceRef,
 };
 
-use lattice_common::kube_utils::split_yaml_documents;
-use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
-use lattice_common::MONITORING_NAMESPACE;
-
-/// Namespace for KEDA components.
-pub const KEDA_NAMESPACE: &str = "keda";
-
-/// VM read target LMM name, referenced by KEDA operator's dependency.
-pub const VM_READ_TARGET_LMM_NAME: &str = "vm-read-target";
+use super::NAMESPACE;
 
 static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    let mut manifests = vec![namespace_yaml_ambient(KEDA_NAMESPACE)];
+    let mut manifests = vec![namespace_yaml_ambient(NAMESPACE)];
     manifests.extend(split_yaml_documents(include_str!(concat!(
         env!("OUT_DIR"),
         "/keda.yaml"
@@ -30,26 +22,26 @@ static KEDA_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     manifests
 });
 
+/// KEDA chart version pinned at build time from `versions.toml`.
 pub fn keda_version() -> &'static str {
     env!("KEDA_VERSION")
 }
 
+/// Pre-rendered KEDA manifests, including the ambient-enrolled namespace.
 pub fn generate_keda() -> &'static [String] {
     &KEDA_MANIFESTS
 }
 
-/// Generate LatticeMeshMember CRDs for KEDA components.
+/// LatticeMeshMember CRDs for the three KEDA components:
 ///
-/// Produces 3 LMMs:
-/// 1. **keda-metrics-apiserver** — webhook called by kube-apiserver (Webhook mTLS)
-/// 2. **keda-admission-webhooks** — webhook called by kube-apiserver (Webhook mTLS)
-/// 3. **keda-operator** — receives gRPC from metrics-apiserver, queries VictoriaMetrics
+/// - **keda-metrics-apiserver** — webhook called by kube-apiserver (Webhook mTLS)
+/// - **keda-admission-webhooks** — webhook called by kube-apiserver (Webhook mTLS)
+/// - **keda-operator** — receives gRPC from metrics-apiserver, queries VictoriaMetrics
 pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
     vec![
-        // keda-metrics-apiserver — webhook called by kube-apiserver, aggregates metrics
         mesh_member(
             "keda-metrics-apiserver",
-            KEDA_NAMESPACE,
+            NAMESPACE,
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
                     "app".to_string(),
@@ -62,7 +54,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                     peer_auth: PeerAuth::Webhook,
                 }],
                 allowed_callers: vec![],
-                dependencies: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-operator")],
+                dependencies: vec![ServiceRef::new(NAMESPACE, "keda-operator")],
                 egress: vec![kube_apiserver_egress()],
                 allow_peer_traffic: false,
                 ingress: None,
@@ -72,10 +64,9 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        // keda-admission-webhooks — webhook called by kube-apiserver
         mesh_member(
             "keda-admission-webhooks",
-            KEDA_NAMESPACE,
+            NAMESPACE,
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
                     "app".to_string(),
@@ -98,10 +89,9 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                 advertise: None,
             },
         ),
-        // keda-operator — receives gRPC from metrics-apiserver, scales workloads
         mesh_member(
             "keda-operator",
-            KEDA_NAMESPACE,
+            NAMESPACE,
             LatticeMeshMemberSpec {
                 target: MeshMemberTarget::Selector(BTreeMap::from([(
                     "app".to_string(),
@@ -113,7 +103,7 @@ pub fn generate_keda_mesh_members() -> Vec<LatticeMeshMember> {
                     name: "grpc".to_string(),
                     peer_auth: PeerAuth::Strict,
                 }],
-                allowed_callers: vec![ServiceRef::new(KEDA_NAMESPACE, "keda-metrics-apiserver")],
+                allowed_callers: vec![ServiceRef::new(NAMESPACE, "keda-metrics-apiserver")],
                 dependencies: vec![ServiceRef::new(
                     MONITORING_NAMESPACE,
                     VM_READ_TARGET_LMM_NAME,
@@ -155,13 +145,11 @@ mod tests {
         let members = generate_keda_mesh_members();
         assert_eq!(members.len(), 3);
 
-        // All must be in the keda namespace and pass validation
         for m in &members {
-            assert_eq!(m.metadata.namespace.as_deref(), Some(KEDA_NAMESPACE));
+            assert_eq!(m.metadata.namespace.as_deref(), Some(NAMESPACE));
             assert!(m.spec.validate().is_ok());
         }
 
-        // metrics-apiserver
         let m = &members[0];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-metrics-apiserver"));
         assert_eq!(m.spec.ports[0].port, 6443);
@@ -169,13 +157,11 @@ mod tests {
         assert!(m.spec.allowed_callers.is_empty());
         assert_eq!(m.spec.dependencies[0].name, "keda-operator");
 
-        // admission-webhooks
         let m = &members[1];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-admission-webhooks"));
         assert_eq!(m.spec.ports[0].port, 9443);
         assert_eq!(m.spec.ports[0].peer_auth, PeerAuth::Webhook);
 
-        // operator
         let m = &members[2];
         assert_eq!(m.metadata.name.as_deref(), Some("keda-operator"));
         assert_eq!(m.spec.ports[0].port, 9666);

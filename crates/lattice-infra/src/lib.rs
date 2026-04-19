@@ -4,7 +4,7 @@
 //! - **PKI**: CA, certificate generation, CSR signing.
 //! - **mTLS**: TLS configuration for gRPC (re-exported at crate root).
 //! - **Bootstrap**: Helm-rendered manifests for components not yet migrated
-//!   to their own install crates (GPU operator, KEDA, Kthena, Prometheus).
+//!   to their own install crates (GPU operator, Kthena, Prometheus).
 //!
 //! This crate MUST NOT depend on per-dependency install crates. It owns only
 //! the components whose install it still renders directly. The full aggregate
@@ -33,7 +33,6 @@ pub fn bootstrap_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             bootstrap::gpu::generate_gpu_stack(),
         ));
-        set.extend(extract_image_registries(bootstrap::keda::generate_keda()));
         set.extend(extract_image_registries(
             bootstrap::kthena::generate_kthena(),
         ));

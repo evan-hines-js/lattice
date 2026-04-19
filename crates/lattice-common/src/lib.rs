@@ -314,6 +314,10 @@ pub const MONITORING_NAMESPACE: &str = "monitoring";
 pub const VMAGENT_NODE_NAME: &str = "vmagent";
 /// ServiceAccount name for vmagent (used as SPIFFE identity for metrics scraping)
 pub const VMAGENT_SA_NAME: &str = "vmagent-lattice-metrics";
+/// vmselect read-path LMM name — the canonical target KEDA and other consumers
+/// resolve against when querying VictoriaMetrics. Owned by the VictoriaMetrics
+/// install crate but declared here so dependents don't have to depend on it.
+pub const VM_READ_TARGET_LMM_NAME: &str = "vm-read-target";
 
 // Kthena well-known identities
 /// Namespace where Kthena inference routing components are deployed
