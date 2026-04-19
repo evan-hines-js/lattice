@@ -66,6 +66,7 @@ pub use install::eso::{ESOInstall, ESOInstallSpec};
 pub use install::istio::{IstioInstall, IstioInstallSpec};
 pub use install::metrics_server::{MetricsServerInstall, MetricsServerInstallSpec};
 pub use install::tetragon::{TetragonInstall, TetragonInstallSpec};
+pub use install::velero::{VeleroInstall, VeleroInstallSpec};
 pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec};
 pub use install::{
     HealthGate, InstallPhase, InstallResource, InstallSpecBase, InstallStatus, UpgradeAttempt,

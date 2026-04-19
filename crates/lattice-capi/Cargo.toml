@@ -24,6 +24,7 @@ lattice-volcano = { workspace = true }
 lattice-cilium = { workspace = true }
 lattice-istio = { workspace = true }
 lattice-metrics-server = { workspace = true }
+lattice-velero = { workspace = true }
 
 # Kubernetes
 kube = { workspace = true }

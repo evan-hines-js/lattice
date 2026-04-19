@@ -563,6 +563,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_metrics_server::install::reconcile,
         "MetricsServerInstall",
     );
+    ctx.spawn_provider(
+        "velero-install",
+        lattice_velero::install::reconcile,
+        "VeleroInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

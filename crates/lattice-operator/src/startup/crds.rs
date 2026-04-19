@@ -12,7 +12,7 @@ use lattice_crd::crd::{
     ESOInstall, ImageProvider, InfraProvider, IstioInstall, LatticeCluster, LatticeClusterBackup,
     LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
     LatticeQuota, LatticeRestore, LatticeService, MetricsServerInstall, OIDCProvider,
-    SecretProvider, TetragonInstall, VolcanoInstall,
+    SecretProvider, TetragonInstall, VeleroInstall, VolcanoInstall,
 };
 
 /// CRD definition with name and resource
@@ -97,6 +97,10 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "metricsserverinstalls.lattice.dev",
             crd: MetricsServerInstall::crd(),
+        },
+        CrdDef {
+            name: "veleroinstalls.lattice.dev",
+            crd: VeleroInstall::crd(),
         },
     ]
 }

@@ -47,6 +47,7 @@ members = [
     "crates/lattice-cilium",
     "crates/lattice-istio",
     "crates/lattice-metrics-server",
+    "crates/lattice-velero",
 ]
 
 [workspace.package]
@@ -100,6 +101,7 @@ lattice-volcano-policy = { path = "crates/lattice-volcano-policy" }
 lattice-cilium = { path = "crates/lattice-cilium" }
 lattice-istio = { path = "crates/lattice-istio" }
 lattice-metrics-server = { path = "crates/lattice-metrics-server" }
+lattice-velero = { path = "crates/lattice-velero" }
 
 # Optimization
 good_lp = { version = "1.15", default-features = false, features = ["microlp"] }

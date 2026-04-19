@@ -58,6 +58,7 @@ lattice-volcano.workspace = true
 lattice-cilium.workspace = true
 lattice-istio.workspace = true
 lattice-metrics-server.workspace = true
+lattice-velero.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true

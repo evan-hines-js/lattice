@@ -1,15 +1,12 @@
-//! Velero manifest generation
-//!
-//! Embeds pre-rendered Velero manifests from build time.
+//! Velero helm chart + mesh enrollment manifests.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use lattice_common::LABEL_NAME;
-use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
-
 use lattice_common::kube_utils::split_yaml_documents;
 use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
+use lattice_common::LABEL_NAME;
+use lattice_crd::crd::{LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberTarget};
 
 static VELERO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     let mut manifests = vec![namespace_yaml_ambient("velero")];
@@ -20,17 +17,19 @@ static VELERO_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     manifests
 });
 
+/// Velero chart version pinned at build time from `versions.toml`.
 pub fn velero_version() -> &'static str {
     env!("VELERO_VERSION")
 }
 
+/// Pre-rendered Velero manifests, including the ambient-enrolled namespace.
 pub fn generate_velero() -> &'static [String] {
     &VELERO_MANIFESTS
 }
 
 /// Generate LatticeMeshMembers for Velero components.
 ///
-/// - **velero**: backup controller, egress-only (K8s API + cloud storage)
+/// Velero is the backup controller: egress-only (K8s API + cloud storage).
 pub fn generate_velero_mesh_members() -> Vec<LatticeMeshMember> {
     vec![mesh_member(
         "velero",

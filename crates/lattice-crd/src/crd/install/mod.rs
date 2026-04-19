@@ -12,6 +12,7 @@ pub mod eso;
 pub mod istio;
 pub mod metrics_server;
 pub mod tetragon;
+pub mod velero;
 pub mod volcano;
 
 use schemars::JsonSchema;

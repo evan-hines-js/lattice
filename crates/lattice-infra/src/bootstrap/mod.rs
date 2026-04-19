@@ -15,7 +15,6 @@ pub mod gpu;
 pub mod keda;
 pub mod kthena;
 pub mod prometheus;
-pub mod velero;
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -320,30 +319,6 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
 
         phases.push(InfraPhase {
             name: "gpu",
-            components,
-        });
-    }
-
-    // Phase 5: backup (conditional)
-    if config.backups.enabled {
-        let mut components = vec![InfraComponent {
-            name: "velero",
-            version: velero::velero_version(),
-            manifests: velero::generate_velero().to_vec(),
-            health_namespace: Some("velero"),
-        }];
-
-        if !config.skip_service_mesh {
-            components.push(InfraComponent {
-                name: "velero-mesh-policies",
-                version: "1",
-                manifests: serialize_lmms(velero::generate_velero_mesh_members())?,
-                health_namespace: None,
-            });
-        }
-
-        phases.push(InfraPhase {
-            name: "backup",
             components,
         });
     }

@@ -3216,6 +3216,7 @@ dependencies = [
  "lattice-metrics-server",
  "lattice-secret-provider",
  "lattice-tetragon",
+ "lattice-velero",
  "lattice-volcano",
  "mockall",
  "rand 0.10.1",
@@ -3429,6 +3430,7 @@ dependencies = [
  "lattice-proto",
  "lattice-secret-provider",
  "lattice-tetragon",
+ "lattice-velero",
  "lattice-volcano",
  "mockall",
  "parking_lot",
@@ -3869,6 +3871,7 @@ dependencies = [
  "lattice-secret-provider",
  "lattice-service",
  "lattice-tetragon",
+ "lattice-velero",
  "lattice-volcano",
  "lattice-webhook",
  "mockall",
@@ -4067,6 +4070,20 @@ dependencies = [
  "lattice-common",
  "lattice-crd",
  "serde_json",
+]
+
+[[package]]
+name = "lattice-velero"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

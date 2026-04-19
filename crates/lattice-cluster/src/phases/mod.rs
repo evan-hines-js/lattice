@@ -282,6 +282,12 @@ pub async fn reconcile_infrastructure(
             .map_err(|e| Error::internal(format!("failed to ensure MetricsServerInstall: {}", e)))?;
     }
 
+    if cluster.spec.backups.enabled {
+        lattice_velero::install::ensure_install(client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure VeleroInstall: {}", e)))?;
+    }
+
     if let Some(ref topo) = cluster.spec.network_topology {
         if let Some(cm) =
             lattice_volcano::install::manifests::generate_topology_discovery_configmap(

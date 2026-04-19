@@ -232,10 +232,6 @@ fn main() {
         versions.resources["gateway-api"].version
     );
     println!(
-        "cargo:rustc-env=VELERO_VERSION={}",
-        versions.charts["velero"].version
-    );
-    println!(
         "cargo:rustc-env=GPU_OPERATOR_VERSION={}",
         versions.charts["gpu-operator"].version
     );
@@ -259,36 +255,6 @@ fn main() {
 
     // Helper to build chart path
     let chart = |filename: &str| charts_dir.join(filename);
-
-    // Velero
-    let yaml = run_helm_template(
-        "velero",
-        &chart(&format!("velero-{}.tgz", versions.charts["velero"].version)),
-        "velero",
-        &[
-            "--set",
-            "deployNodeAgent=true",
-            "--set",
-            "snapshotsEnabled=true",
-            "--set",
-            "initContainers[0].name=velero-plugin-for-aws",
-            "--set",
-            "initContainers[0].image=velero/velero-plugin-for-aws:v1.13.0",
-            "--set",
-            "initContainers[0].imagePullPolicy=IfNotPresent",
-            "--set",
-            "initContainers[0].volumeMounts[0].mountPath=/target",
-            "--set",
-            "initContainers[0].volumeMounts[0].name=plugins",
-            "--set",
-            "upgradeCRDs=false",
-            "--set-json",
-            "configuration.backupStorageLocation=[]",
-            "--set-json",
-            "configuration.volumeSnapshotLocation=[]",
-        ],
-    );
-    std::fs::write(out_dir.join("velero.yaml"), yaml).expect("write velero.yaml");
 
     // 8. GPU Operator
     let yaml = run_helm_template(

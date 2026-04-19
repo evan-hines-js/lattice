@@ -50,6 +50,9 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_metrics_server::install::manifests::generate_metrics_server(),
         ));
+        set.extend(extract_image_registries(
+            lattice_velero::install::manifests::generate_velero(),
+        ));
         set.into_iter().collect()
     });
     &REGS
