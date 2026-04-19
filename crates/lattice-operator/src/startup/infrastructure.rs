@@ -1,9 +1,12 @@
-//! Phased infrastructure installation
+//! Infrastructure installation at operator startup.
 //!
-//! Infrastructure is installed in two stages:
-//! - `ensure_capi_infrastructure`: blocking — cert-manager, ESO, credential sync, CAPI
-//! - `spawn_general_infrastructure`: background — bootstrap manifests (Gateway
-//!   API CRDs, operator mesh enrollment, cluster-access Cedar policy).
+//! Two stages:
+//! - [`ensure_capi_infrastructure`] — blocking: installs CAPI (and its
+//!   prereqs: cert-manager, ESO, local-webhook ClusterSecretStore). Must
+//!   complete before the rest of the operator starts.
+//! - [`spawn_general_infrastructure`] — background: applies the bootstrap
+//!   manifests (Gateway API CRDs, operator mesh enrollment, cluster-access
+//!   Cedar policy). Runs on a separate task; controllers don't wait on it.
 
 use std::time::Duration;
 
