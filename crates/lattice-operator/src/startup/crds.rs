@@ -13,7 +13,7 @@ use lattice_crd::crd::{
     KthenaInstall, LatticeCluster, LatticeClusterBackup, LatticeClusterRoutes, LatticeJob,
     LatticeMeshMember, LatticeModel, LatticePackage, LatticeQuota, LatticeRestore, LatticeService,
     MetricsServerInstall, OIDCProvider, SecretProvider, TetragonInstall, VeleroInstall,
-    VolcanoInstall,
+    VictoriaMetricsInstall, VolcanoInstall,
 };
 
 /// CRD definition with name and resource
@@ -114,6 +114,10 @@ fn cluster_only_crds() -> Vec<CrdDef> {
         CrdDef {
             name: "kthenainstalls.lattice.dev",
             crd: KthenaInstall::crd(),
+        },
+        CrdDef {
+            name: "victoriametricsinstalls.lattice.dev",
+            crd: VictoriaMetricsInstall::crd(),
         },
     ]
 }

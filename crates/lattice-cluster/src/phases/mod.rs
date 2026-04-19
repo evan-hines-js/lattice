@@ -280,6 +280,9 @@ pub async fn reconcile_infrastructure(
     }
 
     if cluster.spec.monitoring.enabled {
+        lattice_victoria_metrics::install::ensure_install(client, cluster.spec.monitoring.ha)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure VictoriaMetricsInstall: {}", e)))?;
         lattice_metrics_server::install::ensure_install(client)
             .await
             .map_err(|e| Error::internal(format!("failed to ensure MetricsServerInstall: {}", e)))?;

@@ -11,20 +11,11 @@ use lattice_crd::crd::RegistryMirror;
 
 /// All container registries referenced by every Lattice-managed dependency.
 ///
-/// Unions `lattice_infra::bootstrap_registries()` (components still rendered
-/// in `lattice-infra`) with each migrated install crate's registries. This is
-/// the one place in the codebase that knows the full set; `lattice-infra` only
-/// knows its own slice, and each install crate only knows its own slice.
-///
-/// Add one `extend(...)` per migrated component as they come online.
+/// Unions each install crate's registries. Every managed dependency lives in
+/// its own `lattice-<name>` crate; add one `extend(...)` per migration.
 fn upstream_registries() -> &'static [String] {
     static REGS: LazyLock<Vec<String>> = LazyLock::new(|| {
         let mut set: BTreeSet<String> = BTreeSet::new();
-        set.extend(
-            lattice_infra::bootstrap_registries()
-                .iter()
-                .cloned(),
-        );
         set.extend(extract_image_registries(
             lattice_tetragon::install::manifests::generate_tetragon(),
         ));
@@ -61,6 +52,15 @@ fn upstream_registries() -> &'static [String] {
         ));
         set.extend(extract_image_registries(
             lattice_kthena::install::manifests::generate_kthena(),
+        ));
+        // Monitoring stack — HA and single-node variants pull the same images,
+        // but render them separately so whichever variant the cluster runs is
+        // covered.
+        set.extend(extract_image_registries(
+            lattice_victoria_metrics::install::manifests::generate_victoria_metrics(true),
+        ));
+        set.extend(extract_image_registries(
+            lattice_victoria_metrics::install::manifests::generate_victoria_metrics(false),
         ));
         set.into_iter().collect()
     });

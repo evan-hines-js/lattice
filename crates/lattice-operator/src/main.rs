@@ -583,6 +583,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_kthena::install::reconcile,
         "KthenaInstall",
     );
+    ctx.spawn_provider(
+        "victoria-metrics-install",
+        lattice_victoria_metrics::install::reconcile,
+        "VictoriaMetricsInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

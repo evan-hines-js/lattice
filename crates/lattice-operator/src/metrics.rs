@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use lattice_crd::crd::MetricsSnapshot;
-use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
+use lattice_victoria_metrics::{query_path, query_port, query_url};
 use tracing::warn;
 
 /// Maximum length for a PromQL template to prevent resource exhaustion.

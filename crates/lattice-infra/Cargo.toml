@@ -47,8 +47,7 @@ tracing = { workspace = true }
 time = { workspace = true }
 
 [build-dependencies]
-toml.workspace = true
-serde = { version = "1.0", features = ["derive"] }
+lattice-helm-build.workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }

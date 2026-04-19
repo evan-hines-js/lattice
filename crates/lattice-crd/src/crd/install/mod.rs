@@ -16,6 +16,7 @@ pub mod kthena;
 pub mod metrics_server;
 pub mod tetragon;
 pub mod velero;
+pub mod victoria_metrics;
 pub mod volcano;
 
 use schemars::JsonSchema;

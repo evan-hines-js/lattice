@@ -628,7 +628,7 @@ impl WorkloadCompiler {
         monitoring: &MonitoringConfig,
         owner_refs: &[OwnerReference],
     ) -> Result<ScaledObject, CompilationError> {
-        use lattice_infra::bootstrap::prometheus::{query_path, query_port, query_url};
+        use lattice_victoria_metrics::{query_path, query_port, query_url};
 
         let metrics = if autoscaling.metrics.is_empty() {
             vec![AutoscalingMetric {

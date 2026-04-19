@@ -11,7 +11,6 @@
 //!
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
-pub mod prometheus;
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
@@ -23,7 +22,7 @@ use lattice_common::kube_utils::split_yaml_documents;
 use lattice_common::mesh::{kube_apiserver_egress, mesh_member, namespace_yaml_ambient};
 use lattice_common::{
     DEFAULT_AUTH_PROXY_PORT, DEFAULT_WEBHOOK_PORT, LOCAL_SECRETS_PORT, MONITORING_NAMESPACE,
-    OPERATOR_NAME, VMAGENT_SA_NAME,
+    OPERATOR_NAME,
 };
 use lattice_core::{
     DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
@@ -232,41 +231,6 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
         });
     }
 
-    // Phase 3: monitoring (conditional)
-    if config.monitoring.enabled {
-        let mut components = vec![InfraComponent {
-            name: "victoria-metrics",
-            version: prometheus::victoria_metrics_version(),
-            manifests: prometheus::generate_prometheus(config.monitoring.ha).to_vec(),
-            health_namespace: Some("monitoring"),
-        }];
-
-        // Mesh policies for the VictoriaMetrics stack (vmagent wildcard Cedar +
-        // LMMs for vmagent/vm-read-target). KEDA's LMMs moved to its install crate.
-        if !config.skip_service_mesh {
-            let mut mesh_manifests = Vec::new();
-            mesh_manifests.extend(serialize_lmms(
-                prometheus::generate_monitoring_mesh_members(config.monitoring.ha),
-            )?);
-            mesh_manifests.push(
-                serde_json::to_string_pretty(&generate_vmagent_cedar_policy())
-                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
-            );
-
-            components.push(InfraComponent {
-                name: "monitoring-mesh-policies",
-                version: prometheus::victoria_metrics_version(),
-                manifests: mesh_manifests,
-                health_namespace: None,
-            });
-        }
-
-        phases.push(InfraPhase {
-            name: "monitoring",
-            components,
-        });
-    }
-
     Ok(phases)
 }
 
@@ -424,32 +388,6 @@ pub fn generate_operator_mesh_member() -> LatticeMeshMember {
             advertise: None,
         },
     )
-}
-
-/// Generate the CedarPolicy that permits vmagent's wildcard outbound.
-///
-/// vmagent uses `depends_all: true` to scrape metrics from any service that
-/// exposes a "metrics" port. This Cedar policy authorizes that wildcard.
-fn generate_vmagent_cedar_policy() -> CedarPolicy {
-    let mut policy = CedarPolicy::new(
-        "vmagent-wildcard-outbound",
-        CedarPolicySpec {
-            description: Some("Allow vmagent wildcard outbound for metrics scraping".to_string()),
-            policies: format!(
-                r#"permit(
-    principal == Lattice::Service::"{}/{}",
-    action == Lattice::Action::"AllowWildcard",
-    resource == Lattice::Mesh::"outbound"
-);"#,
-                MONITORING_NAMESPACE, VMAGENT_SA_NAME,
-            ),
-            priority: 0,
-            enabled: true,
-            propagate: true,
-        },
-    );
-    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
-    policy
 }
 
 /// Generate the CedarPolicy that grants cluster access for peer route sync.

@@ -62,6 +62,7 @@ lattice-keda.workspace = true
 lattice-kthena.workspace = true
 lattice-metrics-server.workspace = true
 lattice-velero.workspace = true
+lattice-victoria-metrics.workspace = true
 
 kube.workspace = true
 k8s-openapi.workspace = true
