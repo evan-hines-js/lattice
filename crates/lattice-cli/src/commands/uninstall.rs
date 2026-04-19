@@ -152,12 +152,6 @@ impl Uninstaller {
             .map_err(|e| Error::command_failed(format!("Failed to create target client: {}", e)))
     }
 
-    async fn bootstrap_client(&self) -> Result<Client> {
-        kube_utils::create_client(Some(&self.bootstrap_kubeconfig_path()), None, None)
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to create bootstrap client: {}", e)))
-    }
-
     /// Delete the LatticeCluster to stop the operator from reconciling
     ///
     /// This must be called BEFORE deleting the cell service, otherwise the
@@ -389,18 +383,14 @@ impl Uninstaller {
             self.cluster_name, self.provider
         );
 
-        let uninstall_cluster = self.uninstall_cluster_name();
-        info!("Creating temporary kind cluster '{}'...", uninstall_cluster);
-        kind_utils::create_kind_cluster(&uninstall_cluster, &self.bootstrap_kubeconfig_path())
-            .await?;
-
         let result = self.run_uninstall().await;
 
+        let kind = self.uninstall_cluster_name();
         if result.is_err() && self.keep_bootstrap_on_failure {
             info!("Keeping kind cluster for debugging (--keep-bootstrap-on-failure)");
         } else {
-            info!("Deleting temporary kind cluster '{}'...", uninstall_cluster);
-            if let Err(e) = kind_utils::delete_kind_cluster(&uninstall_cluster).await {
+            info!("Deleting temporary kind cluster '{}'...", kind);
+            if let Err(e) = kind_utils::delete_kind_cluster(&kind).await {
                 tracing::warn!("Failed to delete kind cluster: {}", e);
             }
         }
@@ -408,23 +398,75 @@ impl Uninstaller {
         result
     }
 
+    /// Read the operator image + registry dockerconfigjson from the target
+    /// cluster so the uninstall kind cluster can pull the same image.
+    ///
+    /// Reading from the target avoids forcing the user to pass flags that
+    /// should already be known — whatever is running the target is what
+    /// needs to run the kind cluster.
+    async fn read_operator_image(&self, target: &Client) -> Result<(String, Option<String>)> {
+        use k8s_openapi::api::apps::v1::Deployment;
+
+        let deployments: Api<Deployment> =
+            Api::namespaced(target.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let op = deployments
+            .get(lattice_common::OPERATOR_NAME)
+            .await
+            .map_err(|e| {
+                Error::command_failed(format!(
+                    "failed to read operator Deployment from target: {e}"
+                ))
+            })?;
+        let image = op
+            .spec
+            .as_ref()
+            .and_then(|s| s.template.spec.as_ref())
+            .and_then(|s| s.containers.first())
+            .and_then(|c| c.image.clone())
+            .ok_or_else(|| Error::command_failed("target operator has no image"))?;
+
+        // lattice-registry Secret (dockerconfigjson) — present iff the
+        // operator image needs auth to pull.
+        let secrets: Api<Secret> = Api::namespaced(target.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let creds = match secrets.get(lattice_common::REGISTRY_CREDENTIALS_SECRET).await {
+            Ok(s) => s
+                .data
+                .and_then(|d| d.get(".dockerconfigjson").cloned())
+                .and_then(|b| String::from_utf8(b.0).ok()),
+            Err(kube::Error::Api(e)) if e.code == 404 => None,
+            Err(e) => {
+                return Err(Error::command_failed(format!(
+                    "failed to read lattice-registry Secret: {e}"
+                )));
+            }
+        };
+        Ok((image, creds))
+    }
+
     async fn run_uninstall(&self) -> Result<()> {
-        let bootstrap_client = self.bootstrap_client().await?;
         let target_client = self.target_client().await?;
 
-        // Install Lattice CRDs on the kind cluster so copied InfraProvider /
-        // ImageProvider resources have a schema to land against. We don't run
-        // the full operator here — this cluster only exists to host a reverse
-        // `move` and tear down. CAPI prereqs (cert-manager + ESO +
-        // local-webhook) are installed by `ensure_capi_providers` below.
-        info!("Installing Lattice CRDs on kind cluster...");
-        crate::commands::apply_lattice_crds(&bootstrap_client).await?;
+        // Mirror the target's operator image + registry creds onto the kind
+        // cluster's operator so it can pull the same private image.
+        let (image, registry_credentials) = self.read_operator_image(&target_client).await?;
 
-        // Copy InfraProvider + ImageProvider(s) + backing Secrets from the
-        // target cluster so the CAPI provider Deployments on the kind cluster
-        // can pull private images and reconcile using the same ESO-backed
-        // credentials. Must happen before `ensure_capi_providers` so the
-        // operator on the kind cluster sees the resources it needs.
+        // Stand up kind + operator using the same code path as `lattice
+        // install`. Operator starts in bootstrap mode, waits for the
+        // InfraProvider we're about to copy, then installs cert-manager +
+        // ESO + local-webhook + CAPI providers automatically.
+        let bootstrap_client = crate::commands::prepare_ephemeral_cluster(
+            &self.uninstall_cluster_name(),
+            &self.bootstrap_kubeconfig_path(),
+            &image,
+            registry_credentials.as_deref(),
+            self.provider,
+            &self.provider_ref,
+        )
+        .await?;
+
+        // Copy InfraProvider + ImageProviders + backing Secrets so the
+        // operator on the kind cluster can reconcile them (and so the CAPI
+        // provider Deployments can pull private images).
         info!("Copying distributable resources from target to kind cluster...");
         crate::commands::copy_lattice_resources(
             &target_client,
@@ -433,17 +475,28 @@ impl Uninstaller {
         )
         .await?;
 
-        info!("Installing CAPI providers on kind cluster...");
-        self.install_capi_providers(&bootstrap_client).await?;
+        // Wait for CAPI to land — operator's ensure_capi_on_bootstrap installs
+        // it once the InfraProvider is present (which we just copied).
+        info!("Waiting for CAPI providers on kind cluster...");
+        for crd in [
+            "clusters.cluster.x-k8s.io",
+            "machines.cluster.x-k8s.io",
+            "clusterresourcesets.addons.cluster.x-k8s.io",
+        ] {
+            kube_utils::wait_for_crd(&bootstrap_client, crd, Duration::from_secs(300))
+                .await
+                .cmd_err()?;
+        }
 
-        // Delete LatticeCluster first to stop the operator from reconciling.
-        // This prevents the operator from recreating the LoadBalancer service.
+        // Stop the target's operator reconcile so it doesn't fight the
+        // teardown (recreates LoadBalancer, etc.).
         info!("Deleting LatticeCluster to stop operator reconciliation...");
         self.delete_lattice_cluster().await?;
-
         info!("Cleaning up LoadBalancer service...");
         self.delete_cell_service().await?;
 
+        // Reverse pivot: CAPI resources move target → kind, so kind's
+        // operator now owns the cluster lifecycle.
         info!("Moving CAPI resources from target to kind cluster...");
         let bootstrap_kubeconfig = self.bootstrap_kubeconfig_path();
         lattice_move::local_move(
@@ -473,11 +526,6 @@ impl Uninstaller {
 
         info!("Cluster '{}' successfully uninstalled", self.cluster_name);
         Ok(())
-    }
-
-    async fn install_capi_providers(&self, bootstrap_client: &Client) -> Result<()> {
-        crate::commands::ensure_capi_providers(bootstrap_client, self.provider, &self.provider_ref)
-            .await
     }
 }
 

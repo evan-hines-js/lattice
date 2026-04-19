@@ -25,7 +25,6 @@ const API_SERVER_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const CONTROL_PLANE_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const MACHINE_PROVISIONING_TIMEOUT: Duration = Duration::from_secs(600);
 const CAPI_CRD_TIMEOUT: Duration = Duration::from_secs(300);
-const OPERATOR_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const CAPI_CONTROLLERS_TIMEOUT: Duration = Duration::from_secs(300);
 const LATTICE_OPERATOR_TIMEOUT: Duration = Duration::from_secs(300);
 const CRD_APPLY_TIMEOUT: Duration = Duration::from_secs(120);
@@ -36,7 +35,7 @@ const API_SERVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 use lattice_cell::bootstrap::{
-    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator, ManifestGenerator,
+    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator,
 };
 use lattice_common::credentials::{
     AwsCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
@@ -463,33 +462,20 @@ impl Installer {
     async fn run_bootstrap(&self) -> Result<()> {
         let bootstrap_name = self.bootstrap_cluster_name();
         info!(
-            "[Phase 1/8] Creating kind bootstrap cluster '{}'...",
+            "[Phase 1/7] Preparing kind bootstrap cluster '{}'...",
             bootstrap_name
         );
-        kind_utils::create_kind_cluster(&bootstrap_name, &self.bootstrap_kubeconfig_path()).await?;
-
-        let bootstrap_client = self.bootstrap_client().await?;
-
-        info!("[Phase 2/8] Deploying Lattice operator...");
-        self.deploy_lattice_operator(&bootstrap_client).await?;
-
-        // Wait for operator to register Lattice CRDs before creating resources
-        kube_utils::wait_for_crd(
-            &bootstrap_client,
-            "infraproviders.lattice.dev",
-            CRD_APPLY_TIMEOUT,
+        let bootstrap_client = crate::commands::prepare_ephemeral_cluster(
+            &bootstrap_name,
+            &self.bootstrap_kubeconfig_path(),
+            &self.image,
+            self.registry_credentials.as_deref(),
+            self.provider(),
+            &self.cluster.spec.provider_ref,
         )
-        .await
-        .cmd_err()?;
-        kube_utils::wait_for_crd(
-            &bootstrap_client,
-            "imageproviders.lattice.dev",
-            CRD_APPLY_TIMEOUT,
-        )
-        .await
-        .cmd_err()?;
+        .await?;
 
-        info!("[Phase 3/8] Seeding credential Secrets and applying install bundle...");
+        info!("[Phase 2/7] Seeding credential Secrets and applying install bundle...");
         self.seed_provider_credentials(&bootstrap_client).await?;
         self.seed_registry_credentials(&bootstrap_client).await?;
         self.apply_pre_cluster_docs(&bootstrap_client).await?;
@@ -500,22 +486,22 @@ impl Installer {
         self.apply_registry_mirror_credentials(&bootstrap_client)
             .await?;
 
-        info!("[Phase 4/8] Creating management cluster LatticeCluster CR...");
+        info!("[Phase 3/7] Creating management cluster LatticeCluster CR...");
         self.create_management_cluster_crd(&bootstrap_client)
             .await?;
 
-        info!("[Phase 5/8] Waiting for management cluster to be provisioned...");
+        info!("[Phase 4/7] Waiting for management cluster to be provisioned...");
         self.wait_for_management_cluster(&bootstrap_client).await?;
 
-        info!("[Phase 6/8] Applying bootstrap manifests to management cluster...");
+        info!("[Phase 5/7] Applying bootstrap manifests to management cluster...");
         self.apply_bootstrap_to_management(&bootstrap_client)
             .await?;
 
-        info!("[Phase 7/8] Pivoting CAPI resources to management cluster...");
+        info!("[Phase 6/7] Pivoting CAPI resources to management cluster...");
         self.pivot_capi_resources().await?;
 
         info!(
-            "[Phase 8/8] Deleting bootstrap cluster '{}'...",
+            "[Phase 7/7] Deleting bootstrap cluster '{}'...",
             bootstrap_name
         );
         kind_utils::delete_kind_cluster(&bootstrap_name).await?;
@@ -545,51 +531,6 @@ impl Installer {
         )
         .await
         .cmd_err()
-    }
-
-    async fn deploy_lattice_operator(&self, client: &Client) -> Result<()> {
-        let generator = DefaultManifestGenerator::new();
-        let all_manifests = generator
-            .generate(
-                &self.image,
-                self.registry_credentials.as_deref(),
-                Some("lattice-installer"),
-                None,
-            )
-            .await
-            .map_err(|e| {
-                crate::Error::command_failed(format!("manifest generation failed: {e}"))
-            })?;
-
-        let provider_str = self.provider().to_string();
-        let provider_ref = &self.cluster.spec.provider_ref;
-        let operator_manifests: Vec<String> = all_manifests
-            .iter()
-            .filter(|m: &&String| m.starts_with("{"))
-            .map(|s| {
-                if kube_utils::is_deployment_json(s) {
-                    add_bootstrap_env(s, &provider_str, provider_ref)
-                } else {
-                    s.to_string()
-                }
-            })
-            .collect();
-
-        apply_with_retry(client, &operator_manifests, "operator manifests")
-            .await
-            .cmd_err()?;
-
-        info!("Waiting for Lattice operator to be ready...");
-        kube_utils::wait_for_deployment(
-            client,
-            OPERATOR_NAME,
-            LATTICE_SYSTEM_NAMESPACE,
-            OPERATOR_READY_TIMEOUT,
-        )
-        .await
-        .cmd_err()?;
-
-        Ok(())
     }
 
     async fn wait_for_capi_crds(&self, client: &Client) -> Result<()> {
@@ -871,14 +812,39 @@ impl Installer {
         .await
     }
 
-    /// Installs CAPI controllers on the management cluster using the native installer.
+    /// Installs CAPI controllers on the management cluster.
+    ///
+    /// Runs before the CAPI resource pivot so the target already has the
+    /// controllers that will own the moved CRs. The operator on the
+    /// management cluster is still in cluster-mode and won't install CAPI
+    /// until a LatticeCluster lands — that happens as part of pivot, so
+    /// we install it directly here.
     async fn install_capi_on_management(&self, mgmt_client: &Client) -> Result<()> {
-        crate::commands::ensure_capi_providers(
+        use kube::Api;
+        use lattice_capi::installer::{ensure_capi_providers_for, NativeInstaller};
+        use lattice_crd::crd::InfraProvider;
+
+        let provider_ref = &self.cluster.spec.provider_ref;
+        let cps: Api<InfraProvider> =
+            Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
+        let cp = match cps.get(provider_ref).await {
+            Ok(cp) => Some(cp),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => None,
+            Err(e) => {
+                return Err(Error::command_failed(format!(
+                    "failed to read InfraProvider '{provider_ref}': {e}"
+                )));
+            }
+        };
+        ensure_capi_providers_for(
             mgmt_client,
+            &NativeInstaller::new(),
             self.provider(),
-            &self.cluster.spec.provider_ref,
+            cp.as_ref(),
+            "lattice-cli",
         )
         .await
+        .cmd_err()
     }
 
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.
@@ -1583,54 +1549,6 @@ async fn wait_for_control_plane_ready(client: &Client, timeout: Duration) -> Res
     .await
 }
 
-/// Add bootstrap cluster environment variables to a deployment.
-fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) -> String {
-    add_deployment_env(
-        deployment_json,
-        &[
-            ("LATTICE_BOOTSTRAP_CLUSTER", "true"),
-            ("LATTICE_PROVIDER", provider),
-            ("LATTICE_PROVIDER_REF", provider_ref),
-        ],
-    )
-}
-
-/// Add environment variables to a deployment JSON.
-/// Only adds variables that don't already exist.
-fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
-        return deployment_json.to_string();
-    };
-
-    let Some(containers) = value
-        .pointer_mut("/spec/template/spec/containers")
-        .and_then(|c| c.as_array_mut())
-    else {
-        return deployment_json.to_string();
-    };
-
-    for container in containers {
-        let Some(env) = container.as_object_mut().and_then(|c| {
-            c.entry("env")
-                .or_insert_with(|| serde_json::json!([]))
-                .as_array_mut()
-        }) else {
-            continue;
-        };
-
-        for (name, value_str) in vars {
-            if !env
-                .iter()
-                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some(*name))
-            {
-                env.push(serde_json::json!({"name": *name, "value": *value_str}));
-            }
-        }
-    }
-
-    serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
-}
-
 /// Build registry credentials from GHCR_USER/GHCR_TOKEN environment variables.
 fn credentials_from_env() -> Option<String> {
     use base64::Engine;
@@ -1856,99 +1774,6 @@ spec: { type: docker }
         );
         let err = parse_err(&yaml);
         assert!(err.contains("must have a `kind`"), "got: {err}");
-    }
-
-    #[test]
-    fn test_add_bootstrap_env_adds_all_env_vars() {
-        let deployment = r#"{
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [{
-                            "name": "lattice",
-                            "image": "lattice:latest"
-                        }]
-                    }
-                }
-            }
-        }"#;
-
-        let result = add_bootstrap_env(deployment, "proxmox", "proxmox");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).expect("result should be valid JSON");
-
-        let env = parsed
-            .pointer("/spec/template/spec/containers/0/env")
-            .expect("env path should exist in deployment")
-            .as_array()
-            .expect("env should be an array");
-
-        assert!(env.iter().any(|e| {
-            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER")
-                && e.get("value").and_then(|v| v.as_str()) == Some("true")
-        }));
-
-        assert!(env.iter().any(|e| {
-            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER")
-                && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
-        }));
-
-        assert!(env.iter().any(|e| {
-            e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER_REF")
-                && e.get("value").and_then(|v| v.as_str()) == Some("proxmox")
-        }));
-    }
-
-    #[test]
-    fn test_add_bootstrap_env_idempotent() {
-        let deployment = r#"{
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "spec": {
-                "template": {
-                    "spec": {
-                        "containers": [{
-                            "name": "lattice",
-                            "env": [
-                                {"name": "LATTICE_BOOTSTRAP_CLUSTER", "value": "true"},
-                                {"name": "LATTICE_PROVIDER", "value": "docker"}
-                            ]
-                        }]
-                    }
-                }
-            }
-        }"#;
-
-        let result = add_bootstrap_env(deployment, "docker", "docker");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result).expect("result should be valid JSON");
-
-        let env = parsed
-            .pointer("/spec/template/spec/containers/0/env")
-            .expect("env path should exist in deployment")
-            .as_array()
-            .expect("env should be an array");
-
-        let bootstrap_count = env
-            .iter()
-            .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_BOOTSTRAP_CLUSTER"))
-            .count();
-        assert_eq!(bootstrap_count, 1);
-
-        let provider_count = env
-            .iter()
-            .filter(|e| e.get("name").and_then(|n| n.as_str()) == Some("LATTICE_PROVIDER"))
-            .count();
-        assert_eq!(provider_count, 1);
-    }
-
-    #[test]
-    fn test_add_deployment_env_invalid_json() {
-        let invalid = "not json";
-        let result = add_deployment_env(invalid, &[("TEST", "value")]);
-        assert_eq!(result, invalid);
     }
 
     #[test]

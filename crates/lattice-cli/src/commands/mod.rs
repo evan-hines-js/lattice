@@ -2,11 +2,17 @@
 
 use std::fmt::Display;
 use std::future::Future;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
+
+use lattice_cell::bootstrap::{DefaultManifestGenerator, ManifestGenerator};
+use lattice_common::{kube_utils, OPERATOR_NAME};
+use lattice_core::LATTICE_SYSTEM_NAMESPACE;
+use lattice_crd::crd::ProviderType;
 
 use crate::{Error, Result};
 
@@ -208,35 +214,128 @@ pub async fn kube_client_from_kubeconfig(
     Client::try_from(config).cmd_err()
 }
 
-/// Apply just the Lattice CRD manifests to `client`.
-///
-/// Used by `uninstall` to prep a fresh kind cluster that doesn't need the full
-/// operator running, just the CRDs so copied `InfraProvider`/`ImageProvider`
-/// resources have a schema to land against.
-pub async fn apply_lattice_crds(client: &Client) -> Result<()> {
-    let crd_manifests = lattice_operator::startup::all_crd_manifests();
+/// Timeout waiting for kind's API server to register Lattice CRDs.
+const CRD_REGISTER_TIMEOUT: Duration = Duration::from_secs(90);
+/// Timeout waiting for the operator Deployment to report Available.
+const OPERATOR_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
-    lattice_common::kube_utils::apply_manifests(
-        client,
-        &crd_manifests.iter().map(String::as_str).collect::<Vec<_>>(),
-        &Default::default(),
+/// Stand up a kind cluster running the Lattice operator in bootstrap mode.
+///
+/// Shared by `install` (to stage initial provisioning) and `uninstall` (to
+/// host a reverse CAPI pivot). Both flows need the same thing: a kind cluster
+/// whose operator is configured to install CAPI providers for `provider` /
+/// `provider_ref`, register Lattice CRDs, and stand up cert-manager + ESO +
+/// the local-secrets webhook. Diverging these setups invites exactly the
+/// class of bugs this function exists to prevent.
+///
+/// Returns a [`Client`] connected to the new kind cluster. On success, the
+/// operator Deployment is Available and `infraproviders.lattice.dev` is
+/// registered — callers can immediately apply InfraProvider CRs.
+pub async fn prepare_ephemeral_cluster(
+    kind_name: &str,
+    kubeconfig_path: &Path,
+    image: &str,
+    registry_credentials: Option<&str>,
+    provider: ProviderType,
+    provider_ref: &str,
+) -> Result<Client> {
+    info!(kind = kind_name, "Creating kind cluster");
+    kind_utils::create_kind_cluster(kind_name, kubeconfig_path).await?;
+
+    let client = kube_utils::create_client(Some(kubeconfig_path), None, None)
+        .await
+        .cmd_err()?;
+
+    info!("Deploying Lattice operator on kind cluster");
+    let manifests = DefaultManifestGenerator::new()
+        .generate(image, registry_credentials, Some("lattice-installer"), None)
+        .await
+        .map_err(|e| Error::command_failed(format!("manifest generation failed: {e}")))?;
+
+    // Inject bootstrap env vars on the Deployment document so the operator
+    // runs `ensure_capi_on_bootstrap` — waits for InfraProvider `provider_ref`,
+    // then installs cert-manager + ESO + local-webhook + CAPI providers.
+    let provider_str = provider.to_string();
+    let operator_manifests: Vec<String> = manifests
+        .iter()
+        .filter(|m| m.starts_with('{'))
+        .map(|s| {
+            if kube_utils::is_deployment_json(s) {
+                add_bootstrap_env(s, &provider_str, provider_ref)
+            } else {
+                s.to_string()
+            }
+        })
+        .collect();
+
+    let refs: Vec<&str> = operator_manifests.iter().map(String::as_str).collect();
+    kube_utils::apply_manifests(&client, &refs, &Default::default())
+        .await
+        .cmd_err()?;
+
+    info!("Waiting for operator Deployment Available");
+    kube_utils::wait_for_deployment(
+        &client,
+        OPERATOR_NAME,
+        LATTICE_SYSTEM_NAMESPACE,
+        OPERATOR_READY_TIMEOUT,
     )
     .await
     .cmd_err()?;
 
-    // Establish-wait for the two CRDs the uninstall flow actually writes to.
-    // Everything else lands as a by-product and isn't on the critical path.
-    for crd in ["infraproviders.lattice.dev", "imageproviders.lattice.dev"] {
-        lattice_common::kube_utils::wait_for_crd(
-            client,
-            crd,
-            std::time::Duration::from_secs(60),
-        )
+    info!("Waiting for Lattice CRDs to register");
+    kube_utils::wait_for_crd(&client, "infraproviders.lattice.dev", CRD_REGISTER_TIMEOUT)
         .await
         .cmd_err()?;
-    }
+    kube_utils::wait_for_crd(&client, "imageproviders.lattice.dev", CRD_REGISTER_TIMEOUT)
+        .await
+        .cmd_err()?;
 
-    Ok(())
+    Ok(client)
+}
+
+/// Add LATTICE_BOOTSTRAP_CLUSTER + LATTICE_PROVIDER + LATTICE_PROVIDER_REF env
+/// vars to a Deployment JSON, leaving everything else intact. No-op if the
+/// input isn't a Deployment or if the variables already exist.
+pub fn add_bootstrap_env(deployment_json: &str, provider: &str, provider_ref: &str) -> String {
+    add_deployment_env(
+        deployment_json,
+        &[
+            ("LATTICE_BOOTSTRAP_CLUSTER", "true"),
+            ("LATTICE_PROVIDER", provider),
+            ("LATTICE_PROVIDER_REF", provider_ref),
+        ],
+    )
+}
+
+fn add_deployment_env(deployment_json: &str, vars: &[(&str, &str)]) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(deployment_json) else {
+        return deployment_json.to_string();
+    };
+    let Some(containers) = value
+        .pointer_mut("/spec/template/spec/containers")
+        .and_then(|c| c.as_array_mut())
+    else {
+        return deployment_json.to_string();
+    };
+    for container in containers {
+        let Some(env) = container.as_object_mut().and_then(|c| {
+            c.entry("env")
+                .or_insert_with(|| serde_json::json!([]))
+                .as_array_mut()
+        }) else {
+            continue;
+        };
+        for (name, value_str) in vars {
+            if !env
+                .iter()
+                .any(|e| e.get("name").and_then(|n| n.as_str()) == Some(*name))
+            {
+                env.push(serde_json::json!({ "name": name, "value": value_str }));
+            }
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| deployment_json.to_string())
 }
 
 /// Copy every Lattice CRD marked distributable (`InfraProvider`,
@@ -286,39 +385,3 @@ pub async fn copy_lattice_resources(
     Ok(())
 }
 
-/// Ensure CAPI providers are installed for the given provider type.
-///
-/// cert-manager must be installed and ready before calling this function,
-/// as CAPI manifests reference cert-manager CRDs (Certificate, Issuer).
-///
-/// Looks up the named `InfraProvider` in `lattice-system` when present and
-/// materializes its declared `imagePullSecrets` into the CAPI provider
-/// namespace via ESO so the provider Deployment can pull private images.
-/// Shares the `ensure_capi_providers_for` entry point used by the in-cluster
-/// operator startup — one install path, no drift.
-pub async fn ensure_capi_providers(
-    client: &Client,
-    provider: lattice_crd::crd::ProviderType,
-    provider_ref: &str,
-) -> Result<()> {
-    use kube::Api;
-    use lattice_capi::installer::{ensure_capi_providers_for, NativeInstaller};
-    use lattice_core::LATTICE_SYSTEM_NAMESPACE;
-    use lattice_crd::crd::InfraProvider;
-
-    let cps: Api<InfraProvider> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-    let cp = match cps.get(provider_ref).await {
-        Ok(cp) => Some(cp),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => None,
-        Err(e) => {
-            return Err(Error::command_failed(format!(
-                "failed to read InfraProvider '{provider_ref}': {e}"
-            )));
-        }
-    };
-
-    let installer = NativeInstaller::new();
-    ensure_capi_providers_for(client, &installer, provider, cp.as_ref(), "lattice-cli")
-        .await
-        .cmd_err()
-}
