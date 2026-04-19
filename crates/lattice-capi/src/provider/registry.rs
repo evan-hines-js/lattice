@@ -59,6 +59,9 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_gpu_operator::install::manifests::generate_gpu_stack(),
         ));
+        set.extend(extract_image_registries(
+            lattice_kthena::install::manifests::generate_kthena(),
+        ));
         set.into_iter().collect()
     });
     &REGS

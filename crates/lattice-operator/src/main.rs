@@ -578,6 +578,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_gpu_operator::install::reconcile,
         "GpuOperatorInstall",
     );
+    ctx.spawn_provider(
+        "kthena-install",
+        lattice_kthena::install::reconcile,
+        "KthenaInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

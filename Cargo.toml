@@ -48,6 +48,7 @@ members = [
     "crates/lattice-istio",
     "crates/lattice-gpu-operator",
     "crates/lattice-keda",
+    "crates/lattice-kthena",
     "crates/lattice-metrics-server",
     "crates/lattice-velero",
 ]
@@ -104,6 +105,7 @@ lattice-cilium = { path = "crates/lattice-cilium" }
 lattice-istio = { path = "crates/lattice-istio" }
 lattice-gpu-operator = { path = "crates/lattice-gpu-operator" }
 lattice-keda = { path = "crates/lattice-keda" }
+lattice-kthena = { path = "crates/lattice-kthena" }
 lattice-metrics-server = { path = "crates/lattice-metrics-server" }
 lattice-velero = { path = "crates/lattice-velero" }
 

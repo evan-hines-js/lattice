@@ -3215,6 +3215,7 @@ dependencies = [
  "lattice-infra",
  "lattice-istio",
  "lattice-keda",
+ "lattice-kthena",
  "lattice-metrics-server",
  "lattice-secret-provider",
  "lattice-tetragon",
@@ -3429,6 +3430,7 @@ dependencies = [
  "lattice-infra",
  "lattice-istio",
  "lattice-keda",
+ "lattice-kthena",
  "lattice-metrics-server",
  "lattice-move",
  "lattice-proto",
@@ -3761,6 +3763,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-kthena"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lattice-mesh-member"
 version = "0.1.0"
 dependencies = [
@@ -3896,6 +3913,7 @@ dependencies = [
  "lattice-istio",
  "lattice-job",
  "lattice-keda",
+ "lattice-kthena",
  "lattice-mesh-member",
  "lattice-metrics-server",
  "lattice-model",

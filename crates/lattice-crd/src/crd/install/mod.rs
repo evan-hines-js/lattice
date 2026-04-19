@@ -12,6 +12,7 @@ pub mod eso;
 pub mod gpu_operator;
 pub mod istio;
 pub mod keda;
+pub mod kthena;
 pub mod metrics_server;
 pub mod tetragon;
 pub mod velero;

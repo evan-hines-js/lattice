@@ -269,6 +269,9 @@ pub async fn reconcile_infrastructure(
     lattice_cilium::install::ensure_install(client)
         .await
         .map_err(|e| Error::internal(format!("failed to ensure CiliumInstall: {}", e)))?;
+    lattice_kthena::install::ensure_install(client)
+        .await
+        .map_err(|e| Error::internal(format!("failed to ensure KthenaInstall: {}", e)))?;
     if cluster.spec.services {
         let remote_networks = lattice_infra::bootstrap::discover_remote_networks(client).await;
         lattice_istio::install::ensure_install(client, &cluster.name_any(), remote_networks)

@@ -312,37 +312,6 @@ fn main() {
     std::fs::write(out_dir.join("victoria-metrics-single.yaml"), yaml)
         .expect("write victoria-metrics-single.yaml");
 
-    // Kthena model serving (Volcano subproject for disaggregated inference)
-    let yaml = run_helm_template(
-        "kthena",
-        &chart(&format!(
-            "kthena-v{}.tgz",
-            versions.charts["kthena"].version
-        )),
-        "kthena-system",
-        &[
-            "--set",
-            "controller.replicas=1",
-            "--set",
-            "router.replicas=1",
-            "--set",
-            "global.certManagementMode=cert-manager",
-        ],
-    );
-    // Fix upstream chart bug: mutating-webhook annotation references "kthena-webhook-cert"
-    // but the Certificate resource is named "kthena-controller-manager-webhook-cert"
-    let yaml = yaml.replace(
-        "kthena-system/kthena-webhook-cert",
-        "kthena-system/kthena-controller-manager-webhook-cert",
-    );
-    std::fs::write(out_dir.join("kthena.yaml"), yaml).expect("write kthena.yaml");
-
-    // Set Kthena version env var
-    println!(
-        "cargo:rustc-env=KTHENA_VERSION={}",
-        versions.charts["kthena"].version
-    );
-
     // 15. Gateway API CRDs (just copy, not helm)
     let gw_ver = &versions.resources["gateway-api"].version;
     let gw_src = charts_dir.join(format!("gateway-api-crds-v{}.yaml", gw_ver));

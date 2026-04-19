@@ -11,7 +11,6 @@
 //!
 //! All Helm charts are pre-rendered at build time and embedded into the binary.
 
-pub mod kthena;
 pub mod prometheus;
 
 use std::collections::BTreeMap;
@@ -216,41 +215,20 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
         });
     }
 
-    // Phase 2: core services (always installed)
-    {
-        let mut components = vec![InfraComponent {
-            name: "kthena",
-            version: kthena::kthena_version(),
-            manifests: kthena::generate_kthena().to_vec(),
-            health_namespace: Some("kthena-system"),
-        }];
-
-        if !config.skip_service_mesh {
-            let mut mesh_manifests = Vec::new();
-            mesh_manifests.extend(serialize_lmms(kthena::generate_kthena_mesh_members())?);
-            mesh_manifests.push(
-                serde_json::to_string_pretty(&generate_kthena_router_cedar_policy())
-                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
-            );
-            mesh_manifests.push(
-                serde_json::to_string_pretty(&generate_kthena_autoscaler_cedar_policy())
-                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
-            );
-            mesh_manifests.push(
-                serde_json::to_string_pretty(&generate_cluster_access_cedar_policy())
-                    .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?,
-            );
-            components.push(InfraComponent {
-                name: "core-mesh-policies",
-                version: "1",
-                manifests: mesh_manifests,
-                health_namespace: None,
-            });
-        }
-
+    // cluster-access Cedar policy (for peer route proxy) rides along with the
+    // service-mesh phase when mesh is enabled.
+    if !config.skip_service_mesh {
         phases.push(InfraPhase {
-            name: "core",
-            components,
+            name: "cluster-access-policy",
+            components: vec![InfraComponent {
+                name: "cluster-access-policy",
+                version: "1",
+                manifests: vec![serde_json::to_string_pretty(
+                    &generate_cluster_access_cedar_policy(),
+                )
+                .map_err(|e| format!("Failed to serialize CedarPolicy: {e}"))?],
+                health_namespace: None,
+            }],
         });
     }
 
@@ -464,74 +442,6 @@ fn generate_vmagent_cedar_policy() -> CedarPolicy {
     resource == Lattice::Mesh::"outbound"
 );"#,
                 MONITORING_NAMESPACE, VMAGENT_SA_NAME,
-            ),
-            priority: 0,
-            enabled: true,
-            propagate: true,
-        },
-    );
-    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
-    policy
-}
-
-/// Generate the CedarPolicy that permits kthena-router's wildcard traffic.
-///
-/// kthena-router uses `depends_all: true` to reach any model service that
-/// declares it as an allowed caller (outbound), and `allowed_callers: [*]`
-/// so any service can send inference requests through it (inbound).
-fn generate_kthena_router_cedar_policy() -> CedarPolicy {
-    let principal = format!(
-        "{}/{}",
-        lattice_common::KTHENA_NAMESPACE,
-        lattice_common::KTHENA_ROUTER_SA,
-    );
-    let mut policy = CedarPolicy::new(
-        "kthena-router-wildcard",
-        CedarPolicySpec {
-            description: Some(
-                "Allow kthena-router wildcard outbound (model routing) and inbound (inference requests)".to_string(),
-            ),
-            policies: format!(
-                r#"permit(
-    principal == Lattice::Service::"{principal}",
-    action == Lattice::Action::"AllowWildcard",
-    resource == Lattice::Mesh::"outbound"
-);
-
-permit(
-    principal == Lattice::Service::"{principal}",
-    action == Lattice::Action::"AllowWildcard",
-    resource == Lattice::Mesh::"inbound"
-);"#,
-            ),
-            priority: 0,
-            enabled: true,
-            propagate: true,
-        },
-    );
-    policy.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
-    policy
-}
-
-/// Generate the CedarPolicy that permits kthena-autoscaler's wildcard outbound.
-///
-/// kthena-autoscaler uses `depends_all: true` to scrape metrics from model
-/// services for autoscaling decisions. This Cedar policy authorizes that wildcard.
-fn generate_kthena_autoscaler_cedar_policy() -> CedarPolicy {
-    let mut policy = CedarPolicy::new(
-        "kthena-autoscaler-wildcard-outbound",
-        CedarPolicySpec {
-            description: Some(
-                "Allow kthena-autoscaler wildcard outbound for model metrics scraping".to_string(),
-            ),
-            policies: format!(
-                r#"permit(
-    principal == Lattice::Service::"{}/{}",
-    action == Lattice::Action::"AllowWildcard",
-    resource == Lattice::Mesh::"outbound"
-);"#,
-                lattice_common::KTHENA_NAMESPACE,
-                lattice_common::KTHENA_AUTOSCALER_SA,
             ),
             priority: 0,
             enabled: true,
