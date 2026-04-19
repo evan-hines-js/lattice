@@ -276,6 +276,12 @@ pub async fn reconcile_infrastructure(
             .map_err(|e| Error::internal(format!("failed to ensure IstioInstall: {}", e)))?;
     }
 
+    if cluster.spec.monitoring.enabled {
+        lattice_metrics_server::install::ensure_install(client)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure MetricsServerInstall: {}", e)))?;
+    }
+
     if let Some(ref topo) = cluster.spec.network_topology {
         if let Some(cm) =
             lattice_volcano::install::manifests::generate_topology_discovery_configmap(

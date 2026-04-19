@@ -558,6 +558,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_istio::install::reconcile,
         "IstioInstall",
     );
+    ctx.spawn_provider(
+        "metrics-server-install",
+        lattice_metrics_server::install::reconcile,
+        "MetricsServerInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

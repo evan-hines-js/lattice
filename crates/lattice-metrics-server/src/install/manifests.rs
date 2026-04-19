@@ -1,8 +1,4 @@
-//! metrics-server manifest generation
-//!
-//! Embeds pre-rendered metrics-server manifests from build time.
-//! metrics-server provides the Kubernetes metrics API (metrics.k8s.io)
-//! required by HPA and KEDA CPU triggers.
+//! metrics-server helm chart manifests.
 
 use std::sync::LazyLock;
 
@@ -15,10 +11,12 @@ static METRICS_SERVER_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     )))
 });
 
+/// metrics-server chart version pinned at build time from `versions.toml`.
 pub fn metrics_server_version() -> &'static str {
     env!("METRICS_SERVER_VERSION")
 }
 
+/// Pre-rendered metrics-server helm chart manifests.
 pub fn generate_metrics_server() -> &'static [String] {
     &METRICS_SERVER_MANIFESTS
 }

@@ -47,6 +47,9 @@ fn upstream_registries() -> &'static [String] {
                 &[],
             ),
         ));
+        set.extend(extract_image_registries(
+            lattice_metrics_server::install::manifests::generate_metrics_server(),
+        ));
         set.into_iter().collect()
     });
     &REGS

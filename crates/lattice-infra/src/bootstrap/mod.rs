@@ -14,7 +14,6 @@
 pub mod gpu;
 pub mod keda;
 pub mod kthena;
-pub mod metrics_server;
 pub mod prometheus;
 pub mod velero;
 
@@ -272,12 +271,6 @@ pub fn generate_phases(config: &InfrastructureConfig) -> Result<Vec<InfraPhase>,
                 version: keda::keda_version(),
                 manifests: keda::generate_keda().to_vec(),
                 health_namespace: Some("keda"),
-            },
-            InfraComponent {
-                name: "metrics-server",
-                version: metrics_server::metrics_server_version(),
-                manifests: metrics_server::generate_metrics_server().to_vec(),
-                health_namespace: None, // Deploys into kube-system
             },
         ];
 

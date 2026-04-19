@@ -247,10 +247,6 @@ fn main() {
         "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
         versions.charts["victoria-metrics-k8s-stack"].version
     );
-    println!(
-        "cargo:rustc-env=METRICS_SERVER_VERSION={}",
-        versions.charts["metrics-server"].version
-    );
 
     // --- Auto-download missing charts ---
 
@@ -412,27 +408,6 @@ fn main() {
         ],
     );
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");
-
-    // metrics-server (required for HPA / KEDA CPU triggers)
-    let yaml = run_helm_template(
-        "metrics-server",
-        &chart(&format!(
-            "metrics-server-{}.tgz",
-            versions.charts["metrics-server"].version
-        )),
-        "kube-system",
-        &[
-            "--set",
-            "args={--kubelet-insecure-tls}",
-            "--set",
-            "tolerations[0].key=node-role.kubernetes.io/control-plane",
-            "--set",
-            "tolerations[0].operator=Exists",
-            "--set",
-            "tolerations[0].effect=NoSchedule",
-        ],
-    );
-    std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");
 
     // Kthena model serving (Volcano subproject for disaggregated inference)
     let yaml = run_helm_template(
