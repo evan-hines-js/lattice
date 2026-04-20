@@ -241,10 +241,6 @@ pub fn validate_k8s_version(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build certSANs list from cluster spec
-///
-/// Returns user-provided SANs. Cell LB IP is added at runtime by
-/// `get_cell_server_sans()` auto-discovery.
 pub fn build_cert_sans(cluster: &LatticeCluster) -> Vec<String> {
     cluster
         .spec
@@ -1066,12 +1062,16 @@ fn generate_kubeadm_control_plane(
     // Build nodeRegistration with optional name field for cloud providers
     let node_registration = build_node_registration(&kubelet_extra_args, config.provider_type);
 
+    // CAPI v1beta2 KCP enforces minItems=1 on apiServer.certSANs, so omit the
+    // field entirely when no SANs are provided and let kubeadm use its defaults.
+    let mut api_server = serde_json::json!({ "extraArgs": api_server_extra_args });
+    if !cp_config.cert_sans.is_empty() {
+        api_server["certSANs"] = serde_json::json!(cp_config.cert_sans);
+    }
+
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
-            "apiServer": {
-                "certSANs": cp_config.cert_sans,
-                "extraArgs": api_server_extra_args
-            },
+            "apiServer": api_server,
             "controllerManager": {
                 "extraArgs": controller_manager_extra_args
             },

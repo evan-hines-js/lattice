@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{Api, ListParams, Patch, PatchParams};
+use kube::api::{Api, ListParams};
 use kube::{Client as KubeClient, ResourceExt};
 #[cfg(test)]
 use mockall::automock;
@@ -843,6 +843,14 @@ impl NativeInstaller {
             all_documents.extend(kube_utils::split_yaml_documents(&substituted));
         }
 
+        // Rewrite Deployment PodSpecs before the first SSA so that the
+        // initial rollout already carries our control-plane toleration and
+        // any required imagePullSecrets. Patching post-apply forced a second
+        // ReplicaSet revision and — on private registries — an ImagePullBackOff
+        // cycle while the first revision waited for a non-existent pull secret.
+        let all_documents =
+            inject_deployment_overrides(all_documents, image_pull_secret_names)?;
+
         info!(
             provider = %desired.name,
             provider_type = %desired.provider_type,
@@ -871,127 +879,109 @@ impl NativeInstaller {
             Error::capi_installation(format!("Failed to apply {}: {}", provider_label, e))
         })?;
 
-        // Patch provider deployments with control-plane toleration so they
-        // schedule on tainted CP nodes before workers are available.
-        if let Some(namespace) = provider_namespace(&desired.name, desired.provider_type) {
-            patch_deployments_with_cp_toleration(client, namespace).await?;
-            if !image_pull_secret_names.is_empty() {
-                patch_deployments_with_image_pull_secrets(
-                    client,
-                    namespace,
-                    image_pull_secret_names,
-                )
-                .await?;
-            }
-        }
-
         Ok(())
     }
 }
 
-/// Patch all Deployments in `namespace` to reference `names` as
-/// `imagePullSecrets` on the pod template spec. Secrets must already exist.
-async fn patch_deployments_with_image_pull_secrets(
-    client: &KubeClient,
-    namespace: &str,
-    names: &[String],
-) -> Result<(), Error> {
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let list = match deployments.list(&ListParams::default()).await {
-        Ok(list) => list,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
-        Err(e) => {
-            return Err(Error::capi_installation(format!(
-                "Failed to list deployments in {}: {}",
-                namespace, e
-            )));
-        }
-    };
-
-    let pull_refs: Vec<serde_json::Value> = names
-        .iter()
-        .map(|n| serde_json::json!({ "name": n }))
-        .collect();
-    let patch = serde_json::json!({
-        "spec": {
-            "template": {
-                "spec": { "imagePullSecrets": pull_refs }
-            }
-        }
-    });
-
-    for deploy in &list.items {
-        let name = deploy.metadata.name.as_deref().unwrap_or("unknown");
-        deployments
-            .patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!(
-                    "Failed to patch deployment {}/{} with image pull secrets: {}",
-                    namespace, name, e
-                ))
-            })?;
-        debug!(
-            namespace = %namespace,
-            deployment = %name,
-            pull_secrets = ?names,
-            "patched with image pull secrets"
-        );
-    }
-
-    Ok(())
+/// Rewrite every `Deployment` document's `spec.template.spec` to carry the
+/// control-plane `NoSchedule` toleration and any caller-supplied
+/// `imagePullSecrets`. Non-Deployment documents pass through unchanged.
+///
+/// Merges rather than replaces: existing tolerations and pull secrets are
+/// preserved, and re-injection is idempotent (duplicates are skipped by
+/// `key`+`effect` and `name` respectively).
+///
+/// Deployment docs round-trip through `serde_json`, so they come out as JSON —
+/// `apply_manifests` accepts both JSON and YAML.
+fn inject_deployment_overrides(
+    docs: Vec<String>,
+    image_pull_secret_names: &[String],
+) -> Result<Vec<String>, Error> {
+    docs.into_iter()
+        .map(|doc| inject_one(&doc, image_pull_secret_names))
+        .collect()
 }
 
-/// Patch all Deployments in a namespace to tolerate the control-plane NoSchedule taint.
-///
-/// Uses strategic merge patch on the pod template spec. This is idempotent —
-/// Kubernetes merges tolerations by key+effect, so re-patching is a no-op.
-/// Only called during provider install/upgrade, not on every reconcile.
-async fn patch_deployments_with_cp_toleration(
-    client: &KubeClient,
-    namespace: &str,
-) -> Result<(), Error> {
-    let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let list = match deployments.list(&ListParams::default()).await {
-        Ok(list) => list,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(()),
-        Err(e) => {
-            return Err(Error::capi_installation(format!(
-                "Failed to list deployments in {}: {}",
-                namespace, e
-            )));
-        }
-    };
-
-    let patch = serde_json::json!({
-        "spec": {
-            "template": {
-                "spec": {
-                    "tolerations": [{
-                        "key": "node-role.kubernetes.io/control-plane",
-                        "operator": "Exists",
-                        "effect": "NoSchedule"
-                    }]
-                }
-            }
-        }
-    });
-
-    for deploy in &list.items {
-        let name = deploy.metadata.name.as_deref().unwrap_or("unknown");
-        deployments
-            .patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
-            .await
-            .map_err(|e| {
-                Error::capi_installation(format!(
-                    "Failed to patch deployment {}/{} with CP toleration: {}",
-                    namespace, name, e
-                ))
-            })?;
-        debug!(namespace = %namespace, deployment = %name, "patched with control-plane toleration");
+fn inject_one(doc: &str, image_pull_secret_names: &[String]) -> Result<String, Error> {
+    // Cheap pre-check: `split_yaml_documents` guarantees every doc contains
+    // `kind:`, but only Deployments need rewriting.
+    if !doc.contains("kind: Deployment") && !doc.contains("\"kind\": \"Deployment\"") {
+        return Ok(doc.to_string());
     }
 
-    Ok(())
+    let mut value: serde_json::Value = if doc.trim_start().starts_with('{') {
+        serde_json::from_str(doc).map_err(|e| {
+            Error::capi_installation(format!("failed to parse Deployment JSON: {e}"))
+        })?
+    } else {
+        lattice_core::yaml::parse_yaml(doc).map_err(|e| {
+            Error::capi_installation(format!("failed to parse Deployment YAML: {e}"))
+        })?
+    };
+
+    if value.get("kind").and_then(|k| k.as_str()) != Some("Deployment") {
+        return Ok(doc.to_string());
+    }
+
+    let Some(pod_spec) = value
+        .pointer_mut("/spec/template/spec")
+        .and_then(|v| v.as_object_mut())
+    else {
+        return Ok(doc.to_string());
+    };
+
+    merge_control_plane_toleration(pod_spec);
+    merge_image_pull_secrets(pod_spec, image_pull_secret_names);
+
+    serde_json::to_string(&value)
+        .map_err(|e| Error::capi_installation(format!("failed to serialize Deployment: {e}")))
+}
+
+/// Append the control-plane `NoSchedule` toleration unless an entry with the
+/// same `key` and `effect` already exists.
+fn merge_control_plane_toleration(pod_spec: &mut serde_json::Map<String, serde_json::Value>) {
+    let tolerations = pod_spec
+        .entry("tolerations".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(arr) = tolerations.as_array_mut() else {
+        return;
+    };
+    let already = arr.iter().any(|t| {
+        t.get("key").and_then(|v| v.as_str()) == Some("node-role.kubernetes.io/control-plane")
+            && t.get("effect").and_then(|v| v.as_str()) == Some("NoSchedule")
+    });
+    if !already {
+        arr.push(serde_json::json!({
+            "key": "node-role.kubernetes.io/control-plane",
+            "operator": "Exists",
+            "effect": "NoSchedule",
+        }));
+    }
+}
+
+/// Append each pull secret name unless an entry with the same `name` already
+/// exists.
+fn merge_image_pull_secrets(
+    pod_spec: &mut serde_json::Map<String, serde_json::Value>,
+    names: &[String],
+) {
+    if names.is_empty() {
+        return;
+    }
+    let secrets = pod_spec
+        .entry("imagePullSecrets".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(arr) = secrets.as_array_mut() else {
+        return;
+    };
+    for name in names {
+        let already = arr
+            .iter()
+            .any(|s| s.get("name").and_then(|v| v.as_str()) == Some(name.as_str()));
+        if !already {
+            arr.push(serde_json::json!({ "name": name }));
+        }
+    }
 }
 
 impl Default for NativeInstaller {
@@ -1419,5 +1409,162 @@ mod tests {
         let result = installer.ensure(&config).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("test error"));
+    }
+
+    const DEPLOYMENT_YAML: &str = r#"---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capi-controller
+  namespace: capi-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: manager
+          image: ghcr.io/example/capi:v1
+"#;
+
+    fn pod_spec(deployment_doc: &str) -> serde_json::Value {
+        let value: serde_json::Value = if deployment_doc.trim_start().starts_with('{') {
+            serde_json::from_str(deployment_doc).unwrap()
+        } else {
+            lattice_core::yaml::parse_yaml(deployment_doc).unwrap()
+        };
+        value
+            .pointer("/spec/template/spec")
+            .cloned()
+            .expect("pod spec missing")
+    }
+
+    #[test]
+    fn inject_adds_toleration_and_pull_secrets_for_deployment() {
+        let out = inject_deployment_overrides(
+            vec![DEPLOYMENT_YAML.to_string()],
+            &["default-credentials".to_string()],
+        )
+        .expect("inject should succeed");
+        assert_eq!(out.len(), 1);
+
+        let spec = pod_spec(&out[0]);
+        let tolerations = spec.get("tolerations").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(
+            tolerations[0].get("key").and_then(|v| v.as_str()),
+            Some("node-role.kubernetes.io/control-plane")
+        );
+        assert_eq!(
+            tolerations[0].get("effect").and_then(|v| v.as_str()),
+            Some("NoSchedule")
+        );
+
+        let pulls = spec
+            .get("imagePullSecrets")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(
+            pulls[0].get("name").and_then(|v| v.as_str()),
+            Some("default-credentials")
+        );
+    }
+
+    #[test]
+    fn inject_skips_pull_secrets_when_none_requested() {
+        let out = inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &[])
+            .expect("inject should succeed");
+        let spec = pod_spec(&out[0]);
+        assert!(spec.get("imagePullSecrets").is_none());
+        assert!(spec.get("tolerations").is_some());
+    }
+
+    #[test]
+    fn inject_is_idempotent() {
+        let names = vec!["default-credentials".to_string()];
+        let once = inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &names).unwrap();
+        let twice = inject_deployment_overrides(once.clone(), &names).unwrap();
+
+        let spec = pod_spec(&twice[0]);
+        assert_eq!(
+            spec.get("tolerations")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            spec.get("imagePullSecrets")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn inject_preserves_existing_tolerations_and_pull_secrets() {
+        let yaml = r#"---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capi-controller
+  namespace: capi-system
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: custom-taint
+          operator: Exists
+          effect: NoExecute
+      imagePullSecrets:
+        - name: upstream-secret
+      containers:
+        - name: manager
+          image: ghcr.io/example/capi:v1
+"#;
+        let out = inject_deployment_overrides(
+            vec![yaml.to_string()],
+            &["default-credentials".to_string()],
+        )
+        .unwrap();
+        let spec = pod_spec(&out[0]);
+
+        let tolerations = spec.get("tolerations").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tolerations.len(), 2);
+        assert!(tolerations
+            .iter()
+            .any(|t| t.get("key").and_then(|v| v.as_str()) == Some("custom-taint")));
+        assert!(tolerations.iter().any(|t| t.get("key").and_then(|v| v.as_str())
+            == Some("node-role.kubernetes.io/control-plane")));
+
+        let pulls = spec
+            .get("imagePullSecrets")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(pulls.len(), 2);
+        assert!(pulls
+            .iter()
+            .any(|s| s.get("name").and_then(|v| v.as_str()) == Some("upstream-secret")));
+        assert!(pulls
+            .iter()
+            .any(|s| s.get("name").and_then(|v| v.as_str()) == Some("default-credentials")));
+    }
+
+    #[test]
+    fn inject_leaves_non_deployment_docs_unchanged() {
+        let configmap = r#"---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: capi-config
+data:
+  foo: bar
+"#;
+        let out = inject_deployment_overrides(
+            vec![configmap.to_string()],
+            &["default-credentials".to_string()],
+        )
+        .unwrap();
+        assert_eq!(out, vec![configmap.to_string()]);
     }
 }
