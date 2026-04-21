@@ -580,10 +580,7 @@ metadata:
     #[test]
     fn extract_registry_host_recognizes_hosts() {
         assert_eq!(extract_registry_host("quay.io/cilium/tetragon"), "quay.io");
-        assert_eq!(
-            extract_registry_host("ghcr.io/user/img:v1"),
-            "ghcr.io"
-        );
+        assert_eq!(extract_registry_host("ghcr.io/user/img:v1"), "ghcr.io");
         assert_eq!(
             extract_registry_host("registry.k8s.io/coredns:1"),
             "registry.k8s.io"

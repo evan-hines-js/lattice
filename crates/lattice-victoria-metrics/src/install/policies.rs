@@ -12,9 +12,7 @@ pub fn generate_vmagent_cedar_policy() -> CedarPolicy {
     let mut policy = CedarPolicy::new(
         "vmagent-wildcard-outbound",
         CedarPolicySpec {
-            description: Some(
-                "Allow vmagent wildcard outbound for metrics scraping".to_string(),
-            ),
+            description: Some("Allow vmagent wildcard outbound for metrics scraping".to_string()),
             policies: format!(
                 r#"permit(
     principal == Lattice::Service::"{MONITORING_NAMESPACE}/{VMAGENT_SA_NAME}",

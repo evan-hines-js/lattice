@@ -384,4 +384,3 @@ pub async fn copy_lattice_resources(
 
     Ok(())
 }
-

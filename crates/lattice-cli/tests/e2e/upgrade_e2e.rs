@@ -109,8 +109,7 @@ async fn run_upgrade_test() -> Result<(), String> {
     let mgmt_bundle = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
 
     let mut workload_cluster =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
-            .cluster;
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?.cluster;
 
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();

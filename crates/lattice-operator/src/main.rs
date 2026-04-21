@@ -533,11 +533,7 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_tetragon::install::reconcile,
         "TetragonInstall",
     );
-    ctx.spawn_provider(
-        "eso-install",
-        lattice_eso::install::reconcile,
-        "ESOInstall",
-    );
+    ctx.spawn_provider("eso-install", lattice_eso::install::reconcile, "ESOInstall");
     ctx.spawn_provider(
         "cert-manager-install",
         lattice_cert_manager::install::reconcile,

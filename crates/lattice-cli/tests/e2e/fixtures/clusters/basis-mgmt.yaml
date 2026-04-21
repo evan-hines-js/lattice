@@ -17,6 +17,11 @@ spec:
     config:
       basis:
         ipv4Pool: "default"
+        # Cilium LB-IPAM range for `type: LoadBalancer` Services (the
+        # Lattice cell proxy). Lives outside basis's pool so basis
+        # can't hand the same IP to a VM, and distinct per cluster so
+        # mgmt/workload/workload2 coexist on one L2.
+        lbCidr: "10.0.0.200/32"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

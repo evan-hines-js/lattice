@@ -27,11 +27,6 @@ const READY_TIMEOUT: Duration = Duration::from_secs(300);
 /// controller loop can't service that because the full operator isn't
 /// running yet.
 pub async fn install_blocking(client: &Client) -> Result<(), Error> {
-    apply_manifests(
-        client,
-        manifests::generate_eso(),
-        &ApplyOptions::default(),
-    )
-    .await?;
+    apply_manifests(client, manifests::generate_eso(), &ApplyOptions::default()).await?;
     wait_for_all_deployments(client, NAMESPACE, READY_TIMEOUT).await
 }

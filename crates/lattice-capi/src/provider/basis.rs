@@ -1,19 +1,27 @@
 //! Basis infrastructure provider
 //!
-//! Generates Cluster API manifests for provisioning Kubernetes clusters on
-//! Basis, a minimal bare-metal VM scheduler. Basis owns scheduling, IP
-//! allocation, and VIP reservation — so the Lattice-side config and
-//! generated manifests are much smaller than Proxmox's.
+//! Generates Cluster API manifests for Kubernetes clusters backed by
+//! Basis, our minimal bare-metal VM scheduler. The cluster-creation
+//! flow is two-stage because Basis allocates the API-server VIP
+//! server-side:
 //!
-//! Shape of generated manifests (per cluster):
-//! - `Cluster` (core CAPI)
-//! - `BasisCluster` with `spec.ipPool` set; `controlPlaneEndpoint` left
-//!   unset, populated by the Basis CAPI provider reconciler after it
-//!   calls `Basis.CreateCluster`
-//! - `KubeadmControlPlane` / `RKE2ControlPlane` with no kube-vip block
-//!   (VIP reachability is Basis's responsibility at the hypervisor layer)
-//! - `BasisMachineTemplate` for control plane and each worker pool
-//! - `MachineDeployment` + `KubeadmConfigTemplate` per worker pool
+//! 1. First reconcile pass — `BootstrapInfo.control_plane_endpoint` is
+//!    `None`. Emit the infrastructure graph (`Cluster`, `BasisCluster`,
+//!    `BasisMachineTemplate`, `MachineDeployment`,
+//!    `KubeadmConfigTemplate`). Applying `BasisCluster` is what
+//!    triggers basis-capi-provider to call `Basis.CreateCluster`, which
+//!    allocates the VIP and writes it back to
+//!    `BasisCluster.spec.controlPlaneEndpoint`.
+//! 2. Second reconcile pass — the LatticeCluster reconciler picks up
+//!    the endpoint and populates `bootstrap.control_plane_endpoint`.
+//!    This generator now also emits `KubeadmControlPlane` with a
+//!    kube-vip static pod wired to that address and the VIP in
+//!    `certSANs`. Server-Side Apply lands the KCP; the rest of the
+//!    graph is byte-identical to pass 1, so no churn.
+//!
+//! kube-vip itself is unchanged: a static pod inside each control-
+//! plane guest that claims the VIP via ARP leader election, same as
+//! Proxmox / OpenStack. The only difference is who picks the address.
 
 use async_trait::async_trait;
 
@@ -22,10 +30,10 @@ use super::{
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
-    InfrastructureRef, Provider, WorkerPoolConfig,
+    InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
-use crate::constants::{BASIS_API_VERSION, INFRASTRUCTURE_API_GROUP};
-use lattice_common::{Error, Result};
+use crate::constants::{BASIS_API_VERSION, DEFAULT_VIP_INTERFACE_BASIS, INFRASTRUCTURE_API_GROUP};
+use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
 use lattice_crd::crd::{BasisConfig, InstanceType, LatticeCluster, ProviderSpec, ProviderType};
 
 /// VM sizing for a BasisMachineTemplate.
@@ -90,11 +98,15 @@ impl BasisProvider {
         cluster.spec.provider.config.basis.as_ref()
     }
 
-    /// Generate BasisCluster manifest.
+    /// Generate the BasisCluster manifest.
     ///
-    /// Only `spec.ipPool` is set. The control-plane VIP is allocated and
-    /// written to `spec.controlPlaneEndpoint` by the Basis CAPI provider
-    /// reconciler — never by Lattice.
+    /// The spec carries exactly what the user-facing config declares:
+    /// the IP pool and the credentials Secret reference. The control-
+    /// plane endpoint is absent — the basis-capi-provider reconciler
+    /// allocates a VIP from the pool's vip sub-range and writes it
+    /// back to `spec.controlPlaneEndpoint`. A separate Lattice
+    /// reconciler patches the `KubeadmControlPlane` once that value
+    /// appears, injecting kube-vip files and the VIP cert SAN.
     fn generate_basis_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let cfg =
@@ -104,6 +116,10 @@ impl BasisProvider {
             CAPIManifest::new(BASIS_API_VERSION, "BasisCluster", name, &self.namespace).with_spec(
                 serde_json::json!({
                     "ipPool": &cfg.ipv4_pool,
+                    "credentialsRef": {
+                        "name": BASIS_CREDENTIALS_SECRET,
+                        "namespace": LOCAL_SECRETS_NAMESPACE,
+                    },
                 }),
             ),
         )
@@ -145,7 +161,7 @@ impl Provider for BasisProvider {
     ) -> Result<Vec<CAPIManifest>> {
         let name = get_cluster_name(cluster)?;
         let spec = &cluster.spec;
-        let _cfg =
+        let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("basis config required"))?;
 
         let config = ClusterConfig {
@@ -158,31 +174,51 @@ impl Provider for BasisProvider {
             registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
-        // Basis doesn't use kube-vip inside VMs: the hypervisor layer
-        // (basis-agent) is responsible for VIP reachability. The VIP
-        // itself comes from BasisCluster.spec.controlPlaneEndpoint, which
-        // the Basis CAPI provider reconciler fills in asynchronously.
-        let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane.replicas,
-            cert_sans: build_cert_sans(cluster),
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
-            vip: None,
-            ssh_authorized_keys: Vec::new(),
-            registry_mirrors: bootstrap.registry_mirrors.clone(),
-        };
-
         let infra = self.infra_ref();
         let image = node_image_for(&spec.provider.kubernetes.version);
-
         let cp_sizing =
             MachineSizing::from_instance_type(&spec.nodes.control_plane.instance_type, 40);
 
+        // Pre-control-plane manifests — safe to apply without knowing
+        // the API-server VIP. BasisCluster is what triggers basis-capi-
+        // provider to call `Basis.CreateCluster`, which allocates the
+        // VIP and writes it back to `BasisCluster.spec.controlPlaneEndpoint`.
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_basis_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config)?,
             self.generate_machine_template(name, cp_sizing, &image, "control-plane"),
         ];
+
+        // KubeadmControlPlane carries kube-vip's static pod manifest
+        // and the VIP cert SAN. Emit it only once we know the endpoint
+        // (populated by the reconciler after basis allocates). On
+        // first-pass reconcile this branch is skipped; the requeue
+        // picks it up on the next pass and SSA lands the KCP without
+        // disturbing the rest of the graph.
+        if let Some(endpoint) = bootstrap.control_plane_endpoint.as_deref() {
+            let mut cert_sans = build_cert_sans(cluster);
+            if !cert_sans.iter().any(|s| s == endpoint) {
+                cert_sans.push(endpoint.to_string());
+            }
+            let vip = Some(VipConfig::new(
+                endpoint.to_string(),
+                Some(
+                    cfg.virtual_ip_network_interface
+                        .clone()
+                        .unwrap_or_else(|| DEFAULT_VIP_INTERFACE_BASIS.to_string()),
+                ),
+                cfg.kube_vip_image.clone(),
+            ));
+            let cp_config = ControlPlaneConfig {
+                replicas: spec.nodes.control_plane.replicas,
+                cert_sans,
+                post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
+                vip,
+                ssh_authorized_keys: Vec::new(),
+                registry_mirrors: bootstrap.registry_mirrors.clone(),
+            };
+            manifests.push(generate_control_plane(&config, &infra, &cp_config)?);
+        }
 
         for (pool_id, pool_spec) in &spec.nodes.worker_pools {
             let pool_config = WorkerPoolConfig {
@@ -233,6 +269,18 @@ mod tests {
     fn test_basis_config() -> BasisConfig {
         BasisConfig {
             ipv4_pool: "default".to_string(),
+            virtual_ip_network_interface: None,
+            kube_vip_image: None,
+            lb_cidr: None,
+        }
+    }
+
+    /// Populate a BootstrapInfo with the simulated basis-allocated VIP
+    /// so `generate_capi_manifests` emits the KCP branch under test.
+    fn test_bootstrap_with_endpoint() -> BootstrapInfo {
+        BootstrapInfo {
+            control_plane_endpoint: Some("10.0.0.210".to_string()),
+            ..Default::default()
         }
     }
 
@@ -295,7 +343,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generates_expected_manifest_kinds() {
+    async fn first_reconcile_pass_omits_control_plane() {
+        // Before basis-capi-provider allocates the VIP, BootstrapInfo
+        // carries no endpoint — generator emits the infrastructure
+        // graph but not the KubeadmControlPlane. The reconciler's next
+        // pass (after the endpoint appears) fills it in via SSA.
         let provider = BasisProvider::with_namespace("capi-basis-system");
         let manifests = provider
             .generate_capi_manifests(&test_cluster("homelab"), &BootstrapInfo::default())
@@ -305,14 +357,44 @@ mod tests {
         let kinds: Vec<_> = manifests.iter().map(|m| m.kind.as_str()).collect();
         assert!(kinds.contains(&"Cluster"));
         assert!(kinds.contains(&"BasisCluster"));
-        assert!(kinds.contains(&"KubeadmControlPlane"));
         assert!(kinds.contains(&"BasisMachineTemplate"));
         assert!(kinds.contains(&"MachineDeployment"));
         assert!(kinds.contains(&"KubeadmConfigTemplate"));
+        assert!(
+            !kinds.contains(&"KubeadmControlPlane"),
+            "KCP must wait for the basis-allocated endpoint; it's emitted on the next reconcile pass"
+        );
     }
 
     #[tokio::test]
-    async fn basis_cluster_only_sets_ip_pool() {
+    async fn second_reconcile_pass_emits_control_plane_with_kube_vip() {
+        let provider = BasisProvider::with_namespace("capi-basis-system");
+        let manifests = provider
+            .generate_capi_manifests(&test_cluster("homelab"), &test_bootstrap_with_endpoint())
+            .await
+            .expect("manifest generation should succeed");
+
+        let cp = manifests
+            .iter()
+            .find(|m| m.kind == "KubeadmControlPlane")
+            .expect("KubeadmControlPlane should exist once endpoint is known");
+        let cp_json = serde_json::to_string(&cp.spec).expect("serialize cp spec");
+        assert!(
+            cp_json.contains("kube-vip"),
+            "KCP must carry the kube-vip static pod manifest"
+        );
+        assert!(
+            cp_json.contains("10.0.0.210"),
+            "kube-vip manifest must carry the basis-allocated endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn basis_cluster_carries_pool_and_credentials_ref() {
+        // BasisCluster is emitted on the very first reconcile — that's
+        // what triggers basis-capi-provider to allocate the VIP. The
+        // endpoint is NOT on Lattice's generated spec; the provider
+        // reconciler writes it after `Basis.CreateCluster` returns.
         let provider = BasisProvider::with_namespace("capi-basis-system");
         let manifests = provider
             .generate_capi_manifests(&test_cluster("homelab"), &BootstrapInfo::default())
@@ -325,9 +407,11 @@ mod tests {
             .expect("BasisCluster should exist");
         let spec = basis_cluster.spec.as_ref().expect("spec should exist");
         assert_eq!(spec["ipPool"], "default");
+        assert_eq!(spec["credentialsRef"]["name"], "basis-credentials");
+        assert_eq!(spec["credentialsRef"]["namespace"], "lattice-secrets");
         assert!(
             spec.get("controlPlaneEndpoint").is_none(),
-            "controlPlaneEndpoint is set by the reconciler, never by Lattice"
+            "endpoint is written by basis-capi-provider, not Lattice"
         );
     }
 
@@ -351,25 +435,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_plane_has_no_kube_vip() {
-        let provider = BasisProvider::with_namespace("capi-basis-system");
-        let manifests = provider
-            .generate_capi_manifests(&test_cluster("homelab"), &BootstrapInfo::default())
-            .await
-            .expect("manifest generation should succeed");
-
-        let cp = manifests
-            .iter()
-            .find(|m| m.kind == "KubeadmControlPlane")
-            .expect("KubeadmControlPlane should exist");
-        let cp_json = serde_json::to_string(&cp.spec).expect("serialize cp spec");
-        assert!(
-            !cp_json.contains("kube-vip"),
-            "Basis should not emit a kube-vip static pod — VIP lives at the hypervisor layer"
-        );
-    }
-
-    #[tokio::test]
     async fn validate_rejects_empty_ip_pool() {
         let provider = BasisProvider::with_namespace("capi-basis-system");
         let spec = ProviderSpec {
@@ -380,6 +445,9 @@ mod tests {
             },
             config: ProviderConfig::basis(BasisConfig {
                 ipv4_pool: "".to_string(),
+                virtual_ip_network_interface: None,
+                kube_vip_image: None,
+                lb_cidr: None,
             }),
         };
         assert!(provider.validate_spec(&spec).await.is_err());

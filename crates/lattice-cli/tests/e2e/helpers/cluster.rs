@@ -660,10 +660,7 @@ impl ClusterBundle {
 }
 
 /// Load a cluster-config fixture (multi-doc install bundle) from a file or env var.
-pub fn load_cluster_config(
-    env_var: &str,
-    default_fixture: &str,
-) -> Result<ClusterBundle, String> {
+pub fn load_cluster_config(env_var: &str, default_fixture: &str) -> Result<ClusterBundle, String> {
     let path = match std::env::var(env_var) {
         Ok(p) => PathBuf::from(p),
         Err(_) => cluster_fixtures_dir().join(default_fixture),
@@ -698,9 +695,8 @@ pub fn load_cluster_config(
         }
     }
 
-    let cluster = cluster.ok_or_else(|| {
-        format!("No LatticeCluster document found in {}", path.display())
-    })?;
+    let cluster =
+        cluster.ok_or_else(|| format!("No LatticeCluster document found in {}", path.display()))?;
 
     info!(
         "Loaded cluster config: {} ({} pre-cluster doc(s))",

@@ -428,7 +428,10 @@ impl Uninstaller {
         // lattice-registry Secret (dockerconfigjson) — present iff the
         // operator image needs auth to pull.
         let secrets: Api<Secret> = Api::namespaced(target.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let creds = match secrets.get(lattice_common::REGISTRY_CREDENTIALS_SECRET).await {
+        let creds = match secrets
+            .get(lattice_common::REGISTRY_CREDENTIALS_SECRET)
+            .await
+        {
             Ok(s) => s
                 .data
                 .and_then(|d| d.get(".dockerconfigjson").cloned())

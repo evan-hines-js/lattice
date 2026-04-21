@@ -72,8 +72,5 @@ fn main() {
     std::fs::write(out_dir.join("victoria-metrics-single.yaml"), single)
         .expect("write victoria-metrics-single.yaml");
 
-    println!(
-        "cargo:rustc-env=VICTORIA_METRICS_VERSION={}",
-        chart.version
-    );
+    println!("cargo:rustc-env=VICTORIA_METRICS_VERSION={}", chart.version);
 }

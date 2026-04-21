@@ -616,6 +616,10 @@ mod tests {
             capi_mock
                 .expect_is_infrastructure_ready()
                 .returning(|_, _, _| Ok(false));
+            // Provisioning phase re-applies manifests every reconcile (SSA
+            // idempotent). Non-basis providers stay unchanged between
+            // passes, so the mock just accepts the call.
+            capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
             // MachineDeployment has 2 replicas to match spec - no scaling needed
             capi_mock
                 .expect_get_pool_replicas()
@@ -660,6 +664,7 @@ mod tests {
             capi_mock
                 .expect_is_infrastructure_ready()
                 .returning(|_, _, _| Ok(true));
+            capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             (
                 Arc::new(Context::for_testing(
@@ -1280,8 +1285,13 @@ mod tests {
                 ClusterPhase::Provisioning,
             ));
 
-            let mock = MockKubeClient::new();
+            let mut mock = MockKubeClient::new();
+            // Provisioning phase re-applies manifests each reconcile, which
+            // reads the InfraProvider to resolve credentials.
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
             let mut capi_mock = MockCAPIClient::new();
+            capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             // Infrastructure is NOT ready
             capi_mock
@@ -1328,12 +1338,15 @@ mod tests {
                     .push(status.clone());
                 Ok(())
             });
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
 
             let mut capi_mock = MockCAPIClient::new();
             // Infrastructure IS ready
             capi_mock
                 .expect_is_infrastructure_ready()
                 .returning(|_, _, _| Ok(true));
+            capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             let mut installer = MockCapiInstaller::new();
             installer.expect_ensure().returning(|_| Ok(()));
@@ -1367,8 +1380,11 @@ mod tests {
                 ClusterPhase::Provisioning,
             ));
 
-            let mock = MockKubeClient::new();
+            let mut mock = MockKubeClient::new();
+            mock.expect_get_cloud_provider()
+                .returning(|_| Ok(Some(sample_docker_provider())));
             let mut capi_mock = MockCAPIClient::new();
+            capi_mock.expect_apply_manifests().returning(|_, _| Ok(()));
 
             // Infrastructure check fails
             capi_mock

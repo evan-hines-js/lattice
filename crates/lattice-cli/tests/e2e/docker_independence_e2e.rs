@@ -74,10 +74,9 @@ async fn test_docker_independence() {
     init_e2e_test();
     info!("Starting independence test: workload clusters survive parent deletion");
 
-    let mgmt_cluster =
-        load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")
-            .unwrap()
-            .cluster;
+    let mgmt_cluster = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")
+        .unwrap()
+        .cluster;
     let workload_cluster =
         load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")
             .unwrap()
@@ -136,8 +135,7 @@ async fn run_independence_test(
 
     let mgmt_bundle = load_cluster_config("LATTICE_INDEP_MGMT_CONFIG", "docker-mgmt.yaml")?;
     let workload_cluster =
-        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?
-            .cluster;
+        load_cluster_config("LATTICE_INDEP_WORKLOAD_CONFIG", "docker-workload.yaml")?.cluster;
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
     let initial_workers = workload_cluster.spec.nodes.total_workers();
 

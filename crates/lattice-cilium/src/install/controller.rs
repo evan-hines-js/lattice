@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use kube::runtime::controller::Action;
 
-use lattice_common::install::{
-    run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig,
-};
+use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
 use lattice_common::{ControllerContext, ReconcileError};
 use lattice_crd::crd::CiliumInstall;
 
@@ -35,11 +33,10 @@ pub async fn reconcile(
         serde_json::to_string_pretty(&manifests::generate_mesh_proxy_egress_policy()),
         serde_json::to_string_pretty(&manifests::generate_eastwest_gateway_policy()),
     ] {
-        manifests.push(
-            policy.map_err(|e| {
+        manifests
+            .push(policy.map_err(|e| {
                 ReconcileError::Validation(format!("serialize Cilium policy: {e}"))
-            })?,
-        );
+            })?);
     }
 
     run_simple_install_reconcile(SimpleInstallConfig {

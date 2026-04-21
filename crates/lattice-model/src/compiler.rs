@@ -74,7 +74,10 @@ fn has_pd_disaggregation(
     roles: &BTreeMap<String, lattice_crd::crd::ModelRoleSpec>,
 ) -> bool {
     routing
-        .map(|r| r.kv_connector.is_some() && lattice_volcano_policy::routing_compiler::has_pd_roles(roles))
+        .map(|r| {
+            r.kv_connector.is_some()
+                && lattice_volcano_policy::routing_compiler::has_pd_roles(roles)
+        })
         .unwrap_or(false)
 }
 
@@ -600,7 +603,8 @@ fn assemble_serving(
     role_templates: &BTreeMap<String, RoleTemplates>,
     role_suffix: &str,
 ) -> Result<AssembledServing, ModelError> {
-    let compilation = lattice_volcano_policy::compile_model_serving(model, role_templates, role_suffix);
+    let compilation =
+        lattice_volcano_policy::compile_model_serving(model, role_templates, role_suffix);
     let serving_name = &compilation.model_serving.metadata.name;
 
     let routing = model.spec.routing.as_ref().map(|routing_spec| {

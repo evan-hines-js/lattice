@@ -44,7 +44,9 @@ pub fn bootstrap_manifests(skip_service_mesh: bool) -> Result<Vec<String>, serde
 
     let mut manifests: Vec<String> = generate_gateway_api_crds().to_vec();
     manifests.push(namespace_yaml_ambient(LATTICE_SYSTEM_NAMESPACE));
-    manifests.push(serde_json::to_string_pretty(&generate_operator_mesh_member())?);
+    manifests.push(serde_json::to_string_pretty(
+        &generate_operator_mesh_member(),
+    )?);
     manifests.push(serde_json::to_string_pretty(
         &generate_cluster_access_cedar_policy(),
     )?);
@@ -234,10 +236,14 @@ mod tests {
         assert!(m
             .iter()
             .any(|d| d.contains("istio.io/dataplane-mode: ambient")));
-        assert!(m.iter().any(|d| d.contains("LatticeMeshMember")
-            && d.contains("\"name\": \"lattice-operator\"")));
-        assert!(m.iter().any(|d| d.contains("CedarPolicy")
-            && d.contains("\"name\": \"proxy-cluster-access\"")));
+        assert!(m.iter().any(
+            |d| d.contains("LatticeMeshMember") && d.contains("\"name\": \"lattice-operator\"")
+        ));
+        assert!(
+            m.iter()
+                .any(|d| d.contains("CedarPolicy")
+                    && d.contains("\"name\": \"proxy-cluster-access\""))
+        );
     }
 
     #[test]

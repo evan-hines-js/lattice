@@ -411,7 +411,12 @@ spec:
         let provider: InfraProvider = serde_json::from_value(value).expect("parse");
         assert_eq!(provider.spec.provider_type, InfraProviderType::Basis);
         assert_eq!(
-            provider.spec.basis.as_ref().expect("basis config").server_url,
+            provider
+                .spec
+                .basis
+                .as_ref()
+                .expect("basis config")
+                .server_url,
             "https://10.0.0.206:7443"
         );
     }

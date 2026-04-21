@@ -18,7 +18,7 @@ use super::{
 };
 use crate::constants::{
     DEFAULT_DNS_SERVERS, DEFAULT_VIP_INTERFACE_PROXMOX, INFRASTRUCTURE_API_GROUP,
-    PROXMOX_API_VERSION,
+    KUBERNETES_API_SERVER_PORT, PROXMOX_API_VERSION,
 };
 use lattice_common::{Error, Result, PROXMOX_CREDENTIALS_SECRET};
 use lattice_crd::crd::{
@@ -124,7 +124,7 @@ impl ProxmoxProvider {
         let mut spec = serde_json::json!({
             "controlPlaneEndpoint": {
                 "host": &cfg.control_plane_endpoint,
-                "port": 6443
+                "port": KUBERNETES_API_SERVER_PORT,
             },
             "dnsServers": dns_servers,
             "allowedNodes": allowed_nodes,

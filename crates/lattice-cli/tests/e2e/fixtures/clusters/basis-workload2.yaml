@@ -22,6 +22,9 @@ spec:
     config:
       basis:
         ipv4Pool: "default"
+        # Cilium LB-IPAM range. Outside basis's pool and distinct per
+        # fixture so mgmt/workload/workload2 coexist on one L2.
+        lbCidr: "10.0.0.202/32"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

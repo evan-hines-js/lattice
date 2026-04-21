@@ -15,8 +15,8 @@ fn main() {
     let src = lattice_helm_build::ensure_resource("gateway-api", gateway);
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    let content = std::fs::read_to_string(&src)
-        .unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
+    let content =
+        std::fs::read_to_string(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
     std::fs::write(out_dir.join("gateway-api-crds.yaml"), content)
         .expect("write gateway-api-crds.yaml");
 

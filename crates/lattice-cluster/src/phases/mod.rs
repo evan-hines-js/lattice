@@ -271,10 +271,14 @@ pub async fn reconcile_infrastructure(
     if cluster.spec.monitoring.enabled {
         lattice_victoria_metrics::install::ensure_install(client, cluster.spec.monitoring.ha)
             .await
-            .map_err(|e| Error::internal(format!("failed to ensure VictoriaMetricsInstall: {}", e)))?;
+            .map_err(|e| {
+                Error::internal(format!("failed to ensure VictoriaMetricsInstall: {}", e))
+            })?;
         lattice_metrics_server::install::ensure_install(client)
             .await
-            .map_err(|e| Error::internal(format!("failed to ensure MetricsServerInstall: {}", e)))?;
+            .map_err(|e| {
+                Error::internal(format!("failed to ensure MetricsServerInstall: {}", e))
+            })?;
         lattice_keda::install::ensure_install(client)
             .await
             .map_err(|e| Error::internal(format!("failed to ensure KedaInstall: {}", e)))?;
@@ -293,12 +297,10 @@ pub async fn reconcile_infrastructure(
     }
 
     if let Some(ref topo) = cluster.spec.network_topology {
-        if let Some(cm) =
-            lattice_volcano::install::manifests::generate_topology_discovery_configmap(
-                topo,
-                cluster.spec.provider.provider_type(),
-            )
-        {
+        if let Some(cm) = lattice_volcano::install::manifests::generate_topology_discovery_configmap(
+            topo,
+            cluster.spec.provider.provider_type(),
+        ) {
             lattice_common::apply_manifests(client, &[cm], &options)
                 .await
                 .map_err(|e| {
@@ -359,6 +361,28 @@ pub async fn generate_capi_manifests(
         .await?;
     if let Some(ref cp) = cloud_provider {
         bootstrap.credentials_secret_name = cp.credential_secret_name();
+    }
+
+    // Basis allocates the control-plane VIP server-side during
+    // `Basis.CreateCluster`, so on the first reconcile pass the
+    // endpoint isn't known yet. basis-capi-provider writes it to
+    // `BasisCluster.spec.controlPlaneEndpoint` once allocated; this
+    // lookup picks it up on subsequent reconciles so basis's generator
+    // emits a `KubeadmControlPlane` with kube-vip wired to the right
+    // address. `None` on first pass → generator omits KCP. `Some` on
+    // next pass → generator includes KCP → SSA re-apply lands it.
+    // Other providers take their endpoint from static config and
+    // ignore this field.
+    if cluster.spec.provider.provider_type() == lattice_crd::crd::ProviderType::Basis {
+        let cluster_name = cluster
+            .metadata
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::validation("cluster must have a name"))?;
+        bootstrap.control_plane_endpoint = ctx
+            .kube
+            .get_basis_control_plane_endpoint(cluster_name, &capi_ns)
+            .await?;
     }
 
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_ns)?;

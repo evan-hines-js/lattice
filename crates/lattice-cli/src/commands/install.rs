@@ -208,10 +208,7 @@ impl Installer {
         let mut post_bootstrap_docs = Vec::new();
 
         for doc in docs {
-            let api_version = doc
-                .get("apiVersion")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let api_version = doc.get("apiVersion").and_then(|v| v.as_str()).unwrap_or("");
             let kind = doc.get("kind").and_then(|k| k.as_str()).unwrap_or("");
 
             let group = api_version.split('/').next().unwrap_or("");
@@ -237,9 +234,8 @@ impl Installer {
                 continue;
             }
 
-            let json = serde_json::to_string(&doc).map_err(|e| {
-                Error::validation(format!("Failed to serialize {kind}: {e}"))
-            })?;
+            let json = serde_json::to_string(&doc)
+                .map_err(|e| Error::validation(format!("Failed to serialize {kind}: {e}")))?;
             match classify_doc_kind(kind) {
                 DocPhase::PreCluster => {
                     tracing::debug!(kind, "classified as pre-cluster resource");
@@ -252,9 +248,8 @@ impl Installer {
             }
         }
 
-        let value = cluster_value.ok_or_else(|| {
-            Error::validation("Install bundle must contain a LatticeCluster")
-        })?;
+        let value = cluster_value
+            .ok_or_else(|| Error::validation("Install bundle must contain a LatticeCluster"))?;
         let mut cluster: LatticeCluster = serde_json::from_value(value)
             .map_err(|e| Error::validation(format!("Invalid LatticeCluster: {}", e)))?;
 
@@ -420,9 +415,13 @@ impl Installer {
             "Applying {} post-bootstrap resource(s) from install bundle...",
             self.post_bootstrap_docs.len()
         );
-        apply_with_retry(&mgmt_client, &self.post_bootstrap_docs, "post-bootstrap resources")
-            .await
-            .cmd_err()?;
+        apply_with_retry(
+            &mgmt_client,
+            &self.post_bootstrap_docs,
+            "post-bootstrap resources",
+        )
+        .await
+        .cmd_err()?;
 
         Ok(())
     }
@@ -549,6 +548,23 @@ impl Installer {
         Ok(())
     }
 
+    /// Wait for the Lattice CRDs that `copy_lattice_resources` will write.
+    /// Bootstrap manifests applied seconds earlier include them; this just
+    /// bridges the moment between CRD create and `Established=True`.
+    async fn wait_for_lattice_crds(&self, client: &Client) -> Result<()> {
+        let required_crds = [
+            "infraproviders.lattice.dev",
+            "imageproviders.lattice.dev",
+            "secretproviders.lattice.dev",
+        ];
+        for crd in required_crds {
+            kube_utils::wait_for_crd(client, crd, CAPI_CRD_TIMEOUT)
+                .await
+                .cmd_err()?;
+        }
+        Ok(())
+    }
+
     async fn create_management_cluster_crd(&self, client: &Client) -> Result<()> {
         // Constructor validates metadata.name exists, so this is safe
         let cluster_name = self.cluster_name();
@@ -645,13 +661,21 @@ impl Installer {
         info!("Waiting for control plane nodes to be ready...");
         wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
 
+        // Copy distributable resources before installing CAPI providers.
+        // `install_capi_on_management` reads `InfraProvider.spec` off the
+        // mgmt apiserver to decide imagePullSecrets, credentials, etc.;
+        // if the CR isn't there yet, every field is silently treated as
+        // empty and the Deployment is born without its injections.
+        self.wait_for_lattice_crds(&mgmt_client).await?;
+        info!("Copying distributable resources to management cluster...");
+        crate::commands::copy_lattice_resources(bootstrap_client, &mgmt_client, "bootstrap")
+            .await?;
+
         info!("Installing CAPI on management cluster...");
         self.install_capi_on_management(&mgmt_client).await?;
 
         info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
-        info!("Copying distributable resources to management cluster...");
-        crate::commands::copy_lattice_resources(bootstrap_client, &mgmt_client, "bootstrap").await?;
 
         Ok(())
     }
@@ -683,7 +707,6 @@ impl Installer {
             .await
             .map_err(|e| Error::command_failed(e.to_string()))
     }
-
 
     /// Fetches the management cluster kubeconfig from the bootstrap cluster secret,
     /// rewriting the server URL for Docker provider if needed.
@@ -871,27 +894,33 @@ impl Installer {
     async fn seed_provider_credentials(&self, client: &Client) -> Result<()> {
         match self.provider() {
             ProviderType::Proxmox => {
-                let creds = ProxmoxCredentials::from_env()
-                    .map_err(|e| Error::validation(e.to_string()))?;
+                let creds =
+                    ProxmoxCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
                 info!("Seeding Proxmox credentials (PROXMOX_URL: {})", creds.url);
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::Aws => {
-                let creds = AwsCredentials::from_env()
-                    .map_err(|e| Error::validation(e.to_string()))?;
+                let creds =
+                    AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
                 info!("Seeding AWS credentials (region: {})", creds.region);
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::OpenStack => {
                 let creds = OpenStackCredentials::from_env()
                     .map_err(|e| Error::validation(e.to_string()))?;
-                info!("Seeding OpenStack credentials (cloud: {})", creds.cloud_name);
+                info!(
+                    "Seeding OpenStack credentials (cloud: {})",
+                    creds.cloud_name
+                );
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::Basis => {
-                let creds = BasisCredentials::from_env()
-                    .map_err(|e| Error::validation(e.to_string()))?;
-                info!("Seeding Basis credentials (BASIS_CONTROLLER_URL: {})", creds.server_url);
+                let creds =
+                    BasisCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
+                info!(
+                    "Seeding Basis credentials (BASIS_CONTROLLER_URL: {})",
+                    creds.server_url
+                );
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::Docker => Ok(()),
@@ -992,9 +1021,7 @@ impl Installer {
                 &Patch::Apply(secret),
             )
             .await
-            .map_err(|e| {
-                Error::command_failed(format!("Failed to seed secret '{name}': {e}"))
-            })?;
+            .map_err(|e| Error::command_failed(format!("Failed to seed secret '{name}': {e}")))?;
 
         Ok(())
     }
@@ -1766,10 +1793,7 @@ spec: { type: docker }
         // Two clusters
         let yaml = format!("{MIN_CLUSTER}\n---\n{MIN_CLUSTER}");
         let err = parse_err(&yaml);
-        assert!(
-            err.contains("exactly one LatticeCluster"),
-            "got: {err}"
-        );
+        assert!(err.contains("exactly one LatticeCluster"), "got: {err}");
     }
 
     #[test]

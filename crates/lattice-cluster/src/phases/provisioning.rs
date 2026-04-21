@@ -49,6 +49,20 @@ pub async fn handle_provisioning(cluster: &LatticeCluster, ctx: &Context) -> Res
         let _ = patch_kubeconfig_for_proxy_access(cluster, ctx, &name, &capi_namespace).await;
     }
 
+    // Re-apply CAPI manifests every reconcile. For providers whose
+    // endpoint is known at config time (proxmox/docker/aws) this is a
+    // no-op — SSA sees identical specs and writes nothing. For basis
+    // it's load-bearing: the control-plane manifest is only emittable
+    // once basis-capi-provider has written
+    // `BasisCluster.spec.controlPlaneEndpoint`, so pending-phase's
+    // one-shot apply doesn't include it. Running generate here on
+    // every pass lets SSA land the KCP as soon as the endpoint
+    // appears.
+    let manifests = super::generate_capi_manifests(cluster, ctx).await?;
+    ctx.capi
+        .apply_manifests(&manifests, &capi_namespace)
+        .await?;
+
     debug!("checking infrastructure status");
 
     let bootstrap = cluster.spec.provider.kubernetes.bootstrap.clone();

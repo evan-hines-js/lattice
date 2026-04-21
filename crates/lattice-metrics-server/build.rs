@@ -33,8 +33,7 @@ fn main() {
     );
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
-    std::fs::write(out_dir.join("metrics-server.yaml"), yaml)
-        .expect("write metrics-server.yaml");
+    std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");
 
     println!("cargo:rustc-env=METRICS_SERVER_VERSION={}", chart.version);
 }

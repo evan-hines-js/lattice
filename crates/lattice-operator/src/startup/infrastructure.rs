@@ -43,14 +43,41 @@ pub async fn ensure_capi_infrastructure(
 
         if let (Some(installer), Some(c)) = (capi_installer, &cluster) {
             let provider_type = c.spec.provider.provider_type();
+            let provider_ref = c.spec.provider_ref.clone();
             let cloud_providers: Api<InfraProvider> =
                 Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
-            let cp = cloud_providers.get(&c.spec.provider_ref).await.ok();
+
+            // Wait for the InfraProvider to arrive from the parent via the
+            // distribute-label sync. Tolerating a 404 here (which the old
+            // `.ok()` did) meant the CAPI provider Deployment got applied
+            // without imagePullSecrets / credentials injected — whatever
+            // the InfraProvider.spec carries is needed at apply time and
+            // never backfilled later.
+            tracing::info!(provider_ref = %provider_ref, "Waiting for InfraProvider...");
+            let cp = wait_for_resource(
+                &format!("InfraProvider '{}'", provider_ref),
+                DEFAULT_RESOURCE_TIMEOUT,
+                DEFAULT_POLL_INTERVAL,
+                || {
+                    let cloud_providers = cloud_providers.clone();
+                    let provider_ref = provider_ref.clone();
+                    async move {
+                        match cloud_providers.get(&provider_ref).await {
+                            Ok(cp) => Ok(Some(cp)),
+                            Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+                            Err(e) => Err(format!("API error: {}", e)),
+                        }
+                    }
+                },
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
             ensure_capi_providers_for(
                 client,
                 installer,
                 provider_type,
-                cp.as_ref(),
+                Some(&cp),
                 "lattice-operator",
             )
             .await
@@ -104,13 +131,9 @@ async fn ensure_general_infrastructure(
         return Ok(());
     }
 
-    lattice_common::apply_manifests(
-        client,
-        &manifests,
-        &lattice_common::ApplyOptions::default(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("failed to apply bootstrap manifests: {e}"))?;
+    lattice_common::apply_manifests(client, &manifests, &lattice_common::ApplyOptions::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to apply bootstrap manifests: {e}"))?;
 
     Ok(())
 }
@@ -120,11 +143,7 @@ async fn ensure_general_infrastructure(
 /// Bootstrap clusters never have mesh. Otherwise we look for a LatticeCluster
 /// and honor `spec.services`; if there's no cluster yet (pre-pivot race), we
 /// default to keeping mesh on since that's the steady state.
-async fn resolve_skip_mesh(
-    client: &Client,
-    cluster_mode: bool,
-    config: &SharedConfig,
-) -> bool {
+async fn resolve_skip_mesh(client: &Client, cluster_mode: bool, config: &SharedConfig) -> bool {
     if config.is_bootstrap_cluster {
         return true;
     }

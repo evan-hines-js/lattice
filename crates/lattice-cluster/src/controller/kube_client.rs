@@ -112,6 +112,22 @@ pub trait KubeClient: Send + Sync {
         name: &str,
     ) -> Result<Option<lattice_crd::crd::InfraProvider>, Error>;
 
+    /// Read `BasisCluster.spec.controlPlaneEndpoint.host` from the CR
+    /// that lives in this cluster's CAPI namespace. Returns `None` when
+    /// the CR doesn't exist yet (first reconcile pass, before generate
+    /// has emitted it) or when the host field isn't populated yet
+    /// (basis-capi-provider hasn't called `Basis.CreateCluster` yet).
+    ///
+    /// The LatticeCluster reconciler uses this to feed
+    /// `BootstrapInfo.control_plane_endpoint` so basis's manifest
+    /// generator can emit a `KubeadmControlPlane` with kube-vip wired
+    /// to the basis-allocated VIP.
+    async fn get_basis_control_plane_endpoint(
+        &self,
+        cluster_name: &str,
+        capi_namespace: &str,
+    ) -> Result<Option<String>, Error>;
+
     /// Cordon a node (set spec.unschedulable = true).
     ///
     /// Prevents new pods from being scheduled on the node while letting
@@ -434,6 +450,35 @@ impl KubeClient for KubeClientImpl {
             .cache
             .get_namespaced::<InfraProvider>(name, LATTICE_SYSTEM_NAMESPACE)
             .map(|arc| (*arc).clone()))
+    }
+
+    async fn get_basis_control_plane_endpoint(
+        &self,
+        cluster_name: &str,
+        capi_namespace: &str,
+    ) -> Result<Option<String>, Error> {
+        use kube::api::{Api, ApiResource, DynamicObject};
+
+        let ar = ApiResource {
+            group: "infrastructure.cluster.x-k8s.io".to_string(),
+            version: "v1alpha1".to_string(),
+            api_version: "infrastructure.cluster.x-k8s.io/v1alpha1".to_string(),
+            kind: "BasisCluster".to_string(),
+            plural: "basisclusters".to_string(),
+        };
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), capi_namespace, &ar);
+        Ok(api
+            .get_opt(cluster_name)
+            .await
+            .map_err(Error::from)?
+            .and_then(|obj| {
+                obj.data
+                    .pointer("/spec/controlPlaneEndpoint/host")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            }))
     }
 
     async fn cordon_node(&self, name: &str) -> Result<(), Error> {

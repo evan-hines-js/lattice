@@ -5,9 +5,7 @@ use std::time::Duration;
 
 use kube::runtime::controller::Action;
 
-use lattice_common::install::{
-    run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig,
-};
+use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
 use lattice_common::{ControllerContext, ReconcileError};
 use lattice_crd::crd::VeleroInstall;
 

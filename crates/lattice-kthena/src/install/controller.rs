@@ -5,9 +5,7 @@ use std::time::Duration;
 
 use kube::runtime::controller::Action;
 
-use lattice_common::install::{
-    run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig,
-};
+use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
 use lattice_common::{ControllerContext, ReconcileError};
 use lattice_crd::crd::KthenaInstall;
 
@@ -32,9 +30,8 @@ pub async fn reconcile(
         policies::generate_kthena_autoscaler_cedar_policy(),
     ] {
         manifests.push(
-            serde_json::to_string_pretty(&policy).map_err(|e| {
-                ReconcileError::Validation(format!("serialize Cedar policy: {e}"))
-            })?,
+            serde_json::to_string_pretty(&policy)
+                .map_err(|e| ReconcileError::Validation(format!("serialize Cedar policy: {e}")))?,
         );
     }
 

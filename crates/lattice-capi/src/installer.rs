@@ -24,8 +24,7 @@ use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::{
-    Error, AWS_CAPA_CREDENTIALS_SECRET, BASIS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET,
-    PROXMOX_CREDENTIALS_SECRET,
+    Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
 use lattice_core::system_namespaces::{
     CAPA_NAMESPACE, CAPI_BASIS_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
@@ -605,10 +604,11 @@ impl InfraProviderInfo {
             ProviderType::Basis => Ok(Self {
                 name: "basis",
                 version: env!("CAPI_BASIS_VERSION").to_string(),
-                credentials_secret: Some((CAPI_BASIS_NAMESPACE, BASIS_CREDENTIALS_SECRET)),
-                // `serverUrl` is templated into the components YAML; cert/key/ca
-                // are mounted from the Secret as files in the Deployment spec.
-                credentials_env_map: &[("serverUrl", "BASIS_CONTROLLER_URL")],
+                // Each BasisCluster carries its own `spec.credentialsRef`
+                // pointing at the Secret Lattice seeds in `lattice-secrets`;
+                // the provider reconciler reads that Secret per-reconcile.
+                credentials_secret: None,
+                credentials_env_map: &[],
                 needs_ipam: false,
             }),
             ProviderType::Gcp | ProviderType::Azure | _ => Err(Error::capi_installation(format!(
@@ -848,8 +848,7 @@ impl NativeInstaller {
         // any required imagePullSecrets. Patching post-apply forced a second
         // ReplicaSet revision and — on private registries — an ImagePullBackOff
         // cycle while the first revision waited for a non-existent pull secret.
-        let all_documents =
-            inject_deployment_overrides(all_documents, image_pull_secret_names)?;
+        let all_documents = inject_deployment_overrides(all_documents, image_pull_secret_names)?;
 
         info!(
             provider = %desired.name,
@@ -1534,8 +1533,10 @@ spec:
         assert!(tolerations
             .iter()
             .any(|t| t.get("key").and_then(|v| v.as_str()) == Some("custom-taint")));
-        assert!(tolerations.iter().any(|t| t.get("key").and_then(|v| v.as_str())
-            == Some("node-role.kubernetes.io/control-plane")));
+        assert!(tolerations
+            .iter()
+            .any(|t| t.get("key").and_then(|v| v.as_str())
+                == Some("node-role.kubernetes.io/control-plane")));
 
         let pulls = spec
             .get("imagePullSecrets")

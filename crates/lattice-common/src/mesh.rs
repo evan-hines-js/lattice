@@ -106,9 +106,7 @@ pub fn ingress_gateway_sa_name(namespace: &str) -> String {
 // inside lattice-infra/bootstrap; hoisted here so per-component install
 // crates can reuse them without depending on lattice-infra.
 
-use lattice_crd::crd::{
-    EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec,
-};
+use lattice_crd::crd::{EgressRule, EgressTarget, LatticeMeshMember, LatticeMeshMemberSpec};
 
 /// Minimal Namespace YAML.
 pub fn namespace_yaml(name: &str) -> String {

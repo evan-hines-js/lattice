@@ -140,6 +140,17 @@ pub struct BootstrapInfo {
     /// Name of the K8s Secret containing provider credentials (ESO-synced).
     /// Used by CAPI providers to set `credentialsRef` on infrastructure objects.
     pub credentials_secret_name: Option<String>,
+    /// Control-plane endpoint host, when the infrastructure provider
+    /// allocates it at runtime rather than taking it from user config.
+    /// Only the basis provider uses this today — basis-controller auto-
+    /// picks a VIP from its pool, the CAPI provider writes it to
+    /// `BasisCluster.spec.controlPlaneEndpoint`, and the reconciler
+    /// populates this field so `basis::generate_capi_manifests` can
+    /// emit a `KubeadmControlPlane` with kube-vip wired to the right
+    /// address. `None` on the first reconcile pass (before basis has
+    /// allocated); `Some` on subsequent passes. Providers whose
+    /// endpoint is statically known (proxmox/docker/aws) ignore it.
+    pub control_plane_endpoint: Option<String>,
 }
 
 impl Default for BootstrapInfo {
@@ -151,6 +162,7 @@ impl Default for BootstrapInfo {
             registry_mirrors: Vec::new(),
             scripts_dir: "/scripts".to_string(),
             credentials_secret_name: None,
+            control_plane_endpoint: None,
         }
     }
 }
@@ -170,6 +182,7 @@ impl BootstrapInfo {
             registry_mirrors: Vec::new(),
             scripts_dir,
             credentials_secret_name: None,
+            control_plane_endpoint: None,
         }
     }
 

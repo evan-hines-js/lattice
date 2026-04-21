@@ -1,15 +1,20 @@
-//! Basis provider configuration
+//! Basis provider configuration.
 //!
 //! Basis is a minimal bare-metal VM scheduler designed as a Proxmox
 //! replacement for Lattice's on-prem use case: VMs for Kubernetes node
-//! substrate, nothing more. The Basis controller owns scheduling, IP
-//! allocation, and VIP reservation, so this per-cluster config is much
-//! smaller than its Proxmox counterpart — the only input Basis needs
-//! per cluster is which IP pool to draw from.
+//! substrate, nothing more.
 //!
-//! K8s-level concerns that belong across providers (SSH keys, DNS
-//! servers, kube-vip, LB-IPAM range) are handled by the cluster-wide
-//! bootstrap path, not by per-provider config.
+//! Everything about a cluster's addressing is derived from the named
+//! `ipv4Pool`:
+//!   - VM IPs come from the pool's vm sub-range (auto-allocated per VM).
+//!   - The control-plane VIP is auto-allocated by basis from the pool's
+//!     vip sub-range when the `BasisCluster` CR is reconciled — Lattice
+//!     does not pick it and users do not specify it. The provider
+//!     reconciler writes the allocated address onto
+//!     `BasisCluster.spec.controlPlaneEndpoint`; CAPI core propagates
+//!     it to `Cluster.spec.controlPlaneEndpoint`, and Lattice patches
+//!     the kube-vip static pod manifest into the `KubeadmControlPlane`
+//!     once that value is known.
 //!
 //! Reference: https://github.com/lattos/basis/blob/main/docs/lattice-integration.md
 
@@ -26,4 +31,25 @@ pub struct BasisConfig {
     /// Pools are defined in the controller's config file; see the Basis
     /// deploy docs. A typical homelab value is `"default"`.
     pub ipv4_pool: String,
+
+    /// Optional override for the interface kube-vip binds the VIP on.
+    /// Defaults to `ens3` — the first virtio-net interface the
+    /// basis-agent attaches to each VM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_ip_network_interface: Option<String>,
+
+    /// Optional override for the kube-vip container image. Omit to let
+    /// the generator pick a tested default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kube_vip_image: Option<String>,
+
+    /// CIDR from which Cilium hands out `type: LoadBalancer` addresses
+    /// (the `CiliumLoadBalancerIPPool`). Must be on the same L2 segment
+    /// as the cluster's nodes — Cilium announces via ARP — and must NOT
+    /// overlap with the basis IP pool (otherwise basis would hand the
+    /// same IP to a future VM and collide with Cilium's announcement).
+    /// Without this set, `type: LoadBalancer` Services stay `<pending>`
+    /// forever and the Lattice cell proxy never becomes reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lb_cidr: Option<String>,
 }

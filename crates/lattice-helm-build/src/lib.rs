@@ -79,8 +79,8 @@ pub fn charts_dir() -> PathBuf {
 pub fn read_versions() -> Versions {
     let path = workspace_root().join("versions.toml");
     println!("cargo:rerun-if-changed={}", path.display());
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     toml::from_str(&raw).expect("versions.toml parse")
 }
 

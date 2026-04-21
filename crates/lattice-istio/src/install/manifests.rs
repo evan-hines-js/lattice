@@ -283,7 +283,9 @@ mod tests {
     #[test]
     fn static_manifests_contain_crd_and_cni() {
         let render = render_istio_manifests("c1", "lattice.test", &[]);
-        assert!(render.iter().any(|d| d.contains("CustomResourceDefinition")));
+        assert!(render
+            .iter()
+            .any(|d| d.contains("CustomResourceDefinition")));
         assert!(render.iter().any(|d| d.contains("name: istio-cni")));
     }
 

@@ -47,6 +47,11 @@ pub const DEFAULT_KUBE_VIP_IMAGE: &str = "ghcr.io/kube-vip/kube-vip:v0.8.0";
 /// Default VIP network interface for Proxmox
 pub const DEFAULT_VIP_INTERFACE_PROXMOX: &str = "ens18";
 
+/// Default VIP network interface for Basis. basis-agent attaches one
+/// virtio-net device per VM; cloud-init's predictable-NIC naming gives
+/// the first virtio interface the name `ens3` on noble cloud images.
+pub const DEFAULT_VIP_INTERFACE_BASIS: &str = "ens3";
+
 /// Default node CIDR for OpenStack
 pub const DEFAULT_NODE_CIDR_OPENSTACK: &str = "10.6.0.0/24";
 

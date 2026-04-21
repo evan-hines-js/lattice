@@ -167,7 +167,10 @@ pub async fn wait_for_daemonset(
                         let ready = ds
                             .status
                             .as_ref()
-                            .map(|s| s.desired_number_scheduled > 0 && s.number_ready == s.desired_number_scheduled)
+                            .map(|s| {
+                                s.desired_number_scheduled > 0
+                                    && s.number_ready == s.desired_number_scheduled
+                            })
                             .unwrap_or(false);
                         Ok(ready)
                     }

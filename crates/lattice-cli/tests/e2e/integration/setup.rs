@@ -257,11 +257,16 @@ pub async fn setup_full_hierarchy(config: &SetupConfig) -> Result<SetupResult, S
 
     let mgmt_bundle = load_cluster_config("LATTICE_MGMT_CLUSTER_CONFIG", "docker-mgmt.yaml")?;
     let mgmt_provider: InfraProvider = mgmt_bundle.cluster.spec.provider.provider_type().into();
-    let mgmt_bootstrap = mgmt_bundle.cluster.spec.provider.kubernetes.bootstrap.clone();
+    let mgmt_bootstrap = mgmt_bundle
+        .cluster
+        .spec
+        .provider
+        .kubernetes
+        .bootstrap
+        .clone();
 
     let mut workload_cluster =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
-            .cluster;
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?.cluster;
     let workload_provider: InfraProvider = workload_cluster.spec.provider.provider_type().into();
     let workload_bootstrap = workload_cluster.spec.provider.kubernetes.bootstrap.clone();
     let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
@@ -677,8 +682,7 @@ pub async fn setup_mgmt_and_workload(config: &SetupConfig) -> Result<SetupResult
     let mut result = setup_mgmt_only(config).await?;
 
     let workload_cluster =
-        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?
-            .cluster;
+        load_cluster_config("LATTICE_WORKLOAD_CLUSTER_CONFIG", "docker-workload.yaml")?.cluster;
     let workload_expected_workers = workload_cluster.spec.nodes.total_workers();
 
     info!("[Setup] Creating workload cluster...");

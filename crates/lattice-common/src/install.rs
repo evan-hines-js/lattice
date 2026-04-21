@@ -46,8 +46,12 @@ where
     <K as kube::Resource>::DynamicType: Default,
 {
     let api: Api<K> = Api::all(client.clone());
-    api.patch(name, &PatchParams::apply(field_manager), &Patch::Apply(resource))
-        .await?;
+    api.patch(
+        name,
+        &PatchParams::apply(field_manager),
+        &Patch::Apply(resource),
+    )
+    .await?;
     Ok(())
 }
 
