@@ -115,6 +115,26 @@ fn init_telemetry_global() -> Option<prometheus::Registry> {
 // Main startup
 // ---------------------------------------------------------------------------
 
+/// Retry a startup operation forever with exponential backoff.
+///
+/// The infrastructure controller's task body runs once per lease acquisition;
+/// nothing else retries these steps. A transient failure (flaky registry,
+/// slow cert-manager rollout, API server hiccup) would otherwise panic the
+/// task and leave the pod alive but non-functional.
+async fn retry_startup<F, Fut>(op: &'static str, operation: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let config = RetryConfig {
+        initial_delay: Duration::from_secs(10),
+        max_delay: Duration::from_secs(60),
+        ..RetryConfig::default()
+    };
+    // max_attempts=0 (default) retries forever, so the Err branch is unreachable.
+    let _: Result<(), _> = retry_with_backoff(&config, op, operation).await;
+}
+
 async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> {
     tracing::info!("Starting Lattice operator (per-controller leader election)...");
 
@@ -199,16 +219,27 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
                 let config = config.clone();
                 let capi_installer = capi_installer.clone();
                 Box::pin(async move {
-                    ensure_cluster_crds(&client)
-                        .await
-                        .expect("CRD install failed");
-                    ensure_service_crds(&client)
-                        .await
-                        .expect("CRD install failed");
+                    retry_startup("ensure_cluster_crds", || {
+                        let client = client.clone();
+                        async move { ensure_cluster_crds(&client).await }
+                    })
+                    .await;
+                    retry_startup("ensure_service_crds", || {
+                        let client = client.clone();
+                        async move { ensure_service_crds(&client).await }
+                    })
+                    .await;
                     spawn_admission_webhook_configuration(client.clone());
-                    ensure_capi_infrastructure(&client, Some(&*capi_installer), &config)
-                        .await
-                        .expect("CAPI infrastructure failed");
+                    retry_startup("ensure_capi_infrastructure", || {
+                        let client = client.clone();
+                        let capi_installer = capi_installer.clone();
+                        let config = config.clone();
+                        async move {
+                            ensure_capi_infrastructure(&client, Some(&*capi_installer), &config)
+                                .await
+                        }
+                    })
+                    .await;
                     let handle = spawn_general_infrastructure(client.clone(), true, config.clone());
                     spawn_webhook_infrastructure(client);
                     // Wait for general infra then hold the lease forever
