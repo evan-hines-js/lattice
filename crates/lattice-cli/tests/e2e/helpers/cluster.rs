@@ -819,40 +819,54 @@ async fn get_proxy_loadbalancer_url(kubeconfig: &str) -> Result<String, String> 
     .await
 }
 
-/// Get proxy URL, creating a resilient port-forward if necessary.
+/// Resolve a proxy URL for HTTP-level tests: reuse an existing healthy
+/// URL, or start a fresh [`ProxySession`] via [`ProxySession::start`].
 ///
-/// If an existing URL is provided, verifies it's healthy first. If unhealthy,
-/// creates a fresh resilient port-forward with automatic restart capability.
+/// Returns `(url, Some(session))` when a new session was created (the
+/// caller owns it for the test's lifetime); `(url, None)` when an
+/// externally-owned URL was reused.
 pub async fn get_or_create_proxy(
     kubeconfig: &str,
+    provider: InfraProvider,
     existing_url: Option<&str>,
-) -> Result<(String, Option<ResilientPortForward>), String> {
-    use lattice_cli::commands::port_forward::check_health;
-
+) -> Result<(String, Option<ProxySession>), String> {
     if let Some(url) = existing_url {
-        // Retry health check — the proxy may be briefly unreachable during
-        // mesh recompilation (e.g., OIDC provider creating ServiceEntry).
-        for attempt in 1..=3 {
-            if check_health(url, Duration::from_secs(5), None).await {
-                info!("[Helpers] Using existing proxy URL: {}", url);
-                return Ok((url.to_string(), None));
-            }
-            if attempt < 3 {
-                info!(
-                    "[Helpers] Proxy health check attempt {}/3 failed, retrying...",
-                    attempt
-                );
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
+        if proxy_url_healthy(url).await {
+            info!("[Helpers] Using existing proxy URL: {}", url);
+            return Ok((url.to_string(), None));
         }
-        info!("[Helpers] Existing proxy URL unhealthy after 3 attempts, creating fresh port-forward...");
+        warn!(
+            url = url,
+            provider = %provider,
+            "[Helpers] Existing proxy URL unhealthy after retries; starting fresh session",
+        );
     }
 
-    let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT)
-        .await
-        .map_err(|e| e.to_string())?;
-    let url = pf.url.clone();
-    Ok((url, Some(pf)))
+    let session = ProxySession::start(kubeconfig, provider).await?;
+    let url = session.url.clone();
+    Ok((url, Some(session)))
+}
+
+/// Three-attempt health check with a short pause between tries — the
+/// proxy can flake briefly during mesh recompilation (e.g. OIDC provider
+/// creating a ServiceEntry) and a single failed probe shouldn't be
+/// enough to declare the URL dead.
+async fn proxy_url_healthy(url: &str) -> bool {
+    use lattice_cli::commands::port_forward::check_health;
+    const ATTEMPTS: u32 = 3;
+    for attempt in 1..=ATTEMPTS {
+        if check_health(url, Duration::from_secs(5), None).await {
+            return true;
+        }
+        if attempt < ATTEMPTS {
+            info!(
+                "[Helpers] Proxy health check attempt {}/{} failed, retrying...",
+                attempt, ATTEMPTS
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    false
 }
 
 // =============================================================================
@@ -1068,9 +1082,9 @@ async fn wait_for_cluster_fully_deleted(
 /// # Example
 ///
 /// ```ignore
-/// let session = ProxySession::start(mgmt_kubeconfig)?;
+/// let session = ProxySession::start(mgmt_kubeconfig, provider)?;
 /// let workload_kc = session.kubeconfig_for("e2e-workload").await?;
-/// // Port-forward auto-restarts if it dies - no manual intervention needed
+/// // Port-forward auto-restarts if it dies — no manual intervention needed
 /// ```
 pub struct ProxySession {
     /// Kubeconfig for the cluster this session connects to
@@ -1084,10 +1098,24 @@ pub struct ProxySession {
 }
 
 impl ProxySession {
-    /// Start a proxy session using port-forward (for Docker/kind).
+    /// Start a proxy session, picking the transport the provider requires.
     ///
-    /// For cloud providers with LoadBalancer, use `start_cloud` instead.
-    pub async fn start(kubeconfig: &str) -> Result<Self, String> {
+    /// The only public entry point — the provider → transport mapping
+    /// lives here and nowhere else, so a single change here updates
+    /// every "get me a proxy" caller.
+    pub async fn start(kubeconfig: &str, provider: InfraProvider) -> Result<Self, String> {
+        match provider {
+            InfraProvider::Docker => Self::start_via_port_forward(kubeconfig).await,
+            _ => Self::start_via_loadbalancer(kubeconfig).await,
+        }
+    }
+
+    /// Port-forward transport: Docker/kind clusters have no usable
+    /// LoadBalancer, so kubectl port-forward to the in-cluster proxy
+    /// Service is what the test harness uses. `ResilientPortForward`
+    /// keeps the tunnel alive across blips (deterministic local port
+    /// per kubeconfig, auto-restart on failure).
+    async fn start_via_port_forward(kubeconfig: &str) -> Result<Self, String> {
         let pf = ResilientPortForward::start(kubeconfig, PROXY_PORT)
             .await
             .map_err(|e| e.to_string())?;
@@ -1107,8 +1135,11 @@ impl ProxySession {
         })
     }
 
-    /// Start a proxy session for cloud providers (fetches LoadBalancer URL).
-    pub async fn start_cloud(kubeconfig: &str) -> Result<Self, String> {
+    /// LoadBalancer transport: cloud / Basis clusters expose the proxy
+    /// Service through whatever LB the CNI/infra has wired up (Cilium
+    /// L2 for Basis, NLB for AWS, etc.). We just resolve its external
+    /// URL once.
+    async fn start_via_loadbalancer(kubeconfig: &str) -> Result<Self, String> {
         let lb_url = get_proxy_loadbalancer_url(kubeconfig).await?;
         let token = get_sa_token(kubeconfig, LATTICE_SYSTEM_NAMESPACE, "lattice-operator").await?;
 
@@ -1118,17 +1149,6 @@ impl ProxySession {
             token,
             port_forward: None,
         })
-    }
-
-    /// Start a proxy session, choosing port-forward or LoadBalancer based on provider.
-    pub async fn start_for_provider(
-        kubeconfig: &str,
-        provider: InfraProvider,
-    ) -> Result<Self, String> {
-        match provider {
-            InfraProvider::Docker => Self::start(kubeconfig).await,
-            _ => Self::start_cloud(kubeconfig).await,
-        }
     }
 
     /// Wait until the proxy is healthy (useful after operations that disrupt connectivity).

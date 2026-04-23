@@ -12,7 +12,8 @@ use std::time::Duration;
 use kube::Client;
 
 use lattice_common::kube_utils::wait_for_all_deployments;
-use lattice_common::{apply_manifests, ApplyOptions, Error};
+use lattice_common::retry::RetryConfig;
+use lattice_common::{apply_manifests_with_retry, ApplyOptions, Error};
 
 /// Namespace the cert-manager chart renders into.
 pub const NAMESPACE: &str = "cert-manager";
@@ -29,10 +30,12 @@ const READY_TIMEOUT: Duration = Duration::from_secs(300);
 /// — the controller loop can't service those callers because the full
 /// operator isn't running yet.
 pub async fn install_blocking(client: &Client) -> Result<(), Error> {
-    apply_manifests(
+    apply_manifests_with_retry(
         client,
         manifests::generate_cert_manager(),
         &ApplyOptions::default(),
+        &RetryConfig::install(),
+        "cert-manager install",
     )
     .await?;
     wait_for_all_deployments(client, NAMESPACE, READY_TIMEOUT).await

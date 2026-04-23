@@ -31,6 +31,7 @@ use super::super::helpers::{
     http_get_with_retry, run_kubectl, truncate, with_diagnostics, DiagnosticContext,
     DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
+use super::super::providers::InfraProvider;
 use super::cedar::{apply_e2e_default_policy, delete_cedar_policy, E2E_DEFAULT_POLICY_NAME};
 
 // ============================================================================
@@ -114,6 +115,7 @@ pub async fn wait_for_agent_ready(
 /// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn test_proxy_access_to_child(
     parent_kubeconfig: &str,
+    parent_provider: InfraProvider,
     child_cluster_name: &str,
     existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
@@ -122,9 +124,8 @@ pub async fn test_proxy_access_to_child(
         child_cluster_name
     );
 
-    // Get or create proxy connection
-    let (proxy_url, _port_forward) =
-        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
+    let (proxy_url, _session) =
+        get_or_create_proxy(parent_kubeconfig, parent_provider, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the parent cluster
     let token = get_sa_token(parent_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA).await?;
@@ -150,6 +151,7 @@ pub async fn test_proxy_access_to_child(
 /// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn test_proxy_access_to_grandchild(
     root_kubeconfig: &str,
+    root_provider: InfraProvider,
     grandchild_cluster_name: &str,
     existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
@@ -158,9 +160,8 @@ pub async fn test_proxy_access_to_grandchild(
         grandchild_cluster_name
     );
 
-    // Get or create proxy connection
-    let (proxy_url, _port_forward) =
-        get_or_create_proxy(root_kubeconfig, existing_proxy_url).await?;
+    let (proxy_url, _session) =
+        get_or_create_proxy(root_kubeconfig, root_provider, existing_proxy_url).await?;
 
     // Get a ServiceAccount token from the root cluster
     let token = get_sa_token(root_kubeconfig, PROXY_TEST_NAMESPACE, PROXY_TEST_SA).await?;
@@ -283,14 +284,24 @@ pub async fn run_proxy_tests(
 
         let mgmt_proxy_url = ctx.mgmt_proxy_url.as_deref();
         wait_for_agent_ready(&ctx.mgmt_kubeconfig, workload_cluster_name).await?;
-        test_proxy_access_to_child(&ctx.mgmt_kubeconfig, workload_cluster_name, mgmt_proxy_url)
-            .await?;
+        test_proxy_access_to_child(
+            &ctx.mgmt_kubeconfig,
+            ctx.provider,
+            workload_cluster_name,
+            mgmt_proxy_url,
+        )
+        .await?;
 
         if let Some(w2_name) = workload2_cluster_name {
             if ctx.has_workload() {
                 wait_for_agent_ready(ctx.workload_kubeconfig.as_deref().unwrap(), w2_name).await?;
-                test_proxy_access_to_grandchild(&ctx.mgmt_kubeconfig, w2_name, mgmt_proxy_url)
-                    .await?;
+                test_proxy_access_to_grandchild(
+                    &ctx.mgmt_kubeconfig,
+                    ctx.provider,
+                    w2_name,
+                    mgmt_proxy_url,
+                )
+                .await?;
             }
         }
 
@@ -325,9 +336,9 @@ async fn test_proxy_access_standalone() {
         .await
         .unwrap();
 
-    // Use proxy URL from session (port-forward is managed by TestSession)
     let result = test_proxy_access_to_child(
         &session.ctx.mgmt_kubeconfig,
+        session.ctx.provider,
         &workload_name,
         session.ctx.mgmt_proxy_url.as_deref(),
     )

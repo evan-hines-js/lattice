@@ -81,7 +81,10 @@ impl ChaosConfig {
     pub fn for_provider(provider: InfraProvider) -> Self {
         match provider {
             InfraProvider::Docker => Self::default(),
-            InfraProvider::Aws | InfraProvider::OpenStack | InfraProvider::Proxmox => Self {
+            InfraProvider::Aws
+            | InfraProvider::OpenStack
+            | InfraProvider::Proxmox
+            | InfraProvider::Basis => Self {
                 pod_interval: (90, 150),  // 90-150s between pod kills
                 net_interval: (120, 180), // 120-180s between network cuts
                 net_blackout_secs: 5,

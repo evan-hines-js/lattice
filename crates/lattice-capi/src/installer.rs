@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
-use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_common::retry::RetryConfig;
 use lattice_common::{
     Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
 };
@@ -859,19 +859,12 @@ impl NativeInstaller {
         );
 
         let provider_label = format!("{} {}", desired.provider_type, desired.name);
-        retry_with_backoff(
-            &RetryConfig {
-                initial_delay: Duration::from_secs(2),
-                ..RetryConfig::default()
-            },
+        kube_utils::apply_manifests_with_retry(
+            client,
+            &all_documents,
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
             &provider_label,
-            || {
-                let client = client.clone();
-                let docs = all_documents.clone();
-                async move {
-                    kube_utils::apply_manifests(&client, &docs, &ApplyOptions::default()).await
-                }
-            },
         )
         .await
         .map_err(|e| {

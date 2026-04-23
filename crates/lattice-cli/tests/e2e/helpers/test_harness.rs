@@ -22,6 +22,7 @@ pub struct TestResult {
 pub struct TestHarness {
     suite: String,
     results: std::sync::Arc<Mutex<Vec<TestResult>>>,
+    started: Instant,
 }
 
 impl TestHarness {
@@ -29,6 +30,7 @@ impl TestHarness {
         Self {
             suite: suite.to_string(),
             results: std::sync::Arc::new(Mutex::new(Vec::new())),
+            started: Instant::now(),
         }
     }
 
@@ -63,7 +65,8 @@ impl TestHarness {
 
     pub fn finish(&self) -> Result<(), String> {
         let results = self.results.lock().unwrap();
-        let total_duration: Duration = results.iter().map(|r| r.duration).sum();
+        let aggregate_duration: Duration = results.iter().map(|r| r.duration).sum();
+        let wall_duration = self.started.elapsed();
         let passed = results.iter().filter(|r| r.passed).count();
         let failed = results.iter().filter(|r| !r.passed).count();
 
@@ -80,11 +83,16 @@ impl TestHarness {
             }
         }
         info!("----------------------------------------");
+        // Wall is the real phase duration; aggregate is the sum of
+        // per-task durations. For concurrent phases aggregate >> wall
+        // by the effective parallelism factor; sequential phases have
+        // aggregate ≈ wall.
         info!(
-            "  {} passed, {} failed ({:.1}s total)",
+            "  {} passed, {} failed in {:.1}s wall ({:.1}s aggregate)",
             passed,
             failed,
-            total_duration.as_secs_f64()
+            wall_duration.as_secs_f64(),
+            aggregate_duration.as_secs_f64()
         );
         info!("========================================");
 

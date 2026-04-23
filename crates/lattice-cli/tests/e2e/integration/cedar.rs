@@ -32,6 +32,7 @@ use super::super::helpers::{
     get_sa_token, http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition,
     with_diagnostics, DiagnosticContext, TestHarness,
 };
+use super::super::providers::InfraProvider;
 
 // =============================================================================
 // Constants
@@ -241,6 +242,7 @@ async fn verify_sa_access_denied(
 /// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn run_cedar_proxy_test(
     parent_kubeconfig: &str,
+    parent_provider: InfraProvider,
     child_cluster_name: &str,
     existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
@@ -249,8 +251,8 @@ pub async fn run_cedar_proxy_test(
         child_cluster_name
     );
 
-    let (proxy_url, _port_forward) =
-        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
+    let (proxy_url, _session) =
+        get_or_create_proxy(parent_kubeconfig, parent_provider, existing_proxy_url).await?;
 
     setup_cedar_test_resources(parent_kubeconfig, CEDAR_PROXY_TEST_NS).await?;
 
@@ -294,6 +296,7 @@ pub async fn run_cedar_proxy_test(
 /// * `existing_proxy_url` - Optional existing proxy URL (avoids creating new port-forward)
 pub async fn run_cedar_group_test(
     parent_kubeconfig: &str,
+    parent_provider: InfraProvider,
     child_cluster_name: &str,
     existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
@@ -302,8 +305,8 @@ pub async fn run_cedar_group_test(
         child_cluster_name
     );
 
-    let (proxy_url, _port_forward) =
-        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
+    let (proxy_url, _session) =
+        get_or_create_proxy(parent_kubeconfig, parent_provider, existing_proxy_url).await?;
 
     setup_cedar_test_resources(parent_kubeconfig, CEDAR_GROUP_TEST_NS).await?;
 
@@ -386,16 +389,19 @@ pub async fn run_cedar_hierarchy_tests(
 
         let proxy_url = ctx.mgmt_proxy_url.as_deref();
         let kubeconfig = &ctx.mgmt_kubeconfig;
+        let provider = ctx.provider;
 
         let harness = TestHarness::new("Cedar");
         tokio::join!(
             harness.run("Proxy test", || run_cedar_proxy_test(
                 kubeconfig,
+                provider,
                 child_cluster_name,
                 proxy_url
             )),
             harness.run("Group test", || run_cedar_group_test(
                 kubeconfig,
+                provider,
                 child_cluster_name,
                 proxy_url
             )),

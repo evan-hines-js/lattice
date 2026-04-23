@@ -40,40 +40,15 @@ use lattice_cell::bootstrap::{
 use lattice_common::credentials::{
     AwsCredentials, BasisCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
 };
-use lattice_common::kube_utils;
+use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::{capi_namespace, kubeconfig_secret_name, OPERATOR_NAME};
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_SA_TOKEN};
 use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 
-use lattice_common::retry::{retry_with_backoff, RetryConfig};
+use lattice_common::retry::RetryConfig;
 
 use super::CommandErrorExt;
 use crate::{Error, Result};
-
-/// Apply manifests with retry for transient API server failures.
-async fn apply_with_retry(
-    client: &Client,
-    manifests: &[impl AsRef<str>],
-    label: &str,
-) -> std::result::Result<(), lattice_common::Error> {
-    let strs: Vec<&str> = manifests.iter().map(|m| m.as_ref()).collect();
-    retry_with_backoff(
-        &RetryConfig {
-            initial_delay: Duration::from_secs(2),
-            ..RetryConfig::default()
-        },
-        label,
-        || {
-            let c = client.clone();
-            let docs: Vec<String> = strs.iter().map(|s| s.to_string()).collect();
-            async move {
-                let refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
-                kube_utils::apply_manifests(&c, &refs, &Default::default()).await
-            }
-        },
-    )
-    .await
-}
 
 /// Install a self-managing Lattice cluster from a LatticeCluster CRD
 #[derive(Args, Debug)]
@@ -415,9 +390,11 @@ impl Installer {
             "Applying {} post-bootstrap resource(s) from install bundle...",
             self.post_bootstrap_docs.len()
         );
-        apply_with_retry(
+        kube_utils::apply_manifests_with_retry(
             &mgmt_client,
             &self.post_bootstrap_docs,
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
             "post-bootstrap resources",
         )
         .await
@@ -574,14 +551,23 @@ impl Installer {
             self.provider()
         );
 
-        kube_utils::apply_manifest_with_retry(client, &self.cluster_yaml, CRD_APPLY_TIMEOUT)
-            .await
-            .map_err(|e| {
-                Error::command_failed(format!(
-                    "Failed to create LatticeCluster '{}': {}",
-                    cluster_name, e
-                ))
-            })?;
+        // `cluster_yaml` is a single compact JSON doc from
+        // `serde_json::to_string(&cluster)`; pass it as a one-element
+        // slice without splitting.
+        kube_utils::apply_manifests_with_retry(
+            client,
+            &[self.cluster_yaml.as_str()],
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
+            "LatticeCluster CRD",
+        )
+        .await
+        .map_err(|e| {
+            Error::command_failed(format!(
+                "Failed to create LatticeCluster '{}': {}",
+                cluster_name, e
+            ))
+        })?;
         Ok(())
     }
 
@@ -605,8 +591,13 @@ impl Installer {
                 let secret_name = secret_name.clone();
                 let cluster_name = cluster_name.clone();
                 async move {
-                    // Check phase (transient errors return "Unknown" and continue polling)
-                    let phase = get_latticecluster_phase(&client, &cluster_name).await;
+                    // Check phase. `get_latticecluster_phase` returns Err
+                    // only for post-apply 404 (CR was never written) — a
+                    // hard terminal failure. Transient errors return
+                    // `Ok("Unknown")` and keep the loop going.
+                    let phase = get_latticecluster_phase(&client, &cluster_name)
+                        .await
+                        .map_err(|e| e.to_string())?;
                     if phase == "Failed" {
                         return Err("Cluster provisioning failed".to_string());
                     }
@@ -654,9 +645,15 @@ impl Installer {
         let manifests = self.generate_bootstrap_manifests().await?;
         info!("Applying {} bootstrap manifests...", manifests.len());
 
-        apply_with_retry(&mgmt_client, &manifests, "bootstrap manifests")
-            .await
-            .cmd_err()?;
+        kube_utils::apply_manifests_with_retry(
+            &mgmt_client,
+            &manifests,
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
+            "bootstrap manifests",
+        )
+        .await
+        .cmd_err()?;
 
         info!("Waiting for control plane nodes to be ready...");
         wait_for_control_plane_ready(&mgmt_client, CONTROL_PLANE_READY_TIMEOUT).await?;
@@ -983,9 +980,15 @@ impl Installer {
             "Applying {} pre-cluster resource(s) from install bundle...",
             self.pre_cluster_docs.len()
         );
-        apply_with_retry(client, &self.pre_cluster_docs, "pre-cluster resources")
-            .await
-            .cmd_err()
+        kube_utils::apply_manifests_with_retry(
+            client,
+            &self.pre_cluster_docs,
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
+            "pre-cluster resources",
+        )
+        .await
+        .cmd_err()
     }
 
     /// Apply a Secret into the `lattice-secrets` ESO source namespace.
@@ -1281,9 +1284,11 @@ impl Installer {
         let cluster_json = serde_json::to_string(&cluster_policy)
             .map_err(|e| Error::command_failed(format!("failed to serialize CedarPolicy: {e}")))?;
 
-        apply_with_retry(
+        kube_utils::apply_manifests_with_retry(
             &mgmt_client,
             &[&admin_json, &cluster_json],
+            &ApplyOptions::default(),
+            &RetryConfig::install(),
             "Cedar policies",
         )
         .await
@@ -1439,10 +1444,11 @@ impl Installer {
 
 /// Get LatticeCluster phase using dynamic API.
 ///
-/// Returns the phase string, or "Unknown" for transient network errors.
-/// The caller should continue polling on "Unknown" — only "Failed" phase
-/// indicates a terminal failure.
-async fn get_latticecluster_phase(client: &Client, name: &str) -> String {
+/// Only called after the CR has been applied, so a 404 is a terminal
+/// failure rather than a pending state — surface it as `Err`. Transient
+/// errors return `Ok("Unknown")` so the caller's poll loop continues
+/// through apiserver blips.
+async fn get_latticecluster_phase(client: &Client, name: &str) -> Result<String> {
     use kube::api::{Api, DynamicObject};
 
     let ar =
@@ -1450,19 +1456,20 @@ async fn get_latticecluster_phase(client: &Client, name: &str) -> String {
     let api: Api<DynamicObject> = Api::all_with(client.clone(), &ar);
 
     match api.get(name).await {
-        Ok(cluster) => cluster
+        Ok(cluster) => Ok(cluster
             .data
             .get("status")
             .and_then(|s| s.get("phase"))
             .and_then(|p| p.as_str())
             .unwrap_or("Pending")
-            .to_string(),
-        Err(kube::Error::Api(e)) if e.code == 404 => "Pending".to_string(),
+            .to_string()),
+        Err(kube::Error::Api(e)) if e.code == 404 => Err(Error::command_failed(format!(
+            "LatticeCluster '{name}' not found after apply — CR was never written to the apiserver"
+        ))),
         Err(e) => {
-            // Transient errors (SendRequest, timeout, etc) - log and return Unknown
-            // so caller continues polling instead of failing immediately
+            // Transient errors (SendRequest, timeout) — continue polling.
             warn!("Transient error getting LatticeCluster {}: {}", name, e);
-            "Unknown".to_string()
+            Ok("Unknown".to_string())
         }
     }
 }

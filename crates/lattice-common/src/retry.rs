@@ -55,6 +55,22 @@ impl RetryConfig {
             ..Default::default()
         }
     }
+
+    /// Install-time retry budget for transient apiserver errors
+    /// (Connect/SendRequest/5xx) observed against a fresh or pivoting
+    /// control plane.
+    ///
+    /// `initial_delay: 2s` avoids hammering an apiserver that's just
+    /// come back from a pod restart or kube-vip failover; default
+    /// exponential backoff capped at 30s, retries indefinitely (the
+    /// outer install flow — CLI, operator crash-loop, test harness —
+    /// bounds total wall-clock budget).
+    pub fn install() -> Self {
+        Self {
+            initial_delay: Duration::from_secs(2),
+            ..Default::default()
+        }
+    }
 }
 
 /// Execute an async operation with exponential backoff and jitter.

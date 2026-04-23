@@ -16,6 +16,7 @@ pub enum InfraProvider {
     Aws,
     OpenStack,
     Proxmox,
+    Basis,
 }
 
 impl From<ProviderType> for InfraProvider {
@@ -25,8 +26,12 @@ impl From<ProviderType> for InfraProvider {
             ProviderType::Aws => Self::Aws,
             ProviderType::OpenStack => Self::OpenStack,
             ProviderType::Proxmox => Self::Proxmox,
+            ProviderType::Basis => Self::Basis,
+            // Cloud-shaped providers without a dedicated e2e variant
+            // share AWS's LoadBalancer-based transport profile. The
+            // `_` arm catches future `#[non_exhaustive]` additions.
             ProviderType::Gcp | ProviderType::Azure => Self::Aws,
-            _ => Self::Aws, // Unknown providers default to cloud
+            _ => Self::Aws,
         }
     }
 }
@@ -38,6 +43,7 @@ impl std::fmt::Display for InfraProvider {
             Self::Aws => "aws",
             Self::OpenStack => "openstack",
             Self::Proxmox => "proxmox",
+            Self::Basis => "basis",
         };
         write!(f, "{}", name)
     }

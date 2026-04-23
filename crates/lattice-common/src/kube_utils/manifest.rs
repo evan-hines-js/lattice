@@ -1,18 +1,13 @@
 //! Manifest parsing and applying utilities.
 
-use std::time::Duration;
-
 use kube::api::{Api, DynamicObject, Patch, PatchParams};
 use kube::discovery::ApiResource;
 use kube::Client;
 use tracing::{trace, warn};
 
 use super::api_resource::build_api_resource;
-use super::waiting::poll_until;
+use crate::retry::{retry_with_backoff, RetryConfig};
 use crate::Error;
-
-/// Retry interval for apply operations
-const APPLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Options for applying manifests.
 #[derive(Debug, Clone, Default)]
@@ -107,6 +102,10 @@ pub async fn apply_manifests(
     options: &ApplyOptions,
 ) -> Result<(), Error> {
     if manifests.is_empty() {
+        // Callers with a legitimately empty bundle should early-return
+        // before reaching here; a zero-length slice at this layer
+        // usually means an upstream filter stripped everything.
+        warn!("apply_manifests called with zero manifests — caller likely filtered them all out");
         return Ok(());
     }
 
@@ -156,53 +155,43 @@ pub async fn apply_manifests(
     Ok(())
 }
 
-/// Apply a multi-document YAML string with retry until timeout.
-pub async fn apply_manifest_with_retry(
+/// Apply manifests with retry on transient apiserver errors.
+///
+/// The install-time workhorse. Fresh clusters, pivots, and bootstrap
+/// paths hit windows where the apiserver is briefly unreachable (pod
+/// restart, leader election, kube-vip failover) — plain
+/// [`apply_manifests`] surfaces a single `Connect` / `SendRequest` as
+/// a terminal error, while this wrapper absorbs them via
+/// [`retry_with_backoff`] and only fails if `retry_config`'s budget is
+/// exhausted.
+///
+/// Use [`RetryConfig::install`] for the standard install-time profile.
+///
+/// For in-reconciler or RPC-handler code paths where the caller's
+/// framework already retries (controller-runtime requeue, agent
+/// command redispatch), use [`apply_manifests`] directly.
+pub async fn apply_manifests_with_retry(
     client: &Client,
-    manifest: &str,
-    timeout: Duration,
+    manifests: &[impl AsRef<str>],
+    options: &ApplyOptions,
+    retry_config: &RetryConfig,
+    label: &str,
 ) -> Result<(), Error> {
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
+    // Own the inputs so the retry closure can be called repeatedly
+    // without borrowing from the caller.
+    let docs: Vec<String> = manifests.iter().map(|m| m.as_ref().to_string()).collect();
+    let options = options.clone();
 
-    let client_clone = client.clone();
-    let docs: Vec<String> = split_multi_doc(manifest);
-    let last_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let last_error_clone = last_error.clone();
-
-    let result = poll_until(
-        timeout,
-        APPLY_RETRY_INTERVAL,
-        "Timeout waiting for apply",
-        || {
-            let client = client_clone.clone();
-            let docs = docs.clone();
-            let last_error = last_error_clone.clone();
-            async move {
-                match apply_manifests(&client, &docs, &ApplyOptions::default()).await {
-                    Ok(()) => Ok(true),
-                    Err(e) => {
-                        let error_msg = e.to_string();
-                        warn!("Apply failed (will retry): {}", error_msg);
-                        *last_error.lock().await = Some(error_msg);
-                        Ok(false)
-                    }
-                }
-            }
-        },
-    )
-    .await;
-
-    if result.is_err() {
-        if let Some(err) = last_error.lock().await.take() {
-            return Err(Error::internal_with_context(
-                "apply_manifest_with_retry",
-                format!("Timeout applying manifest. Last error: {}", err),
-            ));
+    retry_with_backoff(retry_config, label, || {
+        let client = client.clone();
+        let docs = docs.clone();
+        let options = options.clone();
+        async move {
+            let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
+            apply_manifests(&client, &refs, &options).await
         }
-    }
-
-    result
+    })
+    .await
 }
 
 /// Apply a single manifest via SSA, respecting `ApplyOptions`.
@@ -244,15 +233,6 @@ async fn apply_one(client: &Client, manifest: &str, options: &ApplyOptions) -> R
             ),
         )),
     }
-}
-
-/// Split a multi-document YAML string into individual documents.
-fn split_multi_doc(manifest: &str) -> Vec<String> {
-    manifest
-        .split("\n---")
-        .map(|doc| doc.trim().to_string())
-        .filter(|doc| doc.contains("apiVersion"))
-        .collect()
 }
 
 /// Get priority for a Kubernetes resource kind (lower = apply first)

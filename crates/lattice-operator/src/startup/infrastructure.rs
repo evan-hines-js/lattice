@@ -131,9 +131,15 @@ async fn ensure_general_infrastructure(
         return Ok(());
     }
 
-    lattice_common::apply_manifests(client, &manifests, &lattice_common::ApplyOptions::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to apply bootstrap manifests: {e}"))?;
+    lattice_common::apply_manifests_with_retry(
+        client,
+        &manifests,
+        &lattice_common::ApplyOptions::default(),
+        &RetryConfig::install(),
+        "operator bootstrap manifests",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to apply bootstrap manifests: {e}"))?;
 
     Ok(())
 }

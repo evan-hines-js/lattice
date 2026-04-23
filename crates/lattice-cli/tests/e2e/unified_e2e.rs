@@ -24,11 +24,33 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tracing::info;
+
+/// Result of a phase-7 test task: the test's outcome plus the wall-clock
+/// time the task spent running.
+type TimedTaskResult = (Result<(), String>, Duration);
+
+/// Spawn a phase-7 test task and measure its runtime from inside the
+/// task. Measuring in the join loop is wrong: tasks start concurrently,
+/// so by the time we `.await` a handle the task has usually already
+/// completed, making `start.elapsed()` ~0 for everything but the last
+/// task still running when the loop reaches it.
+fn spawn_timed<F>(fut: F) -> JoinHandle<TimedTaskResult>
+where
+    F: Future<Output = Result<(), String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let start = Instant::now();
+        let result = fut.await;
+        (result, start.elapsed())
+    })
+}
 
 use super::context::init_e2e_test;
 use super::helpers::{
@@ -118,9 +140,14 @@ async fn run_full_e2e() -> Result<(), String> {
     setup_regcreds_infrastructure(&ctx.mgmt_kubeconfig).await?;
     info!("[Phase 7] Regcreds infrastructure ready on both clusters");
 
+    // Harness starts the wall-clock timer on construction. Create it
+    // before spawn so the reported wall duration covers the whole phase,
+    // not just the join loop.
+    let harness = TestHarness::new("E2E Phase 7");
+
     // Each task uses its own namespace, so concurrency is safe.
     let pool = Arc::new(Semaphore::new(50));
-    let mut handles: Vec<(&str, tokio::task::JoinHandle<Result<(), String>>)> = Vec::new();
+    let mut handles: Vec<(&str, JoinHandle<TimedTaskResult>)> = Vec::new();
 
     // Mesh: fixed test
     if integration::mesh::mesh_tests_enabled() {
@@ -128,7 +155,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Fixed mesh",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 super::mesh_tests::run_mesh_test(&kc).await
             }),
@@ -141,7 +168,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Random mesh",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 super::mesh_random::run_random_mesh_test(&kc).await
             }),
@@ -154,7 +181,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Media server",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 super::media_server_e2e::run_media_server_test(&kc).await
             }),
@@ -167,7 +194,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Secrets",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::secrets::run_secrets_tests(&kc).await
             }),
@@ -180,7 +207,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Cedar secrets",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::cedar_secrets::run_cedar_secret_tests(&kc).await
             }),
@@ -193,7 +220,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Package",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::package::run_package_tests(&kc).await
             }),
@@ -206,7 +233,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Vault secrets",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::vault_secrets::run_vault_secrets_tests(&kc).await
             }),
@@ -219,7 +246,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Secret rollout",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::secret_rollout::run_secret_rollout_tests(&kc).await
             }),
@@ -232,7 +259,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Tetragon",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::tetragon::run_tetragon_tests(&kc).await
             }),
@@ -245,7 +272,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Autoscaling",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::autoscaling::run_autoscaling_tests(&kc).await
             }),
@@ -258,7 +285,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Cert-manager",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::cert_manager::run_cert_manager_tests(&kc).await
             }),
@@ -271,7 +298,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Node autoscaling",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::node_autoscaling::run_node_autoscaling_tests(&kc).await
             }),
@@ -284,7 +311,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Job",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::job::run_job_tests(&kc).await
             }),
@@ -297,7 +324,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Model",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::model::run_model_tests(&kc).await
             }),
@@ -310,7 +337,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Cost",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::cost::run_cost_tests(&kc).await
             }),
@@ -323,7 +350,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Webhook",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::webhook::run_webhook_tests(&kc).await
             }),
@@ -336,7 +363,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Quota",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::quota::run_quota_tests(&kc).await
             }),
@@ -349,7 +376,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "ImageProvider",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::image_provider::run_image_provider_tests(&kc).await
             }),
@@ -362,7 +389,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Image signature",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::image_signature::run_image_signature_tests(&kc).await
             }),
@@ -375,7 +402,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Gateway",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::gateway::run_gateway_tests(&kc).await
             }),
@@ -389,7 +416,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Route discovery",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::route_discovery::run_route_discovery_tests(&mgmt_kc, &workload_kc)
                     .await?;
@@ -405,7 +432,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Backup",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::backup::run_backup_tests(&kc).await
             }),
@@ -418,7 +445,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Workload",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::workload::run_workload_tests(&kc).await
             }),
@@ -431,7 +458,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Topology",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::topology::run_topology_tests(&kc).await
             }),
@@ -444,7 +471,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "OIDC",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::oidc::run_oidc_hierarchy_tests(&ctx_clone, WORKLOAD_CLUSTER_NAME).await
             }),
@@ -457,7 +484,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "GPU health",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::gpu_health::run_gpu_health_tests(&kc).await
             }),
@@ -473,7 +500,7 @@ async fn run_full_e2e() -> Result<(), String> {
         let sem = pool.clone();
         handles.push((
             "Workload2 deletion",
-            tokio::spawn(async move {
+            spawn_timed(async move {
                 let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
                 integration::pivot::delete_and_verify_unpivot(
                     &child_kc,
@@ -486,16 +513,14 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Wait for all tasks and collect results
-    let harness = TestHarness::new("E2E Phase 7");
+    // Wait for all tasks and collect results. Per-task duration is
+    // measured inside each task by `spawn_timed`; wall-clock for the
+    // whole phase is tracked by the harness.
     for (name, handle) in handles {
-        let start = std::time::Instant::now();
-        let result = handle.await;
-        let duration = start.elapsed();
-        match result {
-            Ok(Ok(())) => harness.record(name, true, duration, None),
-            Ok(Err(e)) => harness.record(name, false, duration, Some(e)),
-            Err(e) => harness.record(name, false, duration, Some(format!("PANIC: {e}"))),
+        match handle.await {
+            Ok((Ok(()), duration)) => harness.record(name, true, duration, None),
+            Ok((Err(e), duration)) => harness.record(name, false, duration, Some(e)),
+            Err(e) => harness.record(name, false, Duration::ZERO, Some(format!("PANIC: {e}"))),
         }
     }
     harness.finish()?;

@@ -29,6 +29,7 @@ use super::super::helpers::{
     get_child_cluster_name, get_or_create_proxy, http_get_with_retry, proxy_service_exists,
     run_kubectl, wait_for_condition, with_diagnostics, DiagnosticContext, DEFAULT_TIMEOUT,
 };
+use super::super::providers::InfraProvider;
 use super::cedar::apply_cedar_policy_allow_group;
 
 // =============================================================================
@@ -193,6 +194,7 @@ async fn cleanup_oidc_test_resources(kubeconfig: &str) {
 /// - Validate viewer gets 403 (not in permitted group)
 pub async fn run_oidc_auth_test(
     parent_kubeconfig: &str,
+    parent_provider: InfraProvider,
     child_cluster_name: &str,
     existing_proxy_url: Option<&str>,
 ) -> Result<(), String> {
@@ -201,9 +203,8 @@ pub async fn run_oidc_auth_test(
         child_cluster_name
     );
 
-    // Get or create proxy connection
-    let (proxy_url, _port_forward) =
-        get_or_create_proxy(parent_kubeconfig, existing_proxy_url).await?;
+    let (proxy_url, _session) =
+        get_or_create_proxy(parent_kubeconfig, parent_provider, existing_proxy_url).await?;
 
     // 1. Apply OIDCProvider CRD (allowInsecureHttp is set in the spec if needed)
     //    The OIDC controller creates an egress LMM which the mesh compiler turns
@@ -364,7 +365,13 @@ pub async fn run_oidc_hierarchy_tests(
         // policy in place so concurrent tests that need proxy access are not
         // disrupted. Cedar forbid overrides permit regardless of priority.
         let proxy_url = ctx.mgmt_proxy_url.as_deref();
-        run_oidc_auth_test(&ctx.mgmt_kubeconfig, child_cluster_name, proxy_url).await?;
+        run_oidc_auth_test(
+            &ctx.mgmt_kubeconfig,
+            ctx.provider,
+            child_cluster_name,
+            proxy_url,
+        )
+        .await?;
 
         info!("[Integration/OIDC] All OIDC hierarchy tests passed!");
         Ok(())
@@ -403,6 +410,7 @@ async fn test_oidc_standalone() {
 
     run_oidc_auth_test(
         &session.ctx.mgmt_kubeconfig,
+        session.ctx.provider,
         &child_cluster_name,
         session.ctx.mgmt_proxy_url.as_deref(),
     )

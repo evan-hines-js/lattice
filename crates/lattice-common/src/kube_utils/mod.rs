@@ -48,7 +48,7 @@ pub use namespace::ensure_namespace;
 
 // manifest.rs
 pub use manifest::{
-    apply_manifest_with_retry, apply_manifests, extract_image_registries, extract_registry_host,
+    apply_manifests, apply_manifests_with_retry, extract_image_registries, extract_registry_host,
     is_deployment_json, kind_priority, split_yaml_documents, ApplyOptions,
 };
 
