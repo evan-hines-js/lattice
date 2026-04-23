@@ -397,7 +397,7 @@ pub struct NodeResourceSpec {
     /// Memory in GiB
     pub memory_gib: u32,
 
-    /// Disk size in GiB
+    /// Disk size in GiB (rootfs)
     pub disk_gib: u32,
 
     /// Number of CPU sockets (default: 1)
@@ -406,6 +406,12 @@ pub struct NodeResourceSpec {
         skip_serializing_if = "is_default_sockets"
     )]
     pub sockets: u32,
+
+    /// Raw (unformatted) data disks in GiB, attached in allocation order
+    /// alongside the rootfs. Providers that don't support additional
+    /// disks ignore this field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_disk_gibs: Vec<u32>,
 }
 
 fn default_sockets() -> u32 {
@@ -464,6 +470,10 @@ pub struct InstanceType {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sockets: Option<u32>,
 
+    /// Additional raw data disks (GiB each). See `NodeResourceSpec::data_disk_gibs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_disk_gibs: Vec<u32>,
+
     /// GPU capacity for this machine type
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuCapacity>,
@@ -485,6 +495,7 @@ impl InstanceType {
             memory_gib: Some(spec.memory_gib),
             disk_gib: Some(spec.disk_gib),
             sockets: Some(spec.sockets),
+            data_disk_gibs: spec.data_disk_gibs,
             ..Default::default()
         }
     }
@@ -502,6 +513,7 @@ impl InstanceType {
                 memory_gib,
                 disk_gib,
                 sockets: self.sockets.unwrap_or(1),
+                data_disk_gibs: self.data_disk_gibs.clone(),
             }),
             _ => None,
         }
@@ -1530,6 +1542,7 @@ mod tests {
                 memory_gib: 32,
                 disk_gib: 50,
                 sockets: 1,
+                data_disk_gibs: Vec::new(),
             });
             let json = serde_json::to_string(&it).unwrap();
             let parsed: InstanceType = serde_json::from_str(&json).unwrap();
@@ -1539,6 +1552,39 @@ mod tests {
             assert_eq!(res.memory_gib, 32);
             assert_eq!(res.disk_gib, 50);
             assert_eq!(res.sockets, 1);
+            assert!(res.data_disk_gibs.is_empty());
+        }
+
+        #[test]
+        fn test_instance_type_resources_with_data_disks_serde() {
+            let it = InstanceType::resources(NodeResourceSpec {
+                cores: 8,
+                memory_gib: 16,
+                disk_gib: 80,
+                sockets: 1,
+                data_disk_gibs: vec![500, 500],
+            });
+            let json = serde_json::to_string(&it).unwrap();
+            assert!(json.contains("\"dataDiskGibs\":[500,500]"));
+            let parsed: InstanceType = serde_json::from_str(&json).unwrap();
+            let res = parsed.as_resources().unwrap();
+            assert_eq!(res.data_disk_gibs, vec![500, 500]);
+        }
+
+        #[test]
+        fn test_instance_type_omits_empty_data_disks() {
+            let it = InstanceType::resources(NodeResourceSpec {
+                cores: 4,
+                memory_gib: 8,
+                disk_gib: 40,
+                sockets: 1,
+                data_disk_gibs: Vec::new(),
+            });
+            let json = serde_json::to_string(&it).unwrap();
+            assert!(
+                !json.contains("dataDiskGibs"),
+                "empty data_disk_gibs must be omitted from serialized output"
+            );
         }
 
         #[test]
@@ -1701,6 +1747,7 @@ mod tests {
                     memory_gib: 512,
                     disk_gib: 200,
                     sockets: 2,
+                    data_disk_gibs: Vec::new(),
                 })),
                 ..Default::default()
             };

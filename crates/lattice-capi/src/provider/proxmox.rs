@@ -487,6 +487,7 @@ mod tests {
                             memory_gib: 8,
                             disk_gib: 50,
                             sockets: 1,
+                            data_disk_gibs: Vec::new(),
                         })),
                         root_volume: None,
                     },
@@ -499,6 +500,7 @@ mod tests {
                                 memory_gib: 8,
                                 disk_gib: 100,
                                 sockets: 1,
+                                data_disk_gibs: Vec::new(),
                             })),
                             ..Default::default()
                         },

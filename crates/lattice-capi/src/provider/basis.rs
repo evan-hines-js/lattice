@@ -41,6 +41,9 @@ struct MachineSizing {
     cpu: u32,
     memory_mib: u32,
     disk_gib: u32,
+    /// Raw data disks (GiB each) attached at stable indexes
+    /// (`/dev/vdc`, `/dev/vdd`, …) in declaration order.
+    data_disk_gibs: Vec<u32>,
 }
 
 impl MachineSizing {
@@ -52,11 +55,13 @@ impl MachineSizing {
                 cpu: r.cores,
                 memory_mib: r.memory_gib * 1024,
                 disk_gib: r.disk_gib,
+                data_disk_gibs: r.data_disk_gibs,
             })
             .unwrap_or(Self {
                 cpu: 4,
                 memory_mib: 8192,
                 disk_gib: default_disk_gib,
+                data_disk_gibs: Vec::new(),
             })
     }
 }
@@ -133,22 +138,22 @@ impl BasisProvider {
         image: &str,
         suffix: &str,
     ) -> CAPIManifest {
+        let mut spec = serde_json::json!({
+            "cpu": sizing.cpu,
+            "memoryMib": sizing.memory_mib,
+            "diskGib": sizing.disk_gib,
+            "image": image,
+        });
+        if !sizing.data_disk_gibs.is_empty() {
+            spec["extraDiskGibs"] = serde_json::json!(sizing.data_disk_gibs);
+        }
         CAPIManifest::new(
             BASIS_API_VERSION,
             "BasisMachineTemplate",
             format!("{}-{}", cluster_name, suffix),
             &self.namespace,
         )
-        .with_spec(serde_json::json!({
-            "template": {
-                "spec": {
-                    "cpu": sizing.cpu,
-                    "memoryMib": sizing.memory_mib,
-                    "diskGib": sizing.disk_gib,
-                    "image": image,
-                }
-            }
-        }))
+        .with_spec(serde_json::json!({ "template": { "spec": spec } }))
     }
 }
 
@@ -309,6 +314,7 @@ mod tests {
                             memory_gib: 8,
                             disk_gib: 40,
                             sockets: 1,
+                            data_disk_gibs: Vec::new(),
                         })),
                         root_volume: None,
                     },
@@ -321,6 +327,7 @@ mod tests {
                                 memory_gib: 8,
                                 disk_gib: 80,
                                 sockets: 1,
+                                data_disk_gibs: Vec::new(),
                             })),
                             ..Default::default()
                         },
@@ -432,6 +439,65 @@ mod tests {
         assert_eq!(spec["memoryMib"], 8192);
         assert_eq!(spec["diskGib"], 40);
         assert_eq!(spec["image"], "ghcr.io/evan-hines-js/lattice-node:v1.32.0");
+        assert!(
+            spec.get("extraDiskGibs").is_none(),
+            "pools without declared data disks must omit extraDiskGibs"
+        );
+    }
+
+    #[tokio::test]
+    async fn machine_template_carries_data_disks_when_declared() {
+        // A pool's dataDiskGibs must land on its BasisMachineTemplate
+        // as extraDiskGibs, and pools that don't declare any must omit
+        // the field entirely.
+        let provider = BasisProvider::with_namespace("capi-basis-system");
+        let mut cluster = test_cluster("homelab");
+        cluster.spec.nodes.worker_pools.insert(
+            "storage".to_string(),
+            WorkerPoolSpec {
+                replicas: 3,
+                instance_type: Some(InstanceType::resources(NodeResourceSpec {
+                    cores: 8,
+                    memory_gib: 16,
+                    disk_gib: 80,
+                    sockets: 1,
+                    data_disk_gibs: vec![500],
+                })),
+                ..Default::default()
+            },
+        );
+
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &BootstrapInfo::default())
+            .await
+            .expect("manifest generation should succeed");
+
+        let storage_template = manifests
+            .iter()
+            .find(|m| {
+                m.kind == "BasisMachineTemplate"
+                    && m.metadata.name == "homelab-pool-storage"
+            })
+            .expect("storage pool's BasisMachineTemplate should exist");
+        let spec =
+            &storage_template.spec.as_ref().expect("spec should exist")["template"]["spec"];
+        assert_eq!(spec["cpu"], 8);
+        assert_eq!(spec["diskGib"], 80);
+        assert_eq!(spec["extraDiskGibs"], serde_json::json!([500]));
+
+        let default_template = manifests
+            .iter()
+            .find(|m| {
+                m.kind == "BasisMachineTemplate"
+                    && m.metadata.name == "homelab-pool-default"
+            })
+            .expect("default pool's BasisMachineTemplate should exist");
+        let default_spec =
+            &default_template.spec.as_ref().expect("spec should exist")["template"]["spec"];
+        assert!(
+            default_spec.get("extraDiskGibs").is_none(),
+            "pools without declared data disks must NOT emit extraDiskGibs"
+        );
     }
 
     #[tokio::test]
