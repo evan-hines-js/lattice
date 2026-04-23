@@ -6,7 +6,8 @@ metadata:
 spec:
   latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
   monitoring:
-    enabled: false
+    enabled: true
+    ha: false
   backups:
     enabled: false
   providerRef: proxmox

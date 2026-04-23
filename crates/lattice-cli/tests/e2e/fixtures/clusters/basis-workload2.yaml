@@ -22,9 +22,9 @@ spec:
     config:
       basis:
         ipv4Pool: "default"
-        # Cilium LB-IPAM range. Outside basis's pool and distinct per
-        # fixture so mgmt/workload/workload2 coexist on one L2.
-        lbCidr: "10.0.0.202/32"
+        # Cilium LB-IPAM range. Outside basis's VM/VIP pools, disjoint
+        # from mgmt (.176/28) and workload (.160/28). /28 = 16 IPs.
+        lbCidr: "10.0.0.144/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"
@@ -34,13 +34,13 @@ spec:
     controlPlane:
       replicas: 1
       instanceType:
-        cores: 4
-        memoryGib: 8
-        diskGib: 40
+        cores: 16
+        memoryGib: 32
+        diskGib: 50
     workerPools:
       default:
         replicas: 1
         instanceType:
-          cores: 4
-          memoryGib: 8
-          diskGib: 80
+          cores: 16
+          memoryGib: 32
+          diskGib: 100

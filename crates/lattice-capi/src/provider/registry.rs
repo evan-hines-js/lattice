@@ -242,13 +242,17 @@ pub fn generate_containerd_mirror_files(mirrors: &[ResolvedMirror]) -> Vec<serde
 
 /// Generate preKubeadmCommands to enable containerd mirror config_path + restart.
 ///
-/// Strips any existing registry section/config_path, then appends fresh.
-/// Works on both standard nodes (have `config_path = ""`) and Kind/CAPD (have neither).
+/// Strips any existing registry section/config_path, then appends fresh stanzas for
+/// both the containerd 1.x CRI plugin name (`io.containerd.grpc.v1.cri`) and the 2.x
+/// name (`io.containerd.cri.v1.images`). containerd ignores the stanza matching the
+/// wrong plugin name with a strict-mode warning, so emitting both makes config_path
+/// take effect across versions. Without this, hosts.toml is never read and pulls
+/// bypass the mirror.
 pub fn generate_containerd_mirror_commands() -> Vec<String> {
     vec![
         concat!(
             r#"sed -i '/\[plugins.*registry\]/d; /config_path/d' /etc/containerd/config.toml && "#,
-            r#"printf '\n[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n' >> /etc/containerd/config.toml && "#,
+            r#"printf '\n[plugins."io.containerd.grpc.v1.cri".registry]\n  config_path = "/etc/containerd/certs.d"\n[plugins."io.containerd.cri.v1.images".registry]\n  config_path = "/etc/containerd/certs.d"\n' >> /etc/containerd/config.toml && "#,
             r#"systemctl restart containerd"#,
         ).to_string()
     ]
@@ -399,6 +403,10 @@ mod tests {
         assert!(commands[0].contains("config_path"));
         assert!(commands[0].contains("/etc/containerd/certs.d"));
         assert!(commands[0].contains("systemctl restart containerd"));
+        // Must emit stanzas for both containerd 1.x and 2.x plugin namespaces —
+        // containerd 2.x ignores the v1 name, leaving hosts.toml unread.
+        assert!(commands[0].contains(r#"[plugins."io.containerd.grpc.v1.cri".registry]"#));
+        assert!(commands[0].contains(r#"[plugins."io.containerd.cri.v1.images".registry]"#));
     }
 
     #[test]

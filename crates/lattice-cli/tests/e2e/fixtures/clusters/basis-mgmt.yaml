@@ -6,7 +6,8 @@ metadata:
 spec:
   latticeImage: "ghcr.io/evan-hines-js/lattice:latest"
   monitoring:
-    enabled: false
+    enabled: true
+    ha: false
   backups:
     enabled: false
   providerRef: basis
@@ -17,11 +18,12 @@ spec:
     config:
       basis:
         ipv4Pool: "default"
-        # Cilium LB-IPAM range for `type: LoadBalancer` Services (the
-        # Lattice cell proxy). Lives outside basis's pool so basis
-        # can't hand the same IP to a VM, and distinct per cluster so
-        # mgmt/workload/workload2 coexist on one L2.
-        lbCidr: "10.0.0.200/32"
+        # Cilium LB-IPAM range for `type: LoadBalancer` Services (cell
+        # proxy, istio eastwest, ingress, etc.). Lives outside basis's
+        # VM pool (220-250) and VIP pool (210-219), and disjoint per
+        # cluster so mgmt/workload/workload2 coexist on one L2. /28 = 16
+        # IPs — enough headroom for every LB service a cluster emits.
+        lbCidr: "10.0.0.176/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"
@@ -31,16 +33,16 @@ spec:
     controlPlane:
       replicas: 1
       instanceType:
-        cores: 4
-        memoryGib: 8
-        diskGib: 40
+        cores: 16
+        memoryGib: 32
+        diskGib: 50
     workerPools:
       default:
         replicas: 1
         instanceType:
-          cores: 4
-          memoryGib: 8
-          diskGib: 80
+          cores: 16
+          memoryGib: 32
+          diskGib: 100
   parentConfig:
     grpcPort: 50051
     bootstrapPort: 8443
