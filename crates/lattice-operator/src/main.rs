@@ -615,6 +615,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_victoria_metrics::install::reconcile,
         "VictoriaMetricsInstall",
     );
+    ctx.spawn_provider(
+        "rook-install",
+        lattice_rook::install::reconcile,
+        "RookInstall",
+    );
 
     // ── Wait for shutdown signal ──
 

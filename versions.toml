@@ -101,6 +101,12 @@ repo = "https://volcano-sh.github.io/helm-charts"
 chart = "volcano-sh/volcano"
 filename = "volcano-{version}.tgz"
 
+[charts.rook-ceph]
+version = "1.18.0"
+repo = "https://charts.rook.io/release"
+chart = "rook-release/rook-ceph"
+filename = "rook-ceph-v{version}.tgz"
+
 # =============================================================================
 # Model Serving
 # =============================================================================

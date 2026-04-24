@@ -69,6 +69,7 @@ pub use install::istio::{IstioInstall, IstioInstallSpec};
 pub use install::keda::{KedaInstall, KedaInstallSpec};
 pub use install::kthena::{KthenaInstall, KthenaInstallSpec};
 pub use install::metrics_server::{MetricsServerInstall, MetricsServerInstallSpec};
+pub use install::rook::{FailureDomain, RookInstall, RookInstallSpec};
 pub use install::tetragon::{TetragonInstall, TetragonInstallSpec};
 pub use install::velero::{VeleroInstall, VeleroInstallSpec};
 pub use install::victoria_metrics::{VictoriaMetricsInstall, VictoriaMetricsInstallSpec};

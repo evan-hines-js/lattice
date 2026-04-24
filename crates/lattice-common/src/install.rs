@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::kube_utils::{
     patch_cluster_resource_status, wait_for_all_deployments, wait_for_daemonset,
-    wait_for_deployment,
+    wait_for_deployment, wait_for_resource_status, GvkPlural,
 };
 use crate::{
     apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
@@ -189,6 +189,27 @@ pub enum ReadinessCheck<'a> {
         /// Overall timeout for the wait.
         timeout: Duration,
     },
+    /// Wait for a named CR's `.status` to satisfy a predicate.
+    ///
+    /// For Installs whose success can't be modeled as a Deployment/DaemonSet
+    /// gate — e.g. Rook, where `rook-ceph-operator` running is a necessary
+    /// but not sufficient condition; the actual success signal lives on
+    /// `CephCluster.status.ceph.health`.
+    ResourceStatus {
+        /// GVK + plural of the resource to poll.
+        gvk: GvkPlural<'a>,
+        /// Resource name.
+        name: &'a str,
+        /// Namespace, or `None` for cluster-scoped resources.
+        namespace: Option<&'a str>,
+        /// Human-readable condition being waited on, used in timeout errors
+        /// (e.g. `"HEALTH_OK"`).
+        description: &'a str,
+        /// Predicate on the resource's JSON representation. `true` = ready.
+        ready_when: fn(&serde_json::Value) -> bool,
+        /// Overall timeout for the wait.
+        timeout: Duration,
+    },
 }
 
 impl ReadinessCheck<'_> {
@@ -207,6 +228,25 @@ impl ReadinessCheck<'_> {
                 namespace,
                 timeout,
             } => wait_for_daemonset(client, name, namespace, *timeout).await,
+            Self::ResourceStatus {
+                gvk,
+                name,
+                namespace,
+                description,
+                ready_when,
+                timeout,
+            } => {
+                wait_for_resource_status(
+                    client,
+                    gvk,
+                    name,
+                    *namespace,
+                    description,
+                    *timeout,
+                    *ready_when,
+                )
+                .await
+            }
         }
     }
 }

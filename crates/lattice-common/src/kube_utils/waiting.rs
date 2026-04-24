@@ -6,7 +6,8 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
 use k8s_openapi::api::core::v1::{Node, Secret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
-use kube::api::{Api, ListParams};
+use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};
+use kube::discovery::ApiResource;
 use kube::Client;
 use tracing::{info, trace};
 
@@ -353,6 +354,89 @@ pub async fn wait_for_secret(
                     // at trace level so they surface in debug builds.
                     trace!("transient error checking {namespace}/{name}: {e}");
                     Ok(false)
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// GroupVersionKind + plural — the minimum a dynamic `Api<DynamicObject>`
+/// needs. `plural` can't be derived reliably from `kind` (CephFS →
+/// cephfilesystems, not cephfss), so callers pass it explicitly.
+pub struct GvkPlural<'a> {
+    /// API group (e.g. `"ceph.rook.io"`).
+    pub group: &'a str,
+    /// API version (e.g. `"v1"`).
+    pub version: &'a str,
+    /// Kind (e.g. `"CephCluster"`).
+    pub kind: &'a str,
+    /// Plural resource name used in REST paths (e.g. `"cephclusters"`).
+    pub plural: &'a str,
+}
+
+/// Poll a named resource until `predicate(serde_json::Value)` returns true.
+///
+/// Used by Install controllers whose readiness signal lives on a CR's
+/// `.status` — e.g. `CephCluster.status.ceph.health == "HEALTH_OK"` — and
+/// isn't captured by a Deployment or DaemonSet check. The resource may not
+/// exist when polling starts (just-applied CR, operator hasn't processed it
+/// yet); 404 is treated as "not ready" and polling continues.
+///
+/// `description` appears in the timeout error message so the surfaced
+/// failure points at the right invariant ("HEALTH_OK", not "timeout").
+pub async fn wait_for_resource_status<F>(
+    client: &Client,
+    gvk: &GvkPlural<'_>,
+    name: &str,
+    namespace: Option<&str>,
+    description: &str,
+    timeout: Duration,
+    predicate: F,
+) -> Result<(), Error>
+where
+    F: Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+{
+    let ar = ApiResource::from_gvk_with_plural(
+        &GroupVersionKind::gvk(gvk.group, gvk.version, gvk.kind),
+        gvk.plural,
+    );
+    let api: Api<DynamicObject> = match namespace {
+        Some(ns) => Api::namespaced_with(client.clone(), ns, &ar),
+        None => Api::all_with(client.clone(), &ar),
+    };
+    let name_owned = name.to_string();
+    let resource_ref = match namespace {
+        Some(ns) => format!("{}/{}/{}", gvk.kind, ns, name),
+        None => format!("{}/{}", gvk.kind, name),
+    };
+
+    info!(resource = %resource_ref, wait_for = %description, "Waiting for resource status");
+
+    poll_until(
+        timeout,
+        DEFAULT_POLL_INTERVAL,
+        format!("Timeout waiting for {resource_ref} to reach {description}"),
+        || {
+            let api = api.clone();
+            let name = name_owned.clone();
+            let predicate = &predicate;
+            async move {
+                match api.get(&name).await {
+                    Ok(obj) => {
+                        let value = serde_json::to_value(&obj).map_err(|e| {
+                            Error::internal_with_context(
+                                "wait_for_resource_status",
+                                format!("serialize dynamic object: {e}"),
+                            )
+                        })?;
+                        Ok(predicate(&value))
+                    }
+                    Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
+                    Err(e) => {
+                        trace!("transient error polling {name}: {e}");
+                        Ok(false)
+                    }
                 }
             }
         },

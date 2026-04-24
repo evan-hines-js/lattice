@@ -1,0 +1,24 @@
+[package]
+name = "lattice-rook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rook-Ceph storage install — operator chart, CephCluster runtime manifests, controller"
+build = "build.rs"
+
+[dependencies]
+lattice-common = { workspace = true }
+lattice-core = { workspace = true }
+lattice-crd = { workspace = true }
+
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+schemars = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]
+lattice-helm-build.workspace = true

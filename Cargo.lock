@@ -3938,6 +3938,7 @@ dependencies = [
  "lattice-package",
  "lattice-proto",
  "lattice-quota",
+ "lattice-rook",
  "lattice-secret-provider",
  "lattice-service",
  "lattice-tetragon",
@@ -4040,6 +4041,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
+name = "lattice-rook"
+version = "0.1.0"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "lattice-common",
+ "lattice-core",
+ "lattice-crd",
+ "lattice-helm-build",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
  "tracing",
 ]
 

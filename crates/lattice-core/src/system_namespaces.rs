@@ -25,6 +25,8 @@ pub const CAPO_NAMESPACE: &str = "capo-system";
 pub const CAPI_BASIS_NAMESPACE: &str = "capi-basis-system";
 /// Velero backup namespace
 pub const VELERO_NAMESPACE: &str = "velero";
+/// Rook-Ceph storage operator namespace
+pub const ROOK_CEPH_NAMESPACE: &str = "rook-ceph";
 
 /// Core Kubernetes namespaces
 pub const CORE: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
@@ -56,8 +58,11 @@ pub const CAPI: &[&str] = &[
 /// Infrastructure addons (no MeshMember, need API server access)
 pub const ADDONS: &[&str] = &[EXTERNAL_DNS_NAMESPACE, VELERO_NAMESPACE];
 
+/// Storage operators (dynamic port ranges, binary protocols — not mesh-able)
+pub const STORAGE: &[&str] = &[ROOK_CEPH_NAMESPACE];
+
 /// All namespace slices that are excluded from default-deny.
-const ALL_SLICES: &[&[&str]] = &[CORE, CNI, MESH, CERT, CAPI, ADDONS];
+const ALL_SLICES: &[&[&str]] = &[CORE, CNI, MESH, CERT, CAPI, ADDONS, STORAGE];
 
 /// Get all system namespaces that should be excluded from default-deny policies.
 ///
@@ -109,6 +114,7 @@ mod tests {
         assert!(namespaces.contains(&"capi-system"));
         assert!(namespaces.contains(&"external-dns"));
         assert!(namespaces.contains(&"velero"));
+        assert!(namespaces.contains(&"rook-ceph"));
     }
 
     #[test]

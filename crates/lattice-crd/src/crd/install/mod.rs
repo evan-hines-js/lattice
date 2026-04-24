@@ -14,6 +14,7 @@ pub mod istio;
 pub mod keda;
 pub mod kthena;
 pub mod metrics_server;
+pub mod rook;
 pub mod tetragon;
 pub mod velero;
 pub mod victoria_metrics;
