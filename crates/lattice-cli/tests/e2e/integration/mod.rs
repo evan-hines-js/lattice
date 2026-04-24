@@ -62,6 +62,7 @@ pub mod scaling;
 pub mod secret_rollout;
 pub mod secrets;
 pub mod setup;
+pub mod storage;
 pub mod tetragon;
 pub mod topology;
 pub mod training;

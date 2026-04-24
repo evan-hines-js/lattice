@@ -4,39 +4,44 @@
 //! replacement for Lattice's on-prem use case: VMs for Kubernetes node
 //! substrate, nothing more.
 //!
-//! Everything about a cluster's addressing is derived from the named
-//! `ipv4Pool`:
-//!   - VM IPs come from the pool's vm sub-range (auto-allocated per VM).
-//!   - The control-plane VIP is auto-allocated by basis from the pool's
-//!     vip sub-range when the `BasisCluster` CR is reconciled — Lattice
-//!     does not pick it and users do not specify it. The provider
-//!     reconciler writes the allocated address onto
-//!     `BasisCluster.spec.controlPlaneEndpoint`; CAPI core propagates
-//!     it to `Cluster.spec.controlPlaneEndpoint`, and Lattice patches
-//!     the kube-vip static pod manifest into the `KubeadmControlPlane`
-//!     once that value is known.
+//! Each cluster belongs to a **tree** (trust domain) in basis. The
+//! tree a `LatticeCluster` joins is *implied by where it's applied*:
+//! every `BasisCluster` CR is reconciled by the basis-capi-provider
+//! deployed into the hosting cell, and that provider is configured
+//! with the cell's `basisClusterId` at deploy time — all clusters it
+//! creates become children of that cell. The root cell is
+//! bootstrapped by `lattice-cli up` calling basis directly with no
+//! parent. There is no per-LatticeCluster parent field because there
+//! is no per-cluster choice: the API server you apply to IS the parent.
 //!
-//! Reference: https://github.com/lattos/basis/blob/main/docs/lattice-integration.md
+//! The control-plane VIP is always allocated by basis from the
+//! LAN-routable `edge_pool`. Whether kube-vip *claims* that VIP on the
+//! LAN is per-cluster: see [`BasisConfig::control_plane_lan_vip`].
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Basis per-cluster configuration.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BasisConfig {
-    /// Name of an IP pool configured in the Basis controller. Determines
-    /// which subnet this cluster's VIP and VM IPs are drawn from.
+    /// When `true`, control-plane nodes are provisioned with
+    /// `edge: true` (a second NIC on the uplink bridge, `ens4`) and
+    /// kube-vip claims the apiserver VIP on that NIC — so callers
+    /// *outside* the basis tree (operator laptops, bootstrap kind
+    /// cluster, Cluster API core in a parent cell) can reach the
+    /// apiserver directly at the VIP.
     ///
-    /// Pools are defined in the controller's config file; see the Basis
-    /// deploy docs. A typical homelab value is `"default"`.
-    pub ipv4_pool: String,
-
-    /// Optional override for the interface kube-vip binds the VIP on.
-    /// Defaults to `ens3` — the first virtio-net interface the
-    /// basis-agent attaches to each VM.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub virtual_ip_network_interface: Option<String>,
+    /// When `false` (default), CPs stay tree-only and kube-vip claims
+    /// the VIP on `ens3` (overlay). External callers reach the
+    /// apiserver through Lattice's parent-cell auth proxy instead;
+    /// the VIP is still a unique address from the edge pool (cert SAN,
+    /// CAPI endpoint identifier) but isn't announced outside the tree.
+    ///
+    /// Set `true` on the root/management cluster; leave unset on
+    /// nested workload clusters that are reached through the proxy.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub control_plane_edge: bool,
 
     /// Optional override for the kube-vip container image. Omit to let
     /// the generator pick a tested default.
@@ -45,11 +50,14 @@ pub struct BasisConfig {
 
     /// CIDR from which Cilium hands out `type: LoadBalancer` addresses
     /// (the `CiliumLoadBalancerIPPool`). Must be on the same L2 segment
-    /// as the cluster's nodes — Cilium announces via ARP — and must NOT
-    /// overlap with the basis IP pool (otherwise basis would hand the
-    /// same IP to a future VM and collide with Cilium's announcement).
-    /// Without this set, `type: LoadBalancer` Services stay `<pending>`
-    /// forever and the Lattice cell proxy never becomes reachable.
+    /// as the cluster's nodes — Cilium announces via ARP inside the
+    /// tree's VXLAN — and must NOT overlap with the tree's VM or VIP
+    /// sub-ranges. Without this set, `type: LoadBalancer` Services stay
+    /// `<pending>` forever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lb_cidr: Option<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }

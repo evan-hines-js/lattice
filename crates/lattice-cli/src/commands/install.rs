@@ -669,7 +669,8 @@ impl Installer {
             .await?;
 
         info!("Installing CAPI on management cluster...");
-        self.install_capi_on_management(&mgmt_client).await?;
+        self.install_capi_on_management(bootstrap_client, &mgmt_client)
+            .await?;
 
         info!("Waiting for CAPI controllers to be ready...");
         self.wait_for_management_controllers(&mgmt_client).await?;
@@ -839,7 +840,18 @@ impl Installer {
     /// management cluster is still in cluster-mode and won't install CAPI
     /// until a LatticeCluster lands — that happens as part of pivot, so
     /// we install it directly here.
-    async fn install_capi_on_management(&self, mgmt_client: &Client) -> Result<()> {
+    ///
+    /// For basis, this is the only moment at which the mgmt cluster's
+    /// basis-capi-provider Deployment gets created, so we stamp its
+    /// `BASIS_PARENT_CLUSTER_ID` env now. The id lives on the
+    /// `BasisCluster.status.basisClusterId` of mgmt's own BasisCluster CR in
+    /// the bootstrap kind (populated when bootstrap-kind's basis-capi-provider
+    /// allocated mgmt's VIP). Non-basis providers pass `None`.
+    async fn install_capi_on_management(
+        &self,
+        bootstrap_client: &Client,
+        mgmt_client: &Client,
+    ) -> Result<()> {
         use kube::Api;
         use lattice_capi::installer::{ensure_capi_providers_for, NativeInstaller};
         use lattice_crd::crd::InfraProvider;
@@ -856,15 +868,61 @@ impl Installer {
                 )));
             }
         };
+
+        let basis_self_cluster_id = if self.provider() == ProviderType::Basis {
+            self.read_mgmt_basis_cluster_id(bootstrap_client).await?
+        } else {
+            None
+        };
+
         ensure_capi_providers_for(
             mgmt_client,
             &NativeInstaller::new(),
             self.provider(),
             cp.as_ref(),
             "lattice-cli",
+            basis_self_cluster_id,
         )
         .await
         .cmd_err()
+    }
+
+    /// Read mgmt's own basisClusterId from the BasisCluster CR living in the
+    /// bootstrap kind (populated by bootstrap-kind's basis-capi-provider after
+    /// `Basis.CreateCluster` returned). Missing CR / missing status is
+    /// `Ok(None)` — the bootstrap-kind provider has simply not finished
+    /// reconciling yet, which shouldn't happen at this point in the install
+    /// flow (CPs are already Ready) but doesn't warrant hard-failing the
+    /// install if it does.
+    async fn read_mgmt_basis_cluster_id(
+        &self,
+        bootstrap_client: &Client,
+    ) -> Result<Option<String>> {
+        use kube::api::DynamicObject;
+        use kube::discovery::ApiResource;
+        use kube::{api::Api, core::GroupVersionKind};
+
+        let ar = ApiResource::from_gvk_with_plural(
+            &GroupVersionKind::gvk("infrastructure.cluster.x-k8s.io", "v1beta1", "BasisCluster"),
+            "basisclusters",
+        );
+        let ns = self.capi_ns();
+        let api: Api<DynamicObject> = Api::namespaced_with(bootstrap_client.clone(), &ns, &ar);
+        match api.get(self.cluster_name()).await {
+            Ok(obj) => {
+                let id = obj
+                    .data
+                    .pointer("/status/basisClusterId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                Ok(id)
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(Error::command_failed(format!(
+                "failed to read BasisCluster '{}' in bootstrap kind: {e}",
+                self.cluster_name()
+            ))),
+        }
     }
 
     /// Waits for CAPI and Lattice controllers to be ready on the management cluster.

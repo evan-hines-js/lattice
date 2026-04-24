@@ -21,7 +21,6 @@ spec:
       bootstrap: kubeadm
     config:
       basis:
-        ipv4Pool: "default"
         # Cilium LB-IPAM range. Outside basis's VM/VIP pools, disjoint
         # from mgmt (.176/28) and workload (.160/28). /28 = 16 IPs.
         lbCidr: "10.0.0.144/28"

@@ -85,9 +85,10 @@ pub async fn reconcile(
         manifests::generate_block_pool(&install.spec),
         manifests::generate_storage_class(&install.spec),
     ] {
-        all_manifests.push(serde_json::to_string_pretty(&doc).map_err(|e| {
-            ReconcileError::Validation(format!("serialize Rook manifest: {e}"))
-        })?);
+        all_manifests
+            .push(serde_json::to_string_pretty(&doc).map_err(|e| {
+                ReconcileError::Validation(format!("serialize Rook manifest: {e}"))
+            })?);
     }
 
     run_simple_install_reconcile(SimpleInstallConfig {
@@ -173,7 +174,11 @@ mod tests {
                 ..Default::default()
             },
             spec: Some(NodeSpec {
-                taints: if taints.is_empty() { None } else { Some(taints) },
+                taints: if taints.is_empty() {
+                    None
+                } else {
+                    Some(taints)
+                },
                 ..Default::default()
             }),
             status: None,

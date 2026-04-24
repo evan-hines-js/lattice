@@ -20,7 +20,6 @@ spec:
       bootstrap: rke2
     config:
       basis:
-        ipv4Pool: "default"
         # Cilium LB-IPAM range. Outside basis's VM/VIP pools, disjoint
         # from mgmt (.176/28) and workload2 (.144/28). /28 = 16 IPs.
         lbCidr: "10.0.0.160/28"
@@ -43,3 +42,7 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
+          # One raw 50 GiB data disk per worker, consumed by the Rook
+          # install test as OSD-backed storage. Basis attaches it as
+          # /dev/vdc; rook-ceph claims it via the cluster's deviceFilter.
+          dataDiskGibs: [50]

@@ -491,6 +491,21 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
+    // Storage: Rook-Ceph install, PVC provisioning, persistence-through-pod-restart.
+    // Only the Basis fixture declares `dataDiskGibs` on a worker pool;
+    // other providers don't surface raw block devices for Rook to claim.
+    if ctx.provider == InfraProvider::Basis {
+        let kc = ctx.require_workload()?.to_string();
+        let sem = pool.clone();
+        handles.push((
+            "Storage",
+            spawn_timed(async move {
+                let _permit = sem.acquire().await.map_err(|e| e.to_string())?;
+                integration::storage::run_storage_tests(&kc).await
+            }),
+        ));
+    }
+
     // Workload2 deletion (if exists) — pause chaos first to avoid log spam
     if ctx.has_workload2() {
         setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);

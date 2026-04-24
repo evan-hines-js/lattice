@@ -10,10 +10,11 @@ use lattice_core::system_namespaces::ROOK_CEPH_NAMESPACE;
 use lattice_crd::crd::RookInstallSpec;
 use serde_json::{json, Value};
 
-/// Ceph image tag. Squid (v19) is the current stable-LTS line as of the
-/// Rook v1.18 release; bumping requires verifying the rook-ceph chart's
-/// supported matrix.
-pub const CEPH_IMAGE: &str = "quay.io/ceph/ceph:v19.2.1";
+/// Ceph image tag. Kept in lockstep with the Rook release's default
+/// (`deploy/examples/images.txt` in the rook/rook repo); bumping ceph
+/// independently of the chart pinned in `versions.toml` can break on
+/// CRD schema deltas, so change both or neither.
+pub const CEPH_IMAGE: &str = "quay.io/ceph/ceph:v19.2.3";
 
 /// Default block pool + StorageClass name. Users get `rook-ceph-block` as
 /// the provisioner identity — same name as the upstream examples to avoid
@@ -43,7 +44,10 @@ const DEVICE_FILTER: &str = "^vd[c-z]$";
 const DEFAULT_SC_ANNOTATION: &str = "storageclass.kubernetes.io/is-default-class";
 
 static OPERATOR_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/rook-operator.yaml")))
+    split_yaml_documents(include_str!(concat!(
+        env!("OUT_DIR"),
+        "/rook-operator.yaml"
+    )))
 });
 
 /// Rook-Ceph chart version pinned at build time.
@@ -70,6 +74,15 @@ pub fn rook_ceph_namespace_yaml() -> String {
 /// only claim `/dev/vd[c-z]`, the range Basis attaches extras into.
 pub fn generate_ceph_cluster(spec: &RookInstallSpec) -> Value {
     let encrypted = if spec.encrypt_osds { "true" } else { "false" };
+    // Align cluster-level pool defaults with the block pool we create.
+    // Ceph's built-in `osd_pool_default_size` is 3; leaving it raises
+    // `TOO_FEW_OSDS` (HEALTH_WARN) on any cluster smaller than 3 OSDs
+    // regardless of the actual pool size, which permanently blocks the
+    // install gate's HEALTH_OK predicate. `min_size` follows ceph's
+    // convention of `size - 1`, floored at 1 so size=2 stays writable
+    // with a single OSD available.
+    let pool_size = spec.replication.to_string();
+    let pool_min_size = spec.replication.saturating_sub(1).max(1).to_string();
     json!({
         "apiVersion": "ceph.rook.io/v1",
         "kind": "CephCluster",
@@ -95,10 +108,15 @@ pub fn generate_ceph_cluster(spec: &RookInstallSpec) -> Value {
                 "deviceFilter": DEVICE_FILTER,
                 "config": { "encryptedDevice": encrypted },
             },
-            // Size-1 pools are never production; refusing them at the
-            // cluster level short-circuits misconfigured CephBlockPools.
             "cephConfig": {
-                "global": { "mon_allow_pool_size_one": "false" }
+                "global": {
+                    // Size-1 pools are never production; refusing them at
+                    // the cluster level short-circuits misconfigured
+                    // CephBlockPools.
+                    "mon_allow_pool_size_one": "false",
+                    "osd_pool_default_size": pool_size,
+                    "osd_pool_default_min_size": pool_min_size,
+                }
             },
         }
     })
@@ -137,7 +155,10 @@ pub fn generate_storage_class(spec: &RookInstallSpec) -> Value {
     }
 
     let mut metadata = serde_json::Map::new();
-    metadata.insert("name".to_string(), Value::String(BLOCK_POOL_NAME.to_string()));
+    metadata.insert(
+        "name".to_string(),
+        Value::String(BLOCK_POOL_NAME.to_string()),
+    );
     if !annotations.is_empty() {
         metadata.insert("annotations".to_string(), Value::Object(annotations));
     }
@@ -203,6 +224,26 @@ mod tests {
     }
 
     #[test]
+    fn ceph_cluster_pool_defaults_track_replication() {
+        // Without this, `osd_pool_default_size` stays at ceph's built-in
+        // 3 and any 2-OSD cluster is pinned at HEALTH_WARN (TOO_FEW_OSDS)
+        // forever, blocking the install-gate predicate.
+        let mut spec = default_spec();
+        spec.replication = 2;
+        let cc = generate_ceph_cluster(&spec);
+        let global = &cc["spec"]["cephConfig"]["global"];
+        assert_eq!(global["osd_pool_default_size"], "2");
+        assert_eq!(global["osd_pool_default_min_size"], "1");
+        assert_eq!(global["mon_allow_pool_size_one"], "false");
+
+        spec.replication = 3;
+        let cc = generate_ceph_cluster(&spec);
+        let global = &cc["spec"]["cephConfig"]["global"];
+        assert_eq!(global["osd_pool_default_size"], "3");
+        assert_eq!(global["osd_pool_default_min_size"], "2");
+    }
+
+    #[test]
     fn ceph_cluster_disables_encryption_when_requested() {
         let mut spec = default_spec();
         spec.encrypt_osds = false;
@@ -235,10 +276,7 @@ mod tests {
         let mut spec = default_spec();
         spec.default_storage_class = true;
         let sc = generate_storage_class(&spec);
-        assert_eq!(
-            sc["metadata"]["annotations"][DEFAULT_SC_ANNOTATION],
-            "true"
-        );
+        assert_eq!(sc["metadata"]["annotations"][DEFAULT_SC_ANNOTATION], "true");
 
         spec.default_storage_class = false;
         let sc = generate_storage_class(&spec);

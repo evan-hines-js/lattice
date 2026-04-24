@@ -32,7 +32,9 @@ use super::{
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
     InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
-use crate::constants::{BASIS_API_VERSION, DEFAULT_VIP_INTERFACE_BASIS, INFRASTRUCTURE_API_GROUP};
+use crate::constants::{
+    BASIS_API_VERSION, BASIS_VIP_INTERFACE_EDGE, BASIS_VIP_INTERFACE_TREE, INFRASTRUCTURE_API_GROUP,
+};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
 use lattice_crd::crd::{BasisConfig, InstanceType, LatticeCluster, ProviderSpec, ProviderType};
 
@@ -105,28 +107,39 @@ impl BasisProvider {
 
     /// Generate the BasisCluster manifest.
     ///
-    /// The spec carries exactly what the user-facing config declares:
-    /// the IP pool and the credentials Secret reference. The control-
-    /// plane endpoint is absent — the basis-capi-provider reconciler
-    /// allocates a VIP from the pool's vip sub-range and writes it
-    /// back to `spec.controlPlaneEndpoint`. A separate Lattice
-    /// reconciler patches the `KubeadmControlPlane` once that value
-    /// appears, injecting kube-vip files and the VIP cert SAN.
+    /// The spec carries only the credentials Secret reference — the
+    /// tree this cluster joins is implied by the basis-capi-provider
+    /// instance doing the reconcile (every cluster a given provider
+    /// creates becomes a child of the cluster the provider runs in).
+    /// The control-plane endpoint is absent on first apply — the
+    /// provider reconciler allocates a VIP from the tree's VIP
+    /// sub-range and writes it back to `spec.controlPlaneEndpoint`. A
+    /// separate Lattice reconciler patches the `KubeadmControlPlane`
+    /// once that value appears, injecting kube-vip files and the VIP
+    /// cert SAN.
     fn generate_basis_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("basis config required"))?;
 
+        let mut spec = serde_json::json!({
+            "credentialsRef": {
+                "name": BASIS_CREDENTIALS_SECRET,
+                "namespace": LOCAL_SECRETS_NAMESPACE,
+            },
+        });
+        // Forward the per-cluster VIP-scope knob. `true` tells basis
+        // to carve from `edge_pool` (LAN) and commits us to provisioning
+        // CP VMs with `edge: true` and kube-vip on `ens4`. `false`
+        // (the default — omitted on the wire) keeps the VIP in the
+        // tree CIDR with kube-vip on `ens3`.
+        if cfg.control_plane_edge {
+            spec["controlPlaneEdge"] = serde_json::Value::Bool(true);
+        }
+
         Ok(
-            CAPIManifest::new(BASIS_API_VERSION, "BasisCluster", name, &self.namespace).with_spec(
-                serde_json::json!({
-                    "ipPool": &cfg.ipv4_pool,
-                    "credentialsRef": {
-                        "name": BASIS_CREDENTIALS_SECRET,
-                        "namespace": LOCAL_SECRETS_NAMESPACE,
-                    },
-                }),
-            ),
+            CAPIManifest::new(BASIS_API_VERSION, "BasisCluster", name, &self.namespace)
+                .with_spec(spec),
         )
     }
 
@@ -137,6 +150,7 @@ impl BasisProvider {
         sizing: MachineSizing,
         image: &str,
         suffix: &str,
+        edge: bool,
     ) -> CAPIManifest {
         let mut spec = serde_json::json!({
             "cpu": sizing.cpu,
@@ -144,6 +158,9 @@ impl BasisProvider {
             "diskGib": sizing.disk_gib,
             "image": image,
         });
+        if edge {
+            spec["edge"] = serde_json::Value::Bool(true);
+        }
         if !sizing.data_disk_gibs.is_empty() {
             spec["extraDiskGibs"] = serde_json::json!(sizing.data_disk_gibs);
         }
@@ -184,6 +201,20 @@ impl Provider for BasisProvider {
         let cp_sizing =
             MachineSizing::from_instance_type(&spec.nodes.control_plane.instance_type, 40);
 
+        // `controlPlaneEdge: true` means the apiserver VIP must be
+        // reachable from outside the cluster's tree (typical for the
+        // root/management cluster). CPs get a second NIC on the uplink
+        // bridge (`edge: true` → `ens4`) and kube-vip gARPs on that
+        // NIC. `false` keeps CPs tree-only and kube-vip binds inside
+        // the overlay; external callers reach the apiserver through
+        // the parent cell's auth proxy.
+        let cp_edge = cfg.control_plane_edge;
+        let vip_interface = if cp_edge {
+            BASIS_VIP_INTERFACE_EDGE
+        } else {
+            BASIS_VIP_INTERFACE_TREE
+        };
+
         // Pre-control-plane manifests — safe to apply without knowing
         // the API-server VIP. BasisCluster is what triggers basis-capi-
         // provider to call `Basis.CreateCluster`, which allocates the
@@ -191,7 +222,7 @@ impl Provider for BasisProvider {
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_basis_cluster(cluster)?,
-            self.generate_machine_template(name, cp_sizing, &image, "control-plane"),
+            self.generate_machine_template(name, cp_sizing, &image, "control-plane", cp_edge),
         ];
 
         // KubeadmControlPlane carries kube-vip's static pod manifest
@@ -207,11 +238,7 @@ impl Provider for BasisProvider {
             }
             let vip = Some(VipConfig::new(
                 endpoint.to_string(),
-                Some(
-                    cfg.virtual_ip_network_interface
-                        .clone()
-                        .unwrap_or_else(|| DEFAULT_VIP_INTERFACE_BASIS.to_string()),
-                ),
+                Some(vip_interface.to_string()),
                 cfg.kube_vip_image.clone(),
             ));
             let cp_config = ControlPlaneConfig {
@@ -238,7 +265,13 @@ impl Provider for BasisProvider {
                 &infra,
                 &pool_config,
             ));
-            manifests.push(self.generate_machine_template(name, worker_sizing, &image, &suffix));
+            manifests.push(self.generate_machine_template(
+                name,
+                worker_sizing,
+                &image,
+                &suffix,
+                false, // workers stay tree-only by default
+            ));
             manifests.push(generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
@@ -250,14 +283,10 @@ impl Provider for BasisProvider {
 
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
         validate_k8s_version(&spec.kubernetes.version)?;
-        let cfg = spec
-            .config
+        spec.config
             .basis
             .as_ref()
             .ok_or_else(|| Error::validation("basis config required"))?;
-        if cfg.ipv4_pool.trim().is_empty() {
-            return Err(Error::validation("basis.ipv4Pool must not be empty"));
-        }
         Ok(())
     }
 }
@@ -272,12 +301,7 @@ mod tests {
     };
 
     fn test_basis_config() -> BasisConfig {
-        BasisConfig {
-            ipv4_pool: "default".to_string(),
-            virtual_ip_network_interface: None,
-            kube_vip_image: None,
-            lb_cidr: None,
-        }
+        BasisConfig::default()
     }
 
     /// Populate a BootstrapInfo with the simulated basis-allocated VIP
@@ -397,11 +421,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn basis_cluster_carries_pool_and_credentials_ref() {
+    async fn basis_cluster_carries_credentials_ref_only() {
         // BasisCluster is emitted on the very first reconcile — that's
         // what triggers basis-capi-provider to allocate the VIP. The
         // endpoint is NOT on Lattice's generated spec; the provider
         // reconciler writes it after `Basis.CreateCluster` returns.
+        // The tree this cluster joins is implied by the provider's own
+        // context, not encoded in the CR.
         let provider = BasisProvider::with_namespace("capi-basis-system");
         let manifests = provider
             .generate_capi_manifests(&test_cluster("homelab"), &BootstrapInfo::default())
@@ -413,7 +439,6 @@ mod tests {
             .find(|m| m.kind == "BasisCluster")
             .expect("BasisCluster should exist");
         let spec = basis_cluster.spec.as_ref().expect("spec should exist");
-        assert_eq!(spec["ipPool"], "default");
         assert_eq!(spec["credentialsRef"]["name"], "basis-credentials");
         assert_eq!(spec["credentialsRef"]["namespace"], "lattice-secrets");
         assert!(
@@ -474,23 +499,16 @@ mod tests {
 
         let storage_template = manifests
             .iter()
-            .find(|m| {
-                m.kind == "BasisMachineTemplate"
-                    && m.metadata.name == "homelab-pool-storage"
-            })
+            .find(|m| m.kind == "BasisMachineTemplate" && m.metadata.name == "homelab-pool-storage")
             .expect("storage pool's BasisMachineTemplate should exist");
-        let spec =
-            &storage_template.spec.as_ref().expect("spec should exist")["template"]["spec"];
+        let spec = &storage_template.spec.as_ref().expect("spec should exist")["template"]["spec"];
         assert_eq!(spec["cpu"], 8);
         assert_eq!(spec["diskGib"], 80);
         assert_eq!(spec["extraDiskGibs"], serde_json::json!([500]));
 
         let default_template = manifests
             .iter()
-            .find(|m| {
-                m.kind == "BasisMachineTemplate"
-                    && m.metadata.name == "homelab-pool-default"
-            })
+            .find(|m| m.kind == "BasisMachineTemplate" && m.metadata.name == "homelab-pool-default")
             .expect("default pool's BasisMachineTemplate should exist");
         let default_spec =
             &default_template.spec.as_ref().expect("spec should exist")["template"]["spec"];
@@ -498,25 +516,6 @@ mod tests {
             default_spec.get("extraDiskGibs").is_none(),
             "pools without declared data disks must NOT emit extraDiskGibs"
         );
-    }
-
-    #[tokio::test]
-    async fn validate_rejects_empty_ip_pool() {
-        let provider = BasisProvider::with_namespace("capi-basis-system");
-        let spec = ProviderSpec {
-            kubernetes: KubernetesSpec {
-                version: "1.32.0".to_string(),
-                cert_sans: None,
-                bootstrap: BootstrapProvider::Kubeadm,
-            },
-            config: ProviderConfig::basis(BasisConfig {
-                ipv4_pool: "".to_string(),
-                virtual_ip_network_interface: None,
-                kube_vip_image: None,
-                lb_cidr: None,
-            }),
-        };
-        assert!(provider.validate_spec(&spec).await.is_err());
     }
 
     #[tokio::test]

@@ -23,26 +23,37 @@ fn main() {
         "rook-ceph",
         "rook-ceph",
         &[
-            "--set", "crds.enabled=true",
-            "--set", "enableDiscoveryDaemon=true",
-            "--set", "monitoring.enabled=false",
+            "--set",
+            "crds.enabled=true",
+            "--set",
+            "enableDiscoveryDaemon=true",
+            "--set",
+            "monitoring.enabled=false",
             // RBD only — CephFS + NFS are out of scope for Phase 1.
-            "--set", "csi.enableRbdDriver=true",
-            "--set", "csi.enableCephfsDriver=false",
-            "--set", "csi.enableNFSDriver=false",
-            "--set", "csi.cephFSSupport=false",
+            "--set",
+            "csi.enableRbdDriver=true",
+            "--set",
+            "csi.enableCephfsDriver=false",
+            "--set",
+            "csi.enableNFSDriver=false",
+            "--set",
+            "csi.cephFSSupport=false",
             // HA CSI provisioners.
-            "--set", "csi.provisionerReplicas=2",
+            "--set",
+            "csi.provisionerReplicas=2",
             // Operator Deployment resources — a 1-vCPU / 512 MiB request
             // keeps bin-packing honest without starving the controller.
-            "--set", "resources.requests.cpu=500m",
-            "--set", "resources.requests.memory=512Mi",
-            "--set", "resources.limits.cpu=1",
-            "--set", "resources.limits.memory=1Gi",
+            "--set",
+            "resources.requests.cpu=500m",
+            "--set",
+            "resources.requests.memory=512Mi",
+            "--set",
+            "resources.limits.cpu=1",
+            "--set",
+            "resources.limits.memory=1Gi",
         ],
     );
-    std::fs::write(out_dir.join("rook-operator.yaml"), operator)
-        .expect("write rook-operator.yaml");
+    std::fs::write(out_dir.join("rook-operator.yaml"), operator).expect("write rook-operator.yaml");
 
     println!("cargo:rustc-env=ROOK_CEPH_VERSION={}", chart.version);
 }

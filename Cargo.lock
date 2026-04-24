@@ -3381,6 +3381,7 @@ dependencies = [
  "lattice-move",
  "lattice-operator",
  "lattice-render",
+ "lattice-rook",
  "lattice-secret-provider",
  "lattice-template",
  "parking_lot",

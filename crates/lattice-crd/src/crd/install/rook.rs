@@ -181,8 +181,7 @@ mod tests {
 
     #[test]
     fn failure_domain_serializes_lowercase() {
-        let json =
-            serde_json::to_string(&FailureDomain::Host).expect("serialize host");
+        let json = serde_json::to_string(&FailureDomain::Host).expect("serialize host");
         assert_eq!(json, "\"host\"");
         let parsed: FailureDomain = serde_json::from_str("\"osd\"").expect("parse osd");
         assert_eq!(parsed, FailureDomain::Osd);

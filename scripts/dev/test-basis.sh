@@ -64,11 +64,25 @@ export LATTICE_VAULT_INTERNAL_URL="http://${DEV_HOST}:8200"
 export LATTICE_KEYCLOAK_HOST_URL="http://${DEV_HOST}:8080"
 export LATTICE_KEYCLOAK_INTERNAL_URL="http://${DEV_HOST}:8080"
 
+BASIS_REPO="${BASIS_REPO:-$REPO_ROOT/../basis}"
+
+# Always refresh the basis provider bundle (CRDs + RBAC + Deployment)
+# from the basis checkout so a stale `ipPool`-style schema in this
+# repo can never reach the management cluster. Skip if the basis
+# checkout isn't accessible — the committed snapshot is the fallback.
+if [[ -x "$BASIS_REPO/scripts/generate-capi-components.sh" ]]; then
+    echo "Regenerating basis provider bundle from $BASIS_REPO"
+    LATTICE_REPO="$REPO_ROOT" \
+        "$BASIS_REPO/scripts/generate-capi-components.sh" --sync-lattice
+else
+    echo "Warning: $BASIS_REPO/scripts/generate-capi-components.sh not found;" \
+         "using the committed snapshot in test-providers/. Set BASIS_REPO to refresh."
+fi
+
 # Optionally (re)build and push the basis-capi-provider image before running.
 # Useful when iterating on the basis CAPI provider — the Deployment in
 # test-providers/infrastructure-basis/v0.1.0 pulls the image by tag.
 if [[ "${BASIS_PUSH_IMAGE:-false}" == "true" ]]; then
-    BASIS_REPO="${BASIS_REPO:-$REPO_ROOT/../basis}"
     if [[ ! -x "$BASIS_REPO/scripts/build-capi-provider.sh" ]]; then
         echo "Error: $BASIS_REPO/scripts/build-capi-provider.sh not found or not executable"
         echo "       Set BASIS_REPO to the basis checkout, or disable BASIS_PUSH_IMAGE."

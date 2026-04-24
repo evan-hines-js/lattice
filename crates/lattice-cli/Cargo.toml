@@ -31,6 +31,7 @@ lattice-infra.workspace = true
 lattice-move.workspace = true
 lattice-operator = { path = "../lattice-operator" }
 lattice-render.workspace = true
+lattice-rook.workspace = true
 lattice-secret-provider.workspace = true
 lattice-template.workspace = true
 

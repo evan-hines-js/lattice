@@ -2164,13 +2164,7 @@ mod tests {
 
         #[test]
         fn test_basis_config() {
-            let basis = BasisConfig {
-                ipv4_pool: "default".to_string(),
-                virtual_ip_network_interface: None,
-                kube_vip_image: None,
-                lb_cidr: None,
-            };
-            let config = ProviderConfig::basis(basis);
+            let config = ProviderConfig::basis(BasisConfig::default());
             assert!(config.basis.is_some());
             assert_eq!(config.provider_type(), ProviderType::Basis);
             assert!(config.validate().is_ok());
@@ -2179,13 +2173,10 @@ mod tests {
 
         #[test]
         fn test_basis_config_exposes_lb_cidr() {
-            let basis = BasisConfig {
-                ipv4_pool: "default".to_string(),
-                virtual_ip_network_interface: None,
-                kube_vip_image: None,
+            let config = ProviderConfig::basis(BasisConfig {
                 lb_cidr: Some("10.0.0.200/32".to_string()),
-            };
-            let config = ProviderConfig::basis(basis);
+                ..Default::default()
+            });
             assert_eq!(config.lb_cidr(), Some("10.0.0.200/32"));
         }
     }
