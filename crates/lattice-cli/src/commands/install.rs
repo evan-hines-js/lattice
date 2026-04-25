@@ -35,7 +35,7 @@ const API_SERVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const MACHINE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 use lattice_cell::bootstrap::{
-    generate_bootstrap_bundle, BootstrapBundleConfig, DefaultManifestGenerator,
+    generate_bootstrap_bundle, BootstrapBundleConfig, ClusterFacts, DefaultManifestGenerator,
 };
 use lattice_common::credentials::{
     AwsCredentials, BasisCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
@@ -642,7 +642,7 @@ impl Installer {
         let mgmt_client = self.management_client().await?;
 
         info!("Generating bootstrap manifests...");
-        let manifests = self.generate_bootstrap_manifests().await?;
+        let manifests = self.generate_bootstrap_manifests(&mgmt_client).await?;
         info!("Applying {} bootstrap manifests...", manifests.len());
 
         kube_utils::apply_manifests_with_retry(
@@ -681,24 +681,21 @@ impl Installer {
     /// Generate all bootstrap manifests for the management cluster.
     ///
     /// Uses the same shared code as the bootstrap webhook to ensure consistency.
-    async fn generate_bootstrap_manifests(&self) -> Result<Vec<String>> {
+    async fn generate_bootstrap_manifests(&self, mgmt_client: &Client) -> Result<Vec<String>> {
         let generator = DefaultManifestGenerator::new();
 
+        let facts = ClusterFacts::from_cluster(&self.cluster, self.cluster_yaml.clone());
+        // Read the *internal* control plane endpoint from kubeadm-config —
+        // anything else (host kubeconfig, Docker port-forward) is wrong for
+        // Cilium agents running inside the cluster.
+        let api_server_endpoint = lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client)
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))?;
         let config = BootstrapBundleConfig {
+            facts: &facts,
             image: &self.image,
             registry_credentials: self.registry_credentials.as_deref(),
-            lb_cidr: self.cluster.spec.provider.config.lb_cidr(),
-            cluster_name: self.cluster_name(),
-            provider: self.provider(),
-            k8s_version: &self.cluster.spec.provider.kubernetes.version,
-            autoscaling_enabled: self
-                .cluster
-                .spec
-                .nodes
-                .worker_pools
-                .values()
-                .any(|p| p.is_autoscaling_enabled()),
-            cluster_manifest: &self.cluster_yaml,
+            api_server_endpoint: &api_server_endpoint,
         };
 
         generate_bootstrap_bundle(&generator, &config)

@@ -10,7 +10,7 @@ use std::time::Duration;
 use kube::runtime::controller::Action;
 
 use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
-use lattice_common::{ControllerContext, ReconcileError};
+use lattice_common::{ApiServerEndpoint, ControllerContext, ReconcileError};
 use lattice_crd::crd::CiliumInstall;
 
 use super::manifests;
@@ -26,7 +26,14 @@ pub async fn reconcile(
     install: Arc<CiliumInstall>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
-    let mut manifests: Vec<String> = manifests::generate_cilium_manifests().to_vec();
+    let endpoint = ApiServerEndpoint::from_kubeadm_config(&ctx.client)
+        .await
+        .map_err(|e| {
+            ReconcileError::Validation(format!(
+                "failed to resolve API server endpoint for Cilium install: {e}"
+            ))
+        })?;
+    let mut manifests: Vec<String> = manifests::render_cilium_manifests(&endpoint);
     for policy in [
         serde_json::to_string_pretty(&manifests::generate_ztunnel_allowlist()),
         serde_json::to_string_pretty(&manifests::generate_default_deny()),

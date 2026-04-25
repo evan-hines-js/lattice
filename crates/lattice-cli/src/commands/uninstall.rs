@@ -20,7 +20,7 @@ use std::time::Duration;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Args;
 use k8s_openapi::api::core::v1::{Secret, Service};
-use kube::api::{Api, DeleteParams, DynamicObject, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, Patch, PatchParams};
 use kube::Client;
 use tracing::{debug, info, warn};
 
@@ -273,7 +273,14 @@ impl Uninstaller {
     /// to use the external endpoint from the CAPI Cluster's controlPlaneEndpoint so CAPI
     /// controllers on the kind cluster can reach the target for teardown.
     async fn patch_kubeconfig_for_direct_access(&self, client: &Client) -> Result<()> {
-        let server_url = self.get_control_plane_endpoint(client).await?;
+        let endpoint = lattice_common::ApiServerEndpoint::from_capi_cluster(
+            client,
+            &self.cluster_name,
+            &self.capi_namespace,
+        )
+        .await
+        .map_err(|e| Error::command_failed(e.to_string()))?;
+        let server_url = format!("https://{}:{}", endpoint.host, endpoint.port);
 
         let secrets: Api<Secret> = Api::namespaced(client.clone(), &self.capi_namespace);
         let secret_name = kubeconfig_secret_name(&self.cluster_name);
@@ -335,43 +342,6 @@ impl Uninstaller {
             .map_err(|e| Error::command_failed(format!("Failed to patch secret: {}", e)))?;
 
         Ok(())
-    }
-
-    /// Get the control plane endpoint URL from the CAPI Cluster resource
-    async fn get_control_plane_endpoint(&self, client: &Client) -> Result<String> {
-        let api_resource = lattice_common::kube_utils::build_api_resource_with_discovery(
-            client,
-            "cluster.x-k8s.io",
-            "Cluster",
-        )
-        .await
-        .map_err(|e| Error::command_failed(format!("API discovery failed: {}", e)))?;
-
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(client.clone(), &self.capi_namespace, &api_resource);
-
-        let cluster = api
-            .get(&self.cluster_name)
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to get CAPI Cluster: {}", e)))?;
-
-        let endpoint = cluster
-            .data
-            .get("spec")
-            .and_then(|s| s.get("controlPlaneEndpoint"))
-            .ok_or_else(|| Error::command_failed("CAPI Cluster has no controlPlaneEndpoint"))?;
-
-        let host = endpoint
-            .get("host")
-            .and_then(|h| h.as_str())
-            .ok_or_else(|| Error::command_failed("controlPlaneEndpoint has no host"))?;
-
-        let port = endpoint
-            .get("port")
-            .and_then(|p| p.as_i64())
-            .ok_or_else(|| Error::command_failed("controlPlaneEndpoint has no port"))?;
-
-        Ok(format!("https://{}:{}", host, port))
     }
 
     pub async fn run(&self) -> Result<()> {

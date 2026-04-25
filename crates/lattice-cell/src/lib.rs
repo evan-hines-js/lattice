@@ -29,7 +29,7 @@ pub mod server;
 pub mod state_sync;
 pub use bootstrap::{
     bootstrap_router, generate_bootstrap_bundle, generate_for_provider, BootstrapBundleConfig,
-    BootstrapState, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
+    BootstrapState, ClusterFacts, ClusterRegistration, DefaultManifestGenerator, ManifestGenerator,
 };
 pub use capi_proxy::{start_capi_proxy, CapiProxyConfig, CapiProxyError};
 pub use connection::{

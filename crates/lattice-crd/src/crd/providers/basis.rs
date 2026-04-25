@@ -1,22 +1,32 @@
 //! Basis provider configuration.
 //!
-//! Basis is a minimal bare-metal VM scheduler designed as a Proxmox
-//! replacement for Lattice's on-prem use case: VMs for Kubernetes node
-//! substrate, nothing more.
+//! Basis is a minimal bare-metal VM scheduler: VMs on a per-cluster
+//! VXLAN overlay, plus named LAN-routable pools the cluster picks
+//! from for its apiserver VIP. Anything above that — LB IP slicing,
+//! BGP advertisement, pod-CIDR routing — is Lattice's responsibility.
 //!
-//! Each cluster belongs to a **tree** (trust domain) in basis. The
-//! tree a `LatticeCluster` joins is *implied by where it's applied*:
-//! every `BasisCluster` CR is reconciled by the basis-capi-provider
-//! deployed into the hosting cell, and that provider is configured
-//! with the cell's `basisClusterId` at deploy time — all clusters it
-//! creates become children of that cell. The root cell is
-//! bootstrapped by `lattice-cli up` calling basis directly with no
-//! parent. There is no per-LatticeCluster parent field because there
-//! is no per-cluster choice: the API server you apply to IS the parent.
+//! Each cluster belongs to a **cell** (trust domain) in basis. The cell
+//! a `LatticeCluster` joins is *implied by where it's applied*: every
+//! `BasisCluster` CR is reconciled by the basis-capi-provider deployed
+//! into the hosting cell, and that provider is configured with the
+//! cell's id at deploy time. The root cell is bootstrapped by
+//! `lattice-cli up` calling basis directly with no parent.
 //!
-//! The control-plane VIP is always allocated by basis from the
-//! LAN-routable `edge_pool`. Whether kube-vip *claims* that VIP on the
-//! LAN is per-cluster: see [`BasisConfig::control_plane_lan_vip`].
+//! # Addressing
+//!
+//! Basis hands the cluster an apiserver VIP from a named pool (the
+//! `apiserverVipPool` it's told to use, also the source for any
+//! `edge: true` machines' second NIC). Lattice owns everything else:
+//!
+//! * `addressPools` — Lattice declares which pool/slice combinations
+//!   this cluster will advertise. Drives one `CiliumLoadBalancerIPPool`
+//!   per entry; Services select a pool via
+//!   `service.kubernetes.io/load-balancer-class: lattice.dev/<pool>`.
+//!   The named pool must exist in basis's `network.pools` config —
+//!   basis validates the apiserver-VIP allocation against that name.
+//! * `bgpPeer` — kube-vip's BGP peer for VIP advertisement. Today
+//!   typically the customer upstream router (basis itself doesn't
+//!   speak BGP).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -25,39 +35,56 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BasisConfig {
-    /// When `true`, control-plane nodes are provisioned with
-    /// `edge: true` (a second NIC on the uplink bridge, `ens4`) and
-    /// kube-vip claims the apiserver VIP on that NIC — so callers
-    /// *outside* the basis tree (operator laptops, bootstrap kind
-    /// cluster, Cluster API core in a parent cell) can reach the
-    /// apiserver directly at the VIP.
-    ///
-    /// When `false` (default), CPs stay tree-only and kube-vip claims
-    /// the VIP on `ens3` (overlay). External callers reach the
-    /// apiserver through Lattice's parent-cell auth proxy instead;
-    /// the VIP is still a unique address from the edge pool (cert SAN,
-    /// CAPI endpoint identifier) but isn't announced outside the tree.
-    ///
-    /// Set `true` on the root/management cluster; leave unset on
-    /// nested workload clusters that are reached through the proxy.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub control_plane_edge: bool,
+    /// BGP peer kube-vip uses to advertise the apiserver VIP. Today
+    /// this is whatever upstream router the cluster's edge NICs can
+    /// reach (basis is not itself a BGP speaker).
+    pub bgp_peer: BgpPeer,
+
+    /// LB pool slices this cluster will advertise. Must be non-empty.
+    /// Each entry's `name` must match a pool defined in basis's
+    /// controller config (`network.pools[]`); the `cidr` is the slice
+    /// Lattice carves for this cluster's Cilium LB IPAM. Lattice owns
+    /// the slicing — basis only validates the names it sees.
+    pub address_pools: Vec<AddressPoolBinding>,
+
+    /// Pool the apiserver VIP is drawn from. Forwarded to
+    /// `BasisCluster.spec.apiserverVipPool`. Defaults to `cell-internal`
+    /// for child clusters; root/management clusters typically set
+    /// `cell-public` so external callers can reach the apiserver
+    /// directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apiserver_vip_pool: Option<String>,
 
     /// Optional override for the kube-vip container image. Omit to let
     /// the generator pick a tested default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kube_vip_image: Option<String>,
-
-    /// CIDR from which Cilium hands out `type: LoadBalancer` addresses
-    /// (the `CiliumLoadBalancerIPPool`). Must be on the same L2 segment
-    /// as the cluster's nodes — Cilium announces via ARP inside the
-    /// tree's VXLAN — and must NOT overlap with the tree's VM or VIP
-    /// sub-ranges. Without this set, `type: LoadBalancer` Services stay
-    /// `<pending>` forever.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lb_cidr: Option<String>,
 }
 
-fn is_false(b: &bool) -> bool {
-    !*b
+/// One LB pool slice this cluster advertises.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressPoolBinding {
+    /// Pool name (e.g., `cell-internal`, `cell-public`). Must match a
+    /// pool declared in the hosting cell's basis controller config.
+    pub name: String,
+
+    /// CIDR slice this cluster advertises into the pool. Lattice
+    /// renders one `CiliumLoadBalancerIPPool` from this; the
+    /// allocator inside Cilium hands /32s out to LoadBalancer Services.
+    pub cidr: String,
+}
+
+/// BGP peer kube-vip advertises the apiserver VIP to. Currently a
+/// pointer to the customer upstream router; sessions are eBGP at the
+/// router's ASN.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BgpPeer {
+    /// Reachable IP of the BGP peer.
+    pub address: String,
+
+    /// Peer ASN. Used as both local and remote — kube-vip's static-pod
+    /// manifest takes a single asn knob today.
+    pub asn: u32,
 }

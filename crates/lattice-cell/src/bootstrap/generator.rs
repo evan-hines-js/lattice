@@ -304,13 +304,6 @@ impl ManifestGenerator for DefaultManifestGenerator {
     ) -> Result<Vec<String>, super::errors::BootstrapError> {
         let mut manifests = Vec::new();
 
-        // CNI manifests first (Cilium) - embedded at build time
-        manifests.extend(
-            lattice_cilium::install::manifests::generate_cilium_manifests()
-                .iter()
-                .cloned(),
-        );
-
         // Then operator manifests
         let operator_manifests = self
             .generate_operator_manifests(image, registry_credentials, cluster_name, provider)
@@ -373,27 +366,6 @@ mod tests {
             m.contains("\"kind\":\"ServiceAccount\"") && m.contains("lattice-operator")
         });
         assert!(has_sa);
-    }
-
-    #[tokio::test]
-    async fn default_generator_creates_cilium_cni() {
-        let generator = DefaultManifestGenerator::new();
-        let manifests = generator
-            .generate("test:latest", None, None, None)
-            .await
-            .unwrap();
-
-        // Should include Cilium DaemonSet (rendered from helm template)
-        let has_cilium_daemonset = manifests
-            .iter()
-            .any(|m: &String| m.contains("kind: DaemonSet") && m.contains("cilium"));
-        assert!(has_cilium_daemonset, "Should include Cilium DaemonSet");
-
-        // Should include Cilium ConfigMap
-        let has_cilium_config = manifests
-            .iter()
-            .any(|m: &String| m.contains("kind: ConfigMap") && m.contains("cilium"));
-        assert!(has_cilium_config, "Should include Cilium ConfigMap");
     }
 
     /// Story: Manifest generation for operator deployment

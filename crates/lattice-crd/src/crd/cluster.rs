@@ -784,11 +784,10 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
         assert_eq!(spec.nodes.control_plane.replicas, 1);
         assert_eq!(spec.nodes.total_workers(), 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
-        assert_eq!(
-            spec.provider.config.lb_cidr(),
-            Some("172.18.255.1/32"),
-            "lb_cidr should be extracted from docker config"
-        );
+        match spec.provider.config.lb_advertisement() {
+            Some(crate::crd::LbAdvertisement::L2 { cidr }) => assert_eq!(cidr, "172.18.255.1/32"),
+            other => panic!("expected L2 advertisement from docker config, got {other:?}"),
+        }
         assert_eq!(
             spec.parent_config
                 .as_ref()

@@ -20,9 +20,15 @@ spec:
       bootstrap: rke2
     config:
       basis:
-        # Cilium LB-IPAM range. Outside basis's VM/VIP pools, disjoint
-        # from mgmt (.176/28) and workload2 (.144/28). /28 = 16 IPs.
-        lbCidr: "10.0.0.160/28"
+        # Workload cluster — cell-internal only. LB IPs aren't reachable
+        # from outside the cell; external traffic enters via the root
+        # cluster's cell-public ingress.
+        bgpPeer:
+          address: "10.0.0.1"
+          asn: 64500
+        addressPools:
+          - name: cell-internal
+            cidr: "10.255.4.32/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

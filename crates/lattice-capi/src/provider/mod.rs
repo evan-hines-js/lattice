@@ -326,30 +326,168 @@ pub struct ControlPlaneConfig {
     pub registry_mirrors: Vec<registry::ResolvedMirror>,
 }
 
-/// Virtual IP configuration for kube-vip
+/// Virtual IP configuration for kube-vip.
 #[derive(Clone, Debug)]
 pub struct VipConfig {
     /// VIP address (e.g., "10.0.0.100")
     pub address: String,
-    /// Network interface (e.g., "eth0")
-    pub interface: String,
     /// kube-vip image (e.g., "ghcr.io/kube-vip/kube-vip:v0.8.0")
     pub image: String,
+    /// Announcement mode.
+    pub mode: VipMode,
 }
 
-use crate::constants::{
-    DEFAULT_KUBE_VIP_IMAGE, DEFAULT_NETWORK_INTERFACE, KUBERNETES_API_SERVER_PORT,
-};
+/// How kube-vip announces the VIP.
+#[derive(Clone, Debug)]
+pub enum VipMode {
+    /// gARP-based leader election on a chosen interface. Used by
+    /// providers that share an L2 segment with the VIP (Proxmox).
+    Arp { interface: String },
+    /// iBGP advertisement of the VIP /32 to a route reflector. Used by
+    /// providers where nodes don't sit on the same L2 as the VIP
+    /// (basis).
+    Bgp {
+        local_asn: u32,
+        peer_asn: u32,
+        peer_address: String,
+        /// NIC kube-vip reads its router ID from.
+        router_interface: String,
+    },
+}
+
+use crate::constants::{DEFAULT_KUBE_VIP_IMAGE, KUBERNETES_API_SERVER_PORT};
 
 impl VipConfig {
-    /// Create a new VipConfig with defaults
-    pub fn new(address: String, interface: Option<String>, image: Option<String>) -> Self {
+    pub fn arp(address: String, interface: String, image: Option<String>) -> Self {
         Self {
             address,
-            interface: interface.unwrap_or_else(|| DEFAULT_NETWORK_INTERFACE.to_string()),
             image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
+            mode: VipMode::Arp { interface },
         }
     }
+
+    pub fn bgp(
+        address: String,
+        local_asn: u32,
+        peer_asn: u32,
+        peer_address: String,
+        router_interface: String,
+        image: Option<String>,
+    ) -> Self {
+        Self {
+            address,
+            image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
+            mode: VipMode::Bgp {
+                local_asn,
+                peer_asn,
+                peer_address,
+                router_interface,
+            },
+        }
+    }
+
+    /// The NIC where the node's primary IP lives. kubelet's `--node-ip`
+    /// is read from here in pre-kubeadm scripts.
+    pub fn node_interface(&self) -> &str {
+        match &self.mode {
+            VipMode::Arp { interface } => interface,
+            VipMode::Bgp {
+                router_interface, ..
+            } => router_interface,
+        }
+    }
+}
+
+/// Build the env-var set kube-vip needs for the given VIP config.
+fn kube_vip_env(vip: &VipConfig) -> Vec<k8s_openapi::api::core::v1::EnvVar> {
+    use k8s_openapi::api::core::v1::EnvVar;
+
+    let mut env = vec![
+        EnvVar {
+            name: "cp_enable".to_string(),
+            value: Some("true".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "address".to_string(),
+            value: Some(vip.address.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "port".to_string(),
+            value: Some(KUBERNETES_API_SERVER_PORT.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "vip_leaderelection".to_string(),
+            value: Some("true".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "vip_leaseduration".to_string(),
+            value: Some("60".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "vip_renewdeadline".to_string(),
+            value: Some("40".to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "vip_retryperiod".to_string(),
+            value: Some("5".to_string()),
+            ..Default::default()
+        },
+    ];
+
+    match &vip.mode {
+        VipMode::Arp { interface } => {
+            env.push(EnvVar {
+                name: "vip_interface".to_string(),
+                value: Some(interface.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "vip_arp".to_string(),
+                value: Some("true".to_string()),
+                ..Default::default()
+            });
+        }
+        VipMode::Bgp {
+            local_asn,
+            peer_asn,
+            peer_address,
+            router_interface,
+        } => {
+            env.push(EnvVar {
+                name: "bgp_enable".to_string(),
+                value: Some("true".to_string()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "bgp_routerinterface".to_string(),
+                value: Some(router_interface.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "bgp_as".to_string(),
+                value: Some(local_asn.to_string()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "bgp_peeraddress".to_string(),
+                value: Some(peer_address.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "bgp_peeras".to_string(),
+                value: Some(peer_asn.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    env
 }
 
 /// Generate kube-vip static pod manifest
@@ -358,8 +496,8 @@ fn generate_kube_vip_manifest(
     bootstrap: &lattice_crd::crd::BootstrapProvider,
 ) -> Result<String> {
     use k8s_openapi::api::core::v1::{
-        Capabilities, Container, EnvVar, HostAlias, HostPathVolumeSource, Pod, PodSpec,
-        SecurityContext, Volume, VolumeMount,
+        Capabilities, Container, HostAlias, HostPathVolumeSource, Pod, PodSpec, SecurityContext,
+        Volume, VolumeMount,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_crd::crd::BootstrapProvider;
@@ -391,53 +529,7 @@ fn generate_kube_vip_manifest(
                 image: Some(vip.image.clone()),
                 image_pull_policy: Some("IfNotPresent".to_string()),
                 args: Some(vec!["manager".to_string()]),
-                env: Some(vec![
-                    EnvVar {
-                        name: "cp_enable".to_string(),
-                        value: Some("true".to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_interface".to_string(),
-                        value: Some(vip.interface.clone()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "address".to_string(),
-                        value: Some(vip.address.clone()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "port".to_string(),
-                        value: Some(KUBERNETES_API_SERVER_PORT.to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_arp".to_string(),
-                        value: Some("true".to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_leaderelection".to_string(),
-                        value: Some("true".to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_leaseduration".to_string(),
-                        value: Some("60".to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_renewdeadline".to_string(),
-                        value: Some("40".to_string()),
-                        ..Default::default()
-                    },
-                    EnvVar {
-                        name: "vip_retryperiod".to_string(),
-                        value: Some("5".to_string()),
-                        ..Default::default()
-                    },
-                ]),
+                env: Some(kube_vip_env(vip)),
                 security_context: Some(SecurityContext {
                     capabilities: Some(Capabilities {
                         add: Some(vec!["NET_ADMIN".to_string(), "NET_RAW".to_string()]),
@@ -1082,6 +1174,10 @@ fn generate_kubeadm_control_plane(
         api_server["certSANs"] = serde_json::json!(cp_config.cert_sans);
     }
 
+    // Skip the kube-proxy addon at init time. Cilium runs with
+    // kubeProxyReplacement=true and refuses to start if kube-proxy is
+    // present. Same skip on join — joined control-plane nodes mustn't
+    // re-deploy the addon.
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": api_server,
@@ -1095,7 +1191,8 @@ fn generate_kubeadm_control_plane(
             }
         },
         "initConfiguration": {
-            "nodeRegistration": node_registration.clone()
+            "nodeRegistration": node_registration.clone(),
+            "skipPhases": ["addon/kube-proxy"]
         },
         "joinConfiguration": {
             "nodeRegistration": node_registration
@@ -1131,7 +1228,7 @@ fn generate_kubeadm_control_plane(
 
         // Set node-ip before kubeadm starts to prevent VIP registration issue
         // See: https://github.com/kube-vip/kube-vip/issues/741
-        let interface = &vip.interface;
+        let interface = vip.node_interface();
         pre_kubeadm_commands.push(format!(
             r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"--node-ip=$NODE_IP\"" > /etc/default/kubelet"#,
             iface = interface
@@ -1228,7 +1325,7 @@ fn generate_rke2_control_plane(
     // See: https://github.com/kube-vip/kube-vip/issues/741
     let mut pre_rke2_commands: Vec<String> = vec![];
     if let Some(ref vip) = cp_config.vip {
-        let interface = &vip.interface;
+        let interface = vip.node_interface();
         // Get the node's actual IP (not the VIP) and write to RKE2 config
         // This runs BEFORE RKE2 starts, so kube-vip hasn't added the VIP yet
         pre_rke2_commands.push(format!(
@@ -1856,7 +1953,7 @@ mod tests {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
+                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
             };
@@ -1971,7 +2068,7 @@ mod tests {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
+                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
             };
@@ -2130,7 +2227,7 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::new("10.0.0.100".to_string(), None, None)),
+                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
                 registry_mirrors: vec![],
             };
@@ -2421,23 +2518,50 @@ mod tests {
         }
 
         #[test]
-        fn test_vip_config_new_with_defaults() {
-            let vip = VipConfig::new("10.0.0.100".to_string(), None, None);
+        fn test_vip_config_arp_defaults() {
+            let vip = VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None);
             assert_eq!(vip.address, "10.0.0.100");
-            assert_eq!(vip.interface, "eth0");
             assert_eq!(vip.image, DEFAULT_KUBE_VIP_IMAGE);
+            match &vip.mode {
+                VipMode::Arp { interface } => assert_eq!(interface, "eth0"),
+                _ => panic!("expected ARP mode"),
+            }
         }
 
         #[test]
-        fn test_vip_config_new_with_custom_values() {
-            let vip = VipConfig::new(
+        fn test_vip_config_arp_custom_image() {
+            let vip = VipConfig::arp(
                 "192.168.1.100".to_string(),
-                Some("ens192".to_string()),
+                "ens192".to_string(),
                 Some("custom-image:v1".to_string()),
             );
             assert_eq!(vip.address, "192.168.1.100");
-            assert_eq!(vip.interface, "ens192");
             assert_eq!(vip.image, "custom-image:v1");
+            match &vip.mode {
+                VipMode::Arp { interface } => assert_eq!(interface, "ens192"),
+                _ => panic!("expected ARP mode"),
+            }
+        }
+
+        #[test]
+        fn test_vip_config_bgp_emits_bgp_env() {
+            let vip = VipConfig::bgp(
+                "10.0.0.100".to_string(),
+                64500,
+                64500,
+                "10.0.0.1".to_string(),
+                "ens3".to_string(),
+                None,
+            );
+            let env = kube_vip_env(&vip);
+            let names: Vec<_> = env.iter().map(|e| e.name.as_str()).collect();
+            assert!(names.contains(&"bgp_enable"));
+            assert!(names.contains(&"bgp_routerinterface"));
+            assert!(names.contains(&"bgp_as"));
+            assert!(names.contains(&"bgp_peeraddress"));
+            assert!(names.contains(&"bgp_peeras"));
+            assert!(!names.contains(&"vip_arp"));
+            assert!(!names.contains(&"vip_interface"));
         }
 
         #[test]

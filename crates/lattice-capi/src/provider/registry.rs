@@ -28,9 +28,11 @@ fn upstream_registries() -> &'static [String] {
         set.extend(extract_image_registries(
             lattice_volcano::install::manifests::generate_volcano(),
         ));
-        set.extend(extract_image_registries(
-            lattice_cilium::install::manifests::generate_cilium_manifests(),
-        ));
+        set.extend(
+            lattice_cilium::install::manifests::image_registries()
+                .iter()
+                .cloned(),
+        );
         set.extend(extract_image_registries(
             &lattice_istio::install::manifests::render_istio_manifests(
                 "registry-scan",

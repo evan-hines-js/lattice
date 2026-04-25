@@ -10,7 +10,9 @@ use kube::api::ListParams;
 use kube::{Api, Client};
 use serde::de::DeserializeOwned;
 
-use lattice_cell::bootstrap::{BootstrapState, ClusterRegistration, ManifestGenerator};
+use lattice_cell::bootstrap::{
+    BootstrapState, ClusterFacts, ClusterRegistration, ManifestGenerator,
+};
 use lattice_cell::parent::ParentServers;
 use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
@@ -198,22 +200,10 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             }
         };
 
-        let autoscaling_enabled = cluster
-            .spec
-            .nodes
-            .worker_pools
-            .values()
-            .any(|p| p.is_autoscaling_enabled());
         let registration = ClusterRegistration {
-            cluster_id: name.clone(),
+            facts: ClusterFacts::from_cluster(&cluster, cluster_manifest),
             cell_endpoint,
             ca_certificate: ca_cert,
-            cluster_manifest,
-            lb_cidr: cluster.spec.provider.config.lb_cidr().map(String::from),
-            provider: cluster.spec.provider.provider_type(),
-            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
-            autoscaling_enabled,
         };
 
         // Use token from LatticeCluster.status if available (source of truth)

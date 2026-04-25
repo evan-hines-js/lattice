@@ -112,8 +112,8 @@ pub use package::{
     PackageMeshPort, PackagePhase,
 };
 pub use providers::{
-    AdditionalNetwork, AwsConfig, BasisConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig,
-    OpenStackConfig, ProxmoxConfig,
+    AdditionalNetwork, AddressPoolBinding, AwsConfig, BasisConfig, BgpPeer, DockerConfig,
+    Ipv4PoolConfig, Ipv6PoolConfig, OpenStackConfig, ProxmoxConfig,
 };
 pub use quota::{
     LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,
@@ -131,9 +131,9 @@ pub use topology::{
 pub use types::{
     credential_secret_name, BootstrapProvider, CertPolicy, ClusterConfig, ClusterPhase, Condition,
     ConditionStatus, ControlPlaneSpec, CredentialSpec, EndpointsSpec, GpuCapacity, InstanceType,
-    KubernetesSpec, NodeCapacityHint, NodeResourceSpec, NodeSpec, NodeTaint, ProviderConfig,
-    ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec,
-    TaintEffect, WorkerPoolSpec,
+    KubernetesSpec, LbAdvertisement, NodeCapacityHint, NodeResourceSpec, NodeSpec, NodeTaint,
+    ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef,
+    ServiceSpec, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

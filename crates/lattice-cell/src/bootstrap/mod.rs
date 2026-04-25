@@ -41,9 +41,14 @@ pub use addons::generate_for_provider;
 pub use bundle::generate_bootstrap_bundle;
 pub use errors::BootstrapError;
 pub use generator::DefaultManifestGenerator;
-pub use state::{BootstrapConfig, BootstrapState, ClusterBootstrapInfo};
+pub use state::{
+    capi_cluster_endpoint_resolver, ApiServerEndpointResolver, BootstrapConfig, BootstrapState,
+    ClusterBootstrapInfo,
+};
 pub use token::BootstrapToken;
-pub use types::{BootstrapBundleConfig, BootstrapResponse, ClusterRegistration, ManifestGenerator};
+pub use types::{
+    BootstrapBundleConfig, BootstrapResponse, ClusterFacts, ClusterRegistration, ManifestGenerator,
+};
 
 use std::sync::Arc;
 

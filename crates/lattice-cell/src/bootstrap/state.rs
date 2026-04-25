@@ -15,63 +15,82 @@ use kube::{Api, Client};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use futures::future::BoxFuture;
 use lattice_common::{
-    CsrResponse, PARENT_CONFIG_CA_KEY, PARENT_CONFIG_CSR_TOKEN_KEY, PARENT_CONFIG_ENDPOINT_KEY,
-    PARENT_CONFIG_SECRET,
+    capi_namespace, ApiServerEndpoint, CsrResponse, PARENT_CONFIG_CA_KEY,
+    PARENT_CONFIG_CSR_TOKEN_KEY, PARENT_CONFIG_ENDPOINT_KEY, PARENT_CONFIG_SECRET,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
-use lattice_crd::crd::{LatticeCluster, ProviderType};
+use lattice_crd::crd::LatticeCluster;
 use lattice_infra::pki::CertificateAuthorityBundle;
 
 use super::bundle::generate_bootstrap_bundle;
 use super::errors::BootstrapError;
 use super::token::BootstrapToken;
 use super::types::{
-    BootstrapBundleConfig, BootstrapResponse, ClusterRegistration, ManifestGenerator,
+    BootstrapBundleConfig, BootstrapResponse, ClusterFacts, ClusterRegistration, ManifestGenerator,
 };
 
 /// CSR token TTL — CSR must be signed within this window after bootstrap
 const CSR_TOKEN_TTL: Duration = Duration::from_secs(600);
 
+/// Resolves the API server endpoint for a given child cluster id.
+///
+/// Production injects a closure backed by [`ApiServerEndpoint::from_capi_cluster`];
+/// tests inject a closure that returns a fixed endpoint. This is the only
+/// indirection needed to keep `BootstrapState` testable without smuggling
+/// test-only branches into the production code path.
+pub type ApiServerEndpointResolver = Arc<
+    dyn Fn(String) -> BoxFuture<'static, Result<ApiServerEndpoint, BootstrapError>>
+        + Send
+        + Sync,
+>;
+
+/// Build the production resolver: read the endpoint from the child's CAPI
+/// `Cluster` CR via `ApiServerEndpoint::from_capi_cluster`.
+pub fn capi_cluster_endpoint_resolver(client: Client) -> ApiServerEndpointResolver {
+    Arc::new(move |cluster_id: String| {
+        let client = client.clone();
+        Box::pin(async move {
+            ApiServerEndpoint::from_capi_cluster(
+                &client,
+                &cluster_id,
+                &capi_namespace(&cluster_id),
+            )
+            .await
+            .map_err(|e| {
+                BootstrapError::Internal(format!(
+                    "failed to resolve API server endpoint for {}: {}",
+                    cluster_id, e
+                ))
+            })
+        })
+    })
+}
+
 /// Maximum number of cluster registrations to prevent unbounded memory growth.
 /// A single cell managing 10k clusters would be extreme — this is a safety net.
 const MAX_CLUSTER_REGISTRATIONS: usize = 10_000;
 
-/// Cluster info stored in bootstrap state
+/// Cluster info stored in bootstrap state.
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
-    /// Cluster ID
-    pub cluster_id: String,
-    /// Cell endpoint for agent to connect to (format: "host:http_port:grpc_port")
+    pub facts: ClusterFacts,
     pub cell_endpoint: String,
-    /// CA certificate PEM
     pub ca_certificate: String,
-    /// The LatticeCluster CRD manifest (JSON) to apply on the workload cluster
-    pub cluster_manifest: String,
-    /// SHA-256 hash of the bootstrap token (raw token never stored)
     pub token_hash: String,
-    /// When the token was created
     pub token_created: Instant,
-    /// Whether the token has been used
     pub token_used: bool,
-    /// Cilium LB-IPAM CIDR (on-prem providers only)
-    pub lb_cidr: Option<String>,
-    /// Infrastructure provider (docker, aws, gcp, azure)
-    pub provider: ProviderType,
-    /// Bootstrap mechanism (kubeadm or rke2) - determines FIPS relaxation needs
-    pub bootstrap: lattice_crd::crd::BootstrapProvider,
-    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons like CCM
-    pub k8s_version: String,
-    /// Whether any worker pool has autoscaling enabled (min/max set)
-    pub autoscaling_enabled: bool,
-    /// SHA-256 hash of the one-time CSR token (raw token never stored)
     pub csr_token_hash: Option<String>,
-    /// When the CSR token was created (for TTL enforcement)
     pub csr_token_created: Option<Instant>,
-    /// Whether the CSR token has been used
     pub csr_token_used: bool,
-    /// Raw CSR token (held temporarily until bootstrap response is sent, then cleared)
     pub csr_token_raw: Option<zeroize::Zeroizing<String>>,
+}
+
+impl ClusterBootstrapInfo {
+    pub fn cluster_id(&self) -> &str {
+        &self.facts.cluster_name
+    }
 }
 
 /// Configuration for creating a [`BootstrapState`]
@@ -90,6 +109,8 @@ pub struct BootstrapConfig<G: ManifestGenerator> {
     pub kube_client: Option<Client>,
     /// Parent cluster name (for fetching distributable resources)
     pub cluster_name: Option<String>,
+    /// Resolves the API server endpoint baked into a child's bootstrap bundle.
+    pub api_server_endpoint_resolver: ApiServerEndpointResolver,
 }
 
 /// Bootstrap endpoint state
@@ -110,6 +131,8 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
     pub(crate) kube_client: Option<Client>,
     /// Parent cluster name (for fetching distributable resources during bootstrap)
     pub(crate) cluster_name: Option<String>,
+    /// Resolves the API server endpoint for the bootstrap bundle.
+    pub(crate) api_server_endpoint_resolver: ApiServerEndpointResolver,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -124,6 +147,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             cert_validity_hours: config.cert_validity_hours,
             kube_client: config.kube_client,
             cluster_name: config.cluster_name,
+            api_server_endpoint_resolver: config.api_server_endpoint_resolver,
         }
     }
 
@@ -161,7 +185,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         existing_token: Option<&str>,
         recovery_csr_hash: Option<String>,
     ) -> BootstrapToken {
-        let cluster_id = registration.cluster_id.clone();
+        let cluster_id = registration.cluster_id().to_string();
 
         // Evict fully-consumed registrations when approaching capacity
         if self.clusters.len() >= MAX_CLUSTER_REGISTRATIONS {
@@ -218,18 +242,12 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 let token_used = recovery_csr_hash.is_some();
 
                 let info = ClusterBootstrapInfo {
-                    cluster_id: cluster_id.clone(),
+                    facts: registration.facts,
                     cell_endpoint: registration.cell_endpoint,
                     ca_certificate: registration.ca_certificate,
-                    cluster_manifest: registration.cluster_manifest,
                     token_hash: token.hash(),
                     token_created: Instant::now(),
                     token_used,
-                    lb_cidr: registration.lb_cidr,
-                    provider: registration.provider,
-                    bootstrap: registration.bootstrap,
-                    k8s_version: registration.k8s_version,
-                    autoscaling_enabled: registration.autoscaling_enabled,
                     csr_token_hash: recovery_csr_hash,
                     csr_token_created: if token_used {
                         Some(Instant::now())
@@ -387,22 +405,21 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ) -> Result<BootstrapResponse, BootstrapError> {
         // Use the child's latticeImage from its cluster manifest if available,
         // falling back to the parent's image if not present.
-        let child_image = serde_json::from_str::<serde_json::Value>(&info.cluster_manifest)
+        let child_image = serde_json::from_str::<serde_json::Value>(&info.facts.cluster_manifest)
             .ok()
             .and_then(|v| v["spec"]["latticeImage"].as_str().map(String::from));
         let bootstrap_image = child_image.as_deref().unwrap_or(&self.image);
 
+        let api_server_endpoint =
+            (self.api_server_endpoint_resolver)(info.facts.cluster_name.clone()).await?;
+
         // Child clusters receive the lattice-registry Secret via distribution,
         // not baked into the operator manifests.
         let bundle_config = BootstrapBundleConfig {
+            facts: &info.facts,
             image: bootstrap_image,
             registry_credentials: None,
-            lb_cidr: info.lb_cidr.as_deref(),
-            cluster_name: &info.cluster_id,
-            provider: info.provider,
-            k8s_version: &info.k8s_version,
-            autoscaling_enabled: info.autoscaling_enabled,
-            cluster_manifest: &info.cluster_manifest,
+            api_server_endpoint: &api_server_endpoint,
         };
         let mut manifests =
             generate_bootstrap_bundle(&self.manifest_generator, &bundle_config).await?;
@@ -445,7 +462,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // are added by the bootstrap_manifests_handler after calling this method.
 
         Ok(BootstrapResponse {
-            cluster_id: info.cluster_id.clone(),
+            cluster_id: info.cluster_id().to_string(),
             cell_endpoint: info.cell_endpoint.clone(),
             ca_certificate: info.ca_certificate.clone(),
             manifests,
@@ -574,7 +591,7 @@ mod tests {
             .await
             .expect("token validation should succeed");
 
-        assert_eq!(info.cluster_id, "test-cluster");
+        assert_eq!(info.cluster_id(), "test-cluster");
     }
 
     #[tokio::test]
@@ -677,8 +694,12 @@ mod tests {
         assert_eq!(response.cell_endpoint, "cell.example.com:8443:50051");
         assert_eq!(response.ca_certificate, "ca-cert");
         assert!(!response.manifests.is_empty());
-        // Manifest contains image from TestManifestGenerator, not cluster ID
-        assert!(response.manifests[0].contains("# Test manifest"));
+        // The TestManifestGenerator's stub manifest is in the bundle (the
+        // exact position varies — Cilium manifests precede it).
+        assert!(response
+            .manifests
+            .iter()
+            .any(|m| m.contains("# Test manifest")));
     }
 
     // CSR signing tests
@@ -835,7 +856,7 @@ mod tests {
             .validate_and_consume("prod-us-west-001", token.as_str())
             .await
             .expect("token validation should succeed");
-        assert_eq!(info.cluster_id, "prod-us-west-001");
+        assert_eq!(info.cluster_id(), "prod-us-west-001");
         assert_eq!(info.cell_endpoint, "cell.lattice.example.com:8443:50051");
 
         // Chapter 3: Cell returns bootstrap response with manifests
@@ -1238,31 +1259,12 @@ mod tests {
             cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
             kube_client: None,
             cluster_name: None,
+            api_server_endpoint_resolver: test_endpoint_resolver(),
         });
 
-        // Register AWS cluster
-        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"aws-test"}}"#.to_string();
         state.clusters.insert(
             "aws-test".to_string(),
-            ClusterBootstrapInfo {
-                cluster_id: "aws-test".to_string(),
-                cell_endpoint: "cell:8443:50051".to_string(),
-                ca_certificate: "ca-cert".to_string(),
-                cluster_manifest,
-                token_hash: "test-token-hash".to_string(),
-                token_created: std::time::Instant::now(),
-                token_used: true,
-                lb_cidr: None,
-
-                provider: ProviderType::Aws,
-                bootstrap: lattice_crd::crd::BootstrapProvider::Kubeadm,
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-                csr_token_hash: None,
-                csr_token_created: None,
-                csr_token_used: false,
-                csr_token_raw: None,
-            },
+            test_bootstrap_info("aws-test", lattice_crd::crd::ProviderType::Aws),
         );
 
         let info = state
@@ -1309,31 +1311,12 @@ mod tests {
             cert_validity_hours: DEFAULT_CERT_VALIDITY_HOURS,
             kube_client: None,
             cluster_name: None,
+            api_server_endpoint_resolver: test_endpoint_resolver(),
         });
 
-        // Register Docker cluster
-        let cluster_manifest = r#"{"apiVersion":"lattice.dev/v1alpha1","kind":"LatticeCluster","metadata":{"name":"docker-test"}}"#.to_string();
         state.clusters.insert(
             "docker-test".to_string(),
-            ClusterBootstrapInfo {
-                cluster_id: "docker-test".to_string(),
-                cell_endpoint: "cell:8443:50051".to_string(),
-                ca_certificate: "ca-cert".to_string(),
-                cluster_manifest,
-                token_hash: "test-token-hash".to_string(),
-                token_created: std::time::Instant::now(),
-                token_used: true,
-                lb_cidr: None,
-
-                provider: ProviderType::Docker,
-                bootstrap: lattice_crd::crd::BootstrapProvider::Kubeadm,
-                k8s_version: "1.32.0".to_string(),
-                autoscaling_enabled: false,
-                csr_token_hash: None,
-                csr_token_created: None,
-                csr_token_used: false,
-                csr_token_raw: None,
-            },
+            test_bootstrap_info("docker-test", lattice_crd::crd::ProviderType::Docker),
         );
 
         let info = state

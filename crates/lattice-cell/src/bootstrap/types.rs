@@ -3,7 +3,8 @@
 //! Core types for the bootstrap protocol: responses, registrations,
 //! manifest generator trait, and bundle configuration.
 
-use lattice_crd::crd::ProviderType;
+use lattice_common::ApiServerEndpoint;
+use lattice_crd::crd::{LatticeCluster, LbAdvertisement, ProviderType};
 use serde::{Deserialize, Serialize};
 
 /// Bootstrap response containing manifests for the agent
@@ -19,30 +20,52 @@ pub struct BootstrapResponse {
     pub manifests: Vec<String>,
 }
 
-/// Configuration for registering a cluster for bootstrap
-///
-/// Groups related parameters for `register_cluster` to improve readability
-/// and satisfy clippy's too_many_arguments lint.
+/// Per-cluster facts shared by [`ClusterRegistration`] and
+/// [`BootstrapBundleConfig`]. Single source of truth for the bits
+/// derived from a `LatticeCluster`.
+#[derive(Debug, Clone)]
+pub struct ClusterFacts {
+    pub cluster_name: String,
+    pub provider: ProviderType,
+    pub bootstrap: lattice_crd::crd::BootstrapProvider,
+    pub k8s_version: String,
+    pub autoscaling_enabled: bool,
+    pub lb_advertisement: Option<LbAdvertisement>,
+    pub cluster_manifest: String,
+}
+
+impl ClusterFacts {
+    /// Derive facts from a cluster CR plus its serialized manifest.
+    pub fn from_cluster(cluster: &LatticeCluster, cluster_manifest: String) -> Self {
+        Self {
+            cluster_name: cluster.metadata.name.clone().unwrap_or_default(),
+            provider: cluster.spec.provider.config.provider_type(),
+            bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
+            k8s_version: cluster.spec.provider.kubernetes.version.clone(),
+            autoscaling_enabled: cluster
+                .spec
+                .nodes
+                .worker_pools
+                .values()
+                .any(|p| p.is_autoscaling_enabled()),
+            lb_advertisement: cluster.spec.provider.config.lb_advertisement(),
+            cluster_manifest,
+        }
+    }
+}
+
+/// Configuration for registering a cluster for bootstrap.
 #[derive(Debug, Clone)]
 pub struct ClusterRegistration {
-    /// Unique cluster identifier
-    pub cluster_id: String,
-    /// Cell endpoint (format: "host:http_port:grpc_port")
+    pub facts: ClusterFacts,
     pub cell_endpoint: String,
-    /// CA certificate PEM for the parent cell
     pub ca_certificate: String,
-    /// LatticeCluster CRD JSON to apply on workload cluster
-    pub cluster_manifest: String,
-    /// Cilium LB-IPAM CIDR (on-prem providers only, e.g., "172.18.255.0/28")
-    pub lb_cidr: Option<String>,
-    /// Infrastructure provider (docker, aws, gcp, azure)
-    pub provider: ProviderType,
-    /// Bootstrap mechanism (kubeadm or rke2)
-    pub bootstrap: lattice_crd::crd::BootstrapProvider,
-    /// Kubernetes version (e.g., "1.32.0") - used for provider-specific addons
-    pub k8s_version: String,
-    /// Whether any worker pool has autoscaling enabled (min/max set)
-    pub autoscaling_enabled: bool,
+}
+
+impl ClusterRegistration {
+    pub fn cluster_id(&self) -> &str {
+        &self.facts.cluster_name
+    }
 }
 
 /// Bootstrap manifest generator
@@ -78,20 +101,8 @@ pub trait ManifestGenerator: Send + Sync {
 /// are deferred to operator startup via `ensure_infrastructure()`.
 #[derive(Debug, Clone)]
 pub struct BootstrapBundleConfig<'a> {
-    /// Container image for the operator
+    pub facts: &'a ClusterFacts,
     pub image: &'a str,
-    /// Optional registry credentials (image pull secret)
     pub registry_credentials: Option<&'a str>,
-    /// Cilium LB-IPAM CIDR (on-prem providers only, e.g., "172.18.255.0/28")
-    pub lb_cidr: Option<&'a str>,
-    /// Cluster name
-    pub cluster_name: &'a str,
-    /// Provider type
-    pub provider: ProviderType,
-    /// Kubernetes version (e.g., "1.32.0")
-    pub k8s_version: &'a str,
-    /// Whether cluster has autoscaling-enabled pools
-    pub autoscaling_enabled: bool,
-    /// The LatticeCluster manifest (JSON or YAML) to include
-    pub cluster_manifest: &'a str,
+    pub api_server_endpoint: &'a ApiServerEndpoint,
 }

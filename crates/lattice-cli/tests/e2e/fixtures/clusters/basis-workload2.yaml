@@ -21,9 +21,13 @@ spec:
       bootstrap: kubeadm
     config:
       basis:
-        # Cilium LB-IPAM range. Outside basis's VM/VIP pools, disjoint
-        # from mgmt (.176/28) and workload (.160/28). /28 = 16 IPs.
-        lbCidr: "10.0.0.144/28"
+        # Nested workload cluster — cell-internal only.
+        bgpPeer:
+          address: "10.0.0.1"
+          asn: 64500
+        addressPools:
+          - name: cell-internal
+            cidr: "10.255.4.48/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

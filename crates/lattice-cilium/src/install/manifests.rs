@@ -3,29 +3,52 @@
 //! Policies land as part of the Cilium install: they are enforcement rules
 //! owned by the Cilium CNI, not by individual workloads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::LazyLock;
 
-use lattice_common::kube_utils::split_yaml_documents;
+use lattice_common::kube_utils::{extract_image_registries, split_yaml_documents};
 use lattice_common::mesh::{CILIUM_GATEWAY_NAME_LABEL, HBONE_PORT, ISTIOD_XDS_PORT};
 use lattice_common::policy::cilium::{
     CiliumClusterwideNetworkPolicy, CiliumClusterwideSpec, CiliumPort, CiliumPortRule,
     ClusterwideEgressRule, ClusterwideIngressRule, ClusterwideMetadata, DnsMatch, DnsRules,
     EnableDefaultDeny, EndpointSelector, MatchExpression,
 };
+use lattice_common::ApiServerEndpoint;
 use lattice_core::system_namespaces;
 
-static CILIUM_MANIFESTS: LazyLock<Vec<String>> =
-    LazyLock::new(|| split_yaml_documents(include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml"))));
+static CILIUM_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml"));
+
+const PLACEHOLDER_HOST: &str = "__LATTICE_API_SERVER_HOST__";
+const PLACEHOLDER_PORT: &str = "__LATTICE_API_SERVER_PORT__";
 
 /// Cilium chart version pinned at build time from `versions.toml`.
 pub fn cilium_version() -> &'static str {
     env!("CILIUM_VERSION")
 }
 
-/// Pre-rendered Cilium helm chart manifests.
-pub fn generate_cilium_manifests() -> &'static [String] {
-    &CILIUM_MANIFESTS
+/// Render Cilium manifests with the given API server endpoint substituted
+/// for the build-time placeholders.
+///
+/// Single source of truth for installable Cilium manifests. Endpoint
+/// resolution is the caller's job — see [`lattice_common::ApiServerEndpoint`]
+/// for the source-specific constructors used at each lifecycle phase.
+pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint) -> Vec<String> {
+    let yaml = CILIUM_TEMPLATE
+        .replace(PLACEHOLDER_HOST, &endpoint.host)
+        .replace(PLACEHOLDER_PORT, &endpoint.port.to_string());
+    split_yaml_documents(&yaml)
+}
+
+/// Image registry hosts referenced by Cilium's chart manifests.
+///
+/// Computed once from the unrendered template — the API server endpoint
+/// placeholders never appear on `image:` lines, so substitution is
+/// irrelevant for registry extraction. Used by the registry-mirror
+/// resolver to enumerate every registry the install pulls from.
+pub fn image_registries() -> &'static BTreeSet<String> {
+    static REGS: LazyLock<BTreeSet<String>> =
+        LazyLock::new(|| extract_image_registries(&[CILIUM_TEMPLATE]));
+    &REGS
 }
 
 /// Generate a `CiliumClusterwideNetworkPolicy` to allow ztunnel/ambient traffic.
@@ -276,13 +299,36 @@ mod tests {
         assert!(!cilium_version().is_empty());
     }
 
+    fn test_endpoint() -> ApiServerEndpoint {
+        ApiServerEndpoint {
+            host: "api.example.com".to_string(),
+            port: 6443,
+        }
+    }
+
     #[test]
     fn manifests_contain_agent() {
-        let m = generate_cilium_manifests();
+        let m = render_cilium_manifests(&test_endpoint());
         assert!(!m.is_empty());
         let combined = m.join("\n");
         assert!(combined.contains("kind: DaemonSet"));
         assert!(combined.contains("cilium-agent"));
+    }
+
+    #[test]
+    fn rendered_manifests_substitute_endpoint_placeholders() {
+        let m = render_cilium_manifests(&test_endpoint());
+        let combined = m.join("\n");
+        assert!(
+            !combined.contains(PLACEHOLDER_HOST),
+            "host placeholder must be substituted"
+        );
+        assert!(
+            !combined.contains(PLACEHOLDER_PORT),
+            "port placeholder must be substituted"
+        );
+        assert!(combined.contains("api.example.com"));
+        assert!(combined.contains("6443"));
     }
 
     #[test]

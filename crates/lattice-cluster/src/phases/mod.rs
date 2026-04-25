@@ -553,23 +553,10 @@ async fn get_or_create_bootstrap_token(
             kind: Some("LatticeCluster".to_string()),
         })?;
 
-    let autoscaling_enabled = cluster
-        .spec
-        .nodes
-        .worker_pools
-        .values()
-        .any(|p| p.is_autoscaling_enabled());
-
     let registration = lattice_cell::ClusterRegistration {
-        cluster_id: cluster_name.to_string(),
+        facts: lattice_cell::bootstrap::ClusterFacts::from_cluster(cluster, cluster_manifest),
         cell_endpoint: cell_endpoint.to_string(),
         ca_certificate: ca_cert.to_string(),
-        cluster_manifest,
-        lb_cidr: cluster.spec.provider.config.lb_cidr().map(String::from),
-        provider: cluster.spec.provider.provider_type(),
-        bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
-        k8s_version: cluster.spec.provider.kubernetes.version.clone(),
-        autoscaling_enabled,
     };
     let new_token = bootstrap_state
         .register_cluster(registration, None, None)

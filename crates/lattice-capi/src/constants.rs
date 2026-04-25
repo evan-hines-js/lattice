@@ -47,19 +47,11 @@ pub const DEFAULT_KUBE_VIP_IMAGE: &str = "ghcr.io/kube-vip/kube-vip:v0.8.0";
 /// Default VIP network interface for Proxmox
 pub const DEFAULT_VIP_INTERFACE_PROXMOX: &str = "ens18";
 
-/// kube-vip interface for Basis control planes with
-/// `controlPlaneEdge: false` (default; nested workload clusters).
-/// `ens3` is the tree-side virtio-net; kube-vip announces the VIP
-/// inside the overlay and external callers reach the apiserver
-/// through the parent cell's auth proxy.
-pub const BASIS_VIP_INTERFACE_TREE: &str = "ens3";
-
-/// kube-vip interface for Basis control planes with
-/// `controlPlaneEdge: true` (root/management cluster). basis-agent
-/// attaches a second virtio-net (`ens4`) on the uplink bridge when
-/// the VM is `edge: true`; kube-vip gARPs for the VIP on that NIC so
-/// callers outside the tree can reach the apiserver directly.
-pub const BASIS_VIP_INTERFACE_EDGE: &str = "ens4";
+/// Primary NIC on every Basis VM. kube-vip binds this for BGP
+/// peering. The BGP peer is the cell's BGP route reflector
+/// (basis-side gobgp); VMs reach it via the tree's per-host gateway
+/// → MASQUERADE on the host → underlay LAN. No edge NIC required.
+pub const BASIS_VIP_INTERFACE: &str = "ens3";
 
 /// Default node CIDR for OpenStack
 pub const DEFAULT_NODE_CIDR_OPENSTACK: &str = "10.6.0.0/24";

@@ -2,6 +2,7 @@
 
 #![deny(missing_docs)]
 
+pub mod api_server_endpoint;
 pub mod capi_lifecycle;
 pub mod config;
 pub mod crd_registry;
@@ -25,6 +26,7 @@ pub mod status_check;
 pub mod telemetry;
 pub mod watcher;
 
+pub use api_server_endpoint::ApiServerEndpoint;
 pub use config::{LatticeConfig, SharedConfig};
 pub use crd_registry::{CrdKind, CrdRegistry};
 pub use error::{default_error_policy, ControllerContext, Error, ReconcileError, Retryable};

@@ -7,7 +7,28 @@ use serde::{Deserialize, Serialize};
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 use super::cluster::MonitoringConfig;
-use super::providers::{AwsConfig, BasisConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
+use super::providers::{
+    AddressPoolBinding, AwsConfig, BasisConfig, BgpPeer, DockerConfig, OpenStackConfig,
+    ProxmoxConfig,
+};
+
+/// LoadBalancer advertisement model for a cluster's `type: LoadBalancer`
+/// Services and apiserver VIP.
+///
+/// Docker / Proxmox use Cilium L2 announcement over a single CIDR.
+/// Basis advertises via BGP from each node, with one or more
+/// address-pool bindings.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum LbAdvertisement {
+    L2 {
+        cidr: String,
+    },
+    Bgp {
+        peer: BgpPeer,
+        pools: Vec<AddressPoolBinding>,
+    },
+}
 
 // =============================================================================
 // Cluster Config
@@ -278,24 +299,39 @@ impl ProviderConfig {
         }
     }
 
-    /// Get the Cilium LB-IPAM CIDR from the provider config, if configured.
-    ///
-    /// Only bare-metal providers support this. Cloud providers use native
-    /// load balancers and don't need Cilium LB-IPAM.
-    pub fn lb_cidr(&self) -> Option<&str> {
+    /// Pool name the apiserver VIP is drawn from. `None` for non-basis
+    /// clusters; defaults to `cell-internal` for basis clusters that
+    /// don't set it explicitly.
+    pub fn apiserver_vip_pool(&self) -> Option<&str> {
+        self.basis
+            .as_ref()
+            .map(|b| b.apiserver_vip_pool.as_deref().unwrap_or("cell-internal"))
+    }
+
+    /// LoadBalancer advertisement model derived from the configured
+    /// provider. `None` for cloud providers that use native LBs.
+    pub fn lb_advertisement(&self) -> Option<LbAdvertisement> {
+        if let Some(ref basis) = self.basis {
+            return Some(LbAdvertisement::Bgp {
+                peer: basis.bgp_peer.clone(),
+                pools: basis.address_pools.clone(),
+            });
+        }
         if let Some(ref docker) = self.docker {
-            return docker.lb_cidr.as_deref();
+            return docker.lb_cidr.as_deref().map(|cidr| LbAdvertisement::L2 {
+                cidr: cidr.to_string(),
+            });
         }
         if let Some(ref proxmox) = self.proxmox {
-            return proxmox.lb_cidr.as_deref();
-        }
-        if let Some(ref basis) = self.basis {
-            return basis.lb_cidr.as_deref();
+            return proxmox.lb_cidr.as_deref().map(|cidr| LbAdvertisement::L2 {
+                cidr: cidr.to_string(),
+            });
         }
         None
     }
 
-    /// Validate that exactly one provider is configured
+    /// Validate provider configuration: exactly one provider, plus
+    /// per-provider invariants.
     pub fn validate(&self) -> Result<(), crate::ValidationError> {
         let set_variants = [
             self.aws.is_some(),
@@ -315,6 +351,30 @@ impl ProviderConfig {
             return Err(crate::ValidationError::new(
                 "provider config must specify exactly one provider, not multiple",
             ));
+        }
+        if let Some(ref basis) = self.basis {
+            if basis.address_pools.is_empty() {
+                return Err(crate::ValidationError::new(
+                    "basis.addressPools must contain at least one entry",
+                ));
+            }
+            if basis.bgp_peer.address.is_empty() {
+                return Err(crate::ValidationError::new(
+                    "basis.bgpPeer.address is required",
+                ));
+            }
+            if basis.bgp_peer.asn == 0 {
+                return Err(crate::ValidationError::new(
+                    "basis.bgpPeer.asn must be non-zero",
+                ));
+            }
+            if let Some(ref pool) = basis.apiserver_vip_pool {
+                if !basis.address_pools.iter().any(|p| &p.name == pool) {
+                    return Err(crate::ValidationError::new(format!(
+                        "basis.apiserverVipPool '{pool}' is not in basis.addressPools"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -2049,7 +2109,10 @@ mod tests {
             assert!(config.proxmox.is_some());
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
             assert!(config.validate().is_ok());
-            assert_eq!(config.lb_cidr(), Some("10.0.0.200/28"));
+            match config.lb_advertisement() {
+                Some(LbAdvertisement::L2 { cidr }) => assert_eq!(cidr, "10.0.0.200/28"),
+                other => panic!("expected L2 from proxmox, got {other:?}"),
+            }
         }
 
         #[test]
@@ -2162,22 +2225,73 @@ mod tests {
             );
         }
 
-        #[test]
-        fn test_basis_config() {
-            let config = ProviderConfig::basis(BasisConfig::default());
-            assert!(config.basis.is_some());
-            assert_eq!(config.provider_type(), ProviderType::Basis);
-            assert!(config.validate().is_ok());
-            assert_eq!(config.lb_cidr(), None);
+        fn valid_basis_config() -> BasisConfig {
+            BasisConfig {
+                bgp_peer: BgpPeer {
+                    address: "10.0.0.1".to_string(),
+                    asn: 64500,
+                },
+                address_pools: vec![AddressPoolBinding {
+                    name: "cell-internal".to_string(),
+                    cidr: "10.255.4.16/28".to_string(),
+                }],
+                apiserver_vip_pool: None,
+                kube_vip_image: None,
+            }
         }
 
         #[test]
-        fn test_basis_config_exposes_lb_cidr() {
-            let config = ProviderConfig::basis(BasisConfig {
-                lb_cidr: Some("10.0.0.200/32".to_string()),
-                ..Default::default()
+        fn test_basis_config() {
+            let config = ProviderConfig::basis(valid_basis_config());
+            assert!(config.basis.is_some());
+            assert_eq!(config.provider_type(), ProviderType::Basis);
+            assert!(config.validate().is_ok());
+            assert_eq!(config.apiserver_vip_pool(), Some("cell-internal"));
+            match config.lb_advertisement() {
+                Some(LbAdvertisement::Bgp { peer, pools }) => {
+                    assert_eq!(peer.asn, 64500);
+                    assert_eq!(pools.len(), 1);
+                    assert_eq!(pools[0].name, "cell-internal");
+                }
+                other => panic!("expected BGP advertisement, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn test_basis_apiserver_vip_pool_override() {
+            let mut basis = valid_basis_config();
+            basis.address_pools.push(AddressPoolBinding {
+                name: "cell-public".to_string(),
+                cidr: "10.0.0.176/28".to_string(),
             });
-            assert_eq!(config.lb_cidr(), Some("10.0.0.200/32"));
+            basis.apiserver_vip_pool = Some("cell-public".to_string());
+            let config = ProviderConfig::basis(basis);
+            assert!(config.validate().is_ok());
+            assert_eq!(config.apiserver_vip_pool(), Some("cell-public"));
+        }
+
+        #[test]
+        fn test_basis_rejects_empty_address_pools() {
+            let mut basis = valid_basis_config();
+            basis.address_pools.clear();
+            let err = ProviderConfig::basis(basis).validate().unwrap_err();
+            assert!(err.to_string().contains("addressPools"));
+        }
+
+        #[test]
+        fn test_basis_rejects_unknown_apiserver_vip_pool() {
+            let mut basis = valid_basis_config();
+            basis.apiserver_vip_pool = Some("does-not-exist".to_string());
+            let err = ProviderConfig::basis(basis).validate().unwrap_err();
+            assert!(err.to_string().contains("apiserverVipPool"));
+        }
+
+        #[test]
+        fn test_basis_rejects_zero_asn() {
+            let mut basis = valid_basis_config();
+            basis.bgp_peer.asn = 0;
+            let err = ProviderConfig::basis(basis).validate().unwrap_err();
+            assert!(err.to_string().contains("asn"));
         }
     }
 

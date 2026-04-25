@@ -730,6 +730,9 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             cert_validity_hours: self.config.cert_validity_hours,
             kube_client: Some(kube_client.clone()),
             cluster_name: Some(self.config.cluster_name.clone()),
+            api_server_endpoint_resolver: crate::bootstrap::capi_cluster_endpoint_resolver(
+                kube_client.clone(),
+            ),
         }));
 
         // Store bootstrap state

@@ -353,13 +353,11 @@ impl Provider for ProxmoxProvider {
 
         // Configure kube-vip for the K8s API server VIP (controlPlaneEndpoint)
         // All Proxmox clusters need kube-vip to manage the API server VIP
-        let vip = Some(VipConfig::new(
+        let vip = Some(VipConfig::arp(
             cfg.control_plane_endpoint.clone(),
-            Some(
-                cfg.virtual_ip_network_interface
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_VIP_INTERFACE_PROXMOX.to_string()),
-            ),
+            cfg.virtual_ip_network_interface
+                .clone()
+                .unwrap_or_else(|| DEFAULT_VIP_INTERFACE_PROXMOX.to_string()),
             cfg.kube_vip_image.clone(),
         ));
 

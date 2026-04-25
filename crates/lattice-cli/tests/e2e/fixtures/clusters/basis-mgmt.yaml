@@ -17,18 +17,19 @@ spec:
       bootstrap: kubeadm
     config:
       basis:
-        # Management cluster — apiserver has to be reachable from
-        # outside its tree (operator laptops, bootstrap kind cluster).
-        # CPs get `edge: true` and kube-vip gARPs for the VIP on the
-        # uplink NIC (`ens4`). Nested workload clusters omit this and
-        # reach the apiserver through the parent cell's auth proxy.
-        controlPlaneEdge: true
-        # Cilium LB-IPAM range for `type: LoadBalancer` Services (cell
-        # proxy, istio eastwest, ingress, etc.). Disjoint from every
-        # tree's VM/VIP sub-range and disjoint per cluster so
-        # mgmt/workload/workload2 coexist on one underlay. /28 = 16
-        # IPs — enough headroom for every LB service a cluster emits.
-        lbCidr: "10.0.0.176/28"
+        # Management cluster — apiserver VIP comes from the cell-public
+        # pool so external callers (operator laptops, bootstrap kind
+        # cluster) can reach the apiserver directly. cell-public is a
+        # different LAN segment from cell-internal in production.
+        bgpPeer:
+          address: "10.0.0.1"
+          asn: 64500
+        apiserverVipPool: cell-public
+        addressPools:
+          - name: cell-internal
+            cidr: "10.255.4.16/28"
+          - name: cell-public
+            cidr: "10.0.0.176/28"
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

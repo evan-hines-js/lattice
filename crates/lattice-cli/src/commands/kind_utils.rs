@@ -13,6 +13,11 @@ use crate::{Error, Result};
 
 /// Kind cluster config with Docker socket mount for CAPD (Cluster API Provider Docker)
 /// and FIPS-compliant TLS cipher suites on the API server.
+///
+/// The bootstrap kind cluster is ephemeral — it only hosts the operator
+/// long enough to provision CAPI and the management cluster, then is
+/// deleted. It runs with kindnet + kube-proxy (kind defaults); Cilium with
+/// DSR / kubeProxyReplacement is for production CAPI-provisioned clusters.
 pub const KIND_CONFIG_WITH_DOCKER: &str = r#"kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
