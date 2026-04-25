@@ -9,12 +9,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("rook-ceph")
         .expect("versions.toml missing [charts.rook-ceph]");
-    let chart_path = lattice_helm_build::ensure_chart("rook-ceph", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("rook-ceph", chart).expect("ensure rook-ceph chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
@@ -52,7 +53,8 @@ fn main() {
             "--set",
             "resources.limits.memory=1Gi",
         ],
-    );
+    )
+    .expect("render rook-ceph chart");
     std::fs::write(out_dir.join("rook-operator.yaml"), operator).expect("write rook-operator.yaml");
 
     println!("cargo:rustc-env=ROOK_CEPH_VERSION={}", chart.version);

@@ -200,8 +200,34 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
             }
         };
 
+        // Resolve the LB CIDR via the provider trait. By recovery
+        // time the cluster's already up, so basis's serviceBlockCidr
+        // is populated; for clouds that return None (no LB), the
+        // bundle just won't render an IPPool. A retryable error
+        // here is unexpected during recovery — log and continue
+        // without the IPPool rather than block re-registration of
+        // unrelated clusters.
+        let provider_type = cluster.spec.provider.config.provider_type();
+        let provider = match lattice_capi::provider::create_provider(
+            provider_type,
+            &lattice_common::capi_namespace(&name),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(cluster = %name, error = %e, "Failed to create provider for re-registration");
+                continue;
+            }
+        };
+        let lb_cidr = match provider.lb_cidr(&cluster, client).await {
+            Ok(cidr) => cidr,
+            Err(e) => {
+                tracing::warn!(cluster = %name, error = %e, "Provider LB CIDR not ready during recovery; continuing without IPPool");
+                None
+            }
+        };
+
         let registration = ClusterRegistration {
-            facts: ClusterFacts::from_cluster(&cluster, cluster_manifest),
+            facts: ClusterFacts::from_cluster(&cluster, cluster_manifest, lb_cidr),
             cell_endpoint,
             ca_certificate: ca_cert,
         };

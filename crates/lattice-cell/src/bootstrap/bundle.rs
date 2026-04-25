@@ -5,7 +5,7 @@
 //! and the bootstrap webhook (child clusters) call it.
 
 use kube::CustomResourceExt;
-use lattice_crd::crd::{LatticeCluster, LbAdvertisement};
+use lattice_crd::crd::LatticeCluster;
 
 use super::addons;
 use super::errors::BootstrapError;
@@ -28,12 +28,21 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     // operator Deployment can schedule. Its DaemonSet tolerates NotReady,
     // so it lands on the bare node, programs networking, and unblocks
     // every other Deployment in the same bundle.
+    // Pod CIDR comes from the LatticeCluster spec's
+    // `kubernetes.clusterNetwork.podCidr` — same value `lattice-capi`
+    // writes into the CAPI Cluster's `clusterNetwork`. Cilium's
+    // `ipv4NativeRoutingCIDR` MUST match exactly; wider CIDRs leak
+    // pod IPs out of the cluster.
     manifests.extend(lattice_cilium::install::manifests::render_cilium_manifests(
         config.api_server_endpoint,
+        &facts.pod_cidr,
     ));
 
-    if let Some(adv) = facts.lb_advertisement.as_ref() {
-        manifests.extend(render_lb_resources(&facts.cluster_name, adv)?);
+    if let Some(cidr) = facts.lb_cidr.as_deref() {
+        let resources = crate::cilium::generate_l2_lb_resources(cidr).map_err(|e| {
+            BootstrapError::Internal(format!("failed to generate Cilium L2 LB resources: {e}"))
+        })?;
+        manifests.extend(resources);
     }
 
     manifests.extend(addons::generate_for_provider(
@@ -50,25 +59,4 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     manifests.push(facts.cluster_manifest.clone());
 
     Ok(manifests)
-}
-
-fn render_lb_resources(
-    cluster_name: &str,
-    adv: &LbAdvertisement,
-) -> Result<Vec<String>, BootstrapError> {
-    match adv {
-        LbAdvertisement::L2 { cidr } => crate::cilium::generate_l2_lb_resources(cidr).map_err(|e| {
-            BootstrapError::Internal(format!("failed to generate Cilium L2 LB resources: {e}"))
-        }),
-        LbAdvertisement::Bgp { peer, pools } => {
-            let req = crate::cilium::BgpLbRequest {
-                cluster_name,
-                bgp_peer: peer,
-                pools,
-            };
-            crate::cilium::generate_bgp_lb_resources(&req).map_err(|e| {
-                BootstrapError::Internal(format!("failed to generate Cilium BGP LB resources: {e}"))
-            })
-        }
-    }
 }

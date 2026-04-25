@@ -3279,6 +3279,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "futures",
+ "ipnet",
  "k8s-openapi",
  "kube",
  "lattice-auth",

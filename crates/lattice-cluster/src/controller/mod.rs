@@ -306,9 +306,9 @@ mod tests {
     use lattice_capi::installer::CapiProviderConfig;
     use lattice_capi::provider::CAPIManifest;
     use lattice_crd::crd::{
-        BackupsConfig, BootstrapProvider, Condition, ConditionStatus, ControlPlaneSpec,
-        EndpointsSpec, InfraProvider, KubernetesSpec, LatticeClusterSpec, MonitoringConfig,
-        NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ClusterNetworkSpec, Condition, ConditionStatus,
+        ControlPlaneSpec, EndpointsSpec, InfraProvider, KubernetesSpec, LatticeClusterSpec,
+        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
     use mockall::mock;
 
@@ -359,6 +359,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::default(),
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::docker(),
                 },
@@ -1209,6 +1210,7 @@ mod tests {
                             version: "1.32.0".to_string(),
                             cert_sans: None,
                             bootstrap: BootstrapProvider::default(),
+                            cluster_network: ClusterNetworkSpec::default(),
                         },
                         config: ProviderConfig::docker(),
                     },

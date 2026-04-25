@@ -553,8 +553,33 @@ async fn get_or_create_bootstrap_token(
             kind: Some("LatticeCluster".to_string()),
         })?;
 
+    // Resolve the LB CIDR via the provider trait. Each provider
+    // returns its own — Docker/Proxmox read it sync from the spec,
+    // basis fetches `BasisCluster.spec.serviceBlockCidr`. A
+    // retryable provider error here (e.g. basis hasn't allocated
+    // yet) propagates as a requeue: we never cache a bootstrap
+    // token registered with a missing CIDR, since the token's
+    // pinned in `LatticeCluster.status` once written.
+    let provider_type = cluster.spec.provider.config.provider_type();
+    let provider = lattice_capi::provider::create_provider(
+        provider_type,
+        &capi_namespace(cluster_name),
+    )
+    .map_err(|e| Error::provider_for(cluster_name, format!("{provider_type}"), e.to_string()))?;
+    let kube_client = ctx.client.as_ref().ok_or_else(|| {
+        Error::provider_for(
+            cluster_name,
+            format!("{provider_type}"),
+            "no kube client available for LB CIDR resolution",
+        )
+    })?;
+    let lb_cidr = provider.lb_cidr(cluster, kube_client).await?;
     let registration = lattice_cell::ClusterRegistration {
-        facts: lattice_cell::bootstrap::ClusterFacts::from_cluster(cluster, cluster_manifest),
+        facts: lattice_cell::bootstrap::ClusterFacts::from_cluster(
+            cluster,
+            cluster_manifest,
+            lb_cidr,
+        ),
         cell_endpoint: cell_endpoint.to_string(),
         ca_certificate: ca_cert.to_string(),
     };
@@ -571,3 +596,4 @@ async fn get_or_create_bootstrap_token(
 
     Ok(token_str)
 }
+

@@ -15,7 +15,7 @@ mod openstack;
 mod proxmox;
 
 pub use aws::AwsConfig;
-pub use basis::{AddressPoolBinding, BasisConfig, BgpPeer};
+pub use basis::BasisConfig;
 pub use docker::DockerConfig;
 pub use openstack::OpenStackConfig;
 pub use proxmox::{AdditionalNetwork, Ipv4PoolConfig, Ipv6PoolConfig, ProxmoxConfig};

@@ -3,18 +3,18 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("cilium")
         .expect("versions.toml missing [charts.cilium]");
-    let chart_path = lattice_helm_build::ensure_chart("cilium", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("cilium", chart).expect("ensure cilium chart");
 
-    // Native routing + BGP control-plane: Pod traffic is routed over
-    // the underlay; PodCIDR /24s and Service LoadBalancer /32s are
-    // advertised via iBGP from each node. CNI shared with istio-cni.
-    // L2 announcements stay enabled for non-basis providers (Docker,
-    // Proxmox) that opt into Cilium L2 LB-IPAM via per-cluster CRDs.
+    // Native routing for pod traffic. CNI shared with istio-cni.
+    // L2 announcements drive LB-IPAM (Cilium gARPs assigned IPs on
+    // node interfaces). External advertisement of cluster VIPs is
+    // basis's job, not Cilium's — `bgpControlPlane.enabled=false`.
     let yaml = lattice_helm_build::render_chart(
         &chart_path,
         "cilium",
@@ -50,20 +50,32 @@ fn main() {
             "hostFirewall.enabled=false",
             "--set",
             "routingMode=native",
+            // Native routing skips masquerade for destinations inside
+            // this CIDR — must be exactly the cluster's pod CIDR.
+            // Setting it wider (e.g. 10.0.0.0/8) lets pod traffic
+            // egress with pod-IP source to LAN destinations and the
+            // upstream router drops the reply because pod CIDR isn't
+            // routable. Substituted at install time per cluster from
+            // `clusterNetwork.pods.cidrBlocks[0]`.
             "--set",
-            "ipv4NativeRoutingCIDR=10.0.0.0/8",
+            "ipv4NativeRoutingCIDR=__LATTICE_POD_CIDR__",
+            // basis tree VXLAN gives every k8s node a flat L2 inside the
+            // cluster, so Cilium can install per-node pod-CIDR routes
+            // (`192.168.<n>.0/24 via <node-IP>`) without a second
+            // encap. Pushing tunneling into Cilium would clash with
+            // basis's UDP/4789 + FORWARD spoof-guard and waste MTU
+            // double-encapping every pod packet.
             "--set",
-            "autoDirectNodeRoutes=false",
+            "autoDirectNodeRoutes=true",
             "--set",
-            "bgpControlPlane.enabled=true",
+            "bgpControlPlane.enabled=false",
             "--set",
             "ipam.mode=kubernetes",
             "--set",
             "bpf.masquerade=true",
-            // DSR: backend pods reply directly to clients; preserves source
-            // IP and skips the return hop through the LB-selected node. The
-            // iBGP /32 underlay every node advertises is what makes this
-            // work — return paths are already legitimate from any node.
+            // DSR: backend pods reply directly to clients; preserves
+            // source IP and skips the return hop through the
+            // LB-selected node.
             "--set",
             "loadBalancer.mode=dsr",
             "--set",
@@ -73,7 +85,8 @@ fn main() {
             "--set-string",
             "k8sServicePort=__LATTICE_API_SERVER_PORT__",
         ],
-    );
+    )
+    .expect("render cilium chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("cilium.yaml"), yaml).expect("write cilium.yaml");

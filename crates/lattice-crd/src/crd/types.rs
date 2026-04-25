@@ -7,28 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 use super::cluster::MonitoringConfig;
-use super::providers::{
-    AddressPoolBinding, AwsConfig, BasisConfig, BgpPeer, DockerConfig, OpenStackConfig,
-    ProxmoxConfig,
-};
-
-/// LoadBalancer advertisement model for a cluster's `type: LoadBalancer`
-/// Services and apiserver VIP.
-///
-/// Docker / Proxmox use Cilium L2 announcement over a single CIDR.
-/// Basis advertises via BGP from each node, with one or more
-/// address-pool bindings.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub enum LbAdvertisement {
-    L2 {
-        cidr: String,
-    },
-    Bgp {
-        peer: BgpPeer,
-        pools: Vec<AddressPoolBinding>,
-    },
-}
+use super::providers::{AwsConfig, BasisConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
 
 // =============================================================================
 // Cluster Config
@@ -299,35 +278,14 @@ impl ProviderConfig {
         }
     }
 
-    /// Pool name the apiserver VIP is drawn from. `None` for non-basis
+    /// Named pool the cluster's external IPs (apiserver VIP and
+    /// Cilium LB Service block) come from. `None` for non-basis
     /// clusters; defaults to `cell-internal` for basis clusters that
     /// don't set it explicitly.
-    pub fn apiserver_vip_pool(&self) -> Option<&str> {
+    pub fn external_ip_pool(&self) -> Option<&str> {
         self.basis
             .as_ref()
-            .map(|b| b.apiserver_vip_pool.as_deref().unwrap_or("cell-internal"))
-    }
-
-    /// LoadBalancer advertisement model derived from the configured
-    /// provider. `None` for cloud providers that use native LBs.
-    pub fn lb_advertisement(&self) -> Option<LbAdvertisement> {
-        if let Some(ref basis) = self.basis {
-            return Some(LbAdvertisement::Bgp {
-                peer: basis.bgp_peer.clone(),
-                pools: basis.address_pools.clone(),
-            });
-        }
-        if let Some(ref docker) = self.docker {
-            return docker.lb_cidr.as_deref().map(|cidr| LbAdvertisement::L2 {
-                cidr: cidr.to_string(),
-            });
-        }
-        if let Some(ref proxmox) = self.proxmox {
-            return proxmox.lb_cidr.as_deref().map(|cidr| LbAdvertisement::L2 {
-                cidr: cidr.to_string(),
-            });
-        }
-        None
+            .map(|b| b.external_ip_pool.as_deref().unwrap_or("cell-internal"))
     }
 
     /// Validate provider configuration: exactly one provider, plus
@@ -353,25 +311,10 @@ impl ProviderConfig {
             ));
         }
         if let Some(ref basis) = self.basis {
-            if basis.address_pools.is_empty() {
-                return Err(crate::ValidationError::new(
-                    "basis.addressPools must contain at least one entry",
-                ));
-            }
-            if basis.bgp_peer.address.is_empty() {
-                return Err(crate::ValidationError::new(
-                    "basis.bgpPeer.address is required",
-                ));
-            }
-            if basis.bgp_peer.asn == 0 {
-                return Err(crate::ValidationError::new(
-                    "basis.bgpPeer.asn must be non-zero",
-                ));
-            }
-            if let Some(ref pool) = basis.apiserver_vip_pool {
-                if !basis.address_pools.iter().any(|p| &p.name == pool) {
+            if let Some(count) = basis.external_service_ips {
+                if count == 0 || !count.is_power_of_two() {
                     return Err(crate::ValidationError::new(format!(
-                        "basis.apiserverVipPool '{pool}' is not in basis.addressPools"
+                        "basis.externalServiceIps {count} must be a power of two"
                     )));
                 }
             }
@@ -397,6 +340,50 @@ pub struct KubernetesSpec {
     /// Bootstrap provider (kubeadm or rke2)
     #[serde(default, skip_serializing_if = "is_default_bootstrap")]
     pub bootstrap: BootstrapProvider,
+
+    /// Pod / service CIDR allocation for the cluster. Both the CAPI
+    /// `Cluster.spec.clusterNetwork` and Cilium's
+    /// `ipv4NativeRoutingCIDR` are derived from this — they MUST
+    /// match exactly or pod-egress to LAN destinations leaks the
+    /// pod IP and the upstream router drops the reply.
+    #[serde(default, skip_serializing_if = "is_default_cluster_network")]
+    pub cluster_network: ClusterNetworkSpec,
+}
+
+/// Cluster pod/service CIDRs.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterNetworkSpec {
+    /// Pod CIDR range. Single CIDR — Cilium's
+    /// `ipv4NativeRoutingCIDR` takes one value, so a list is
+    /// pointless. Defaults to `192.168.0.0/16`.
+    #[serde(default = "default_pod_cidr")]
+    pub pod_cidr: String,
+
+    /// Service CIDR range. Defaults to `10.128.0.0/12`.
+    #[serde(default = "default_service_cidr")]
+    pub service_cidr: String,
+}
+
+impl Default for ClusterNetworkSpec {
+    fn default() -> Self {
+        Self {
+            pod_cidr: default_pod_cidr(),
+            service_cidr: default_service_cidr(),
+        }
+    }
+}
+
+fn default_pod_cidr() -> String {
+    "192.168.0.0/16".to_string()
+}
+
+fn default_service_cidr() -> String {
+    "10.128.0.0/12".to_string()
+}
+
+fn is_default_cluster_network(n: &ClusterNetworkSpec) -> bool {
+    *n == ClusterNetworkSpec::default()
 }
 
 fn is_default_bootstrap(b: &BootstrapProvider) -> bool {
@@ -2109,10 +2096,13 @@ mod tests {
             assert!(config.proxmox.is_some());
             assert_eq!(config.provider_type(), ProviderType::Proxmox);
             assert!(config.validate().is_ok());
-            match config.lb_advertisement() {
-                Some(LbAdvertisement::L2 { cidr }) => assert_eq!(cidr, "10.0.0.200/28"),
-                other => panic!("expected L2 from proxmox, got {other:?}"),
-            }
+            // The LB CIDR resolution moved to `Provider::lb_cidr`;
+            // the spec field is still on the proxmox config and the
+            // provider trait reads it. Verifying spec-side here:
+            assert_eq!(
+                config.proxmox.as_ref().unwrap().lb_cidr.as_deref(),
+                Some("10.0.0.200/28")
+            );
         }
 
         #[test]
@@ -2227,15 +2217,8 @@ mod tests {
 
         fn valid_basis_config() -> BasisConfig {
             BasisConfig {
-                bgp_peer: BgpPeer {
-                    address: "10.0.0.1".to_string(),
-                    asn: 64500,
-                },
-                address_pools: vec![AddressPoolBinding {
-                    name: "cell-internal".to_string(),
-                    cidr: "10.255.4.16/28".to_string(),
-                }],
-                apiserver_vip_pool: None,
+                external_ip_pool: None,
+                external_service_ips: None,
                 kube_vip_image: None,
             }
         }
@@ -2246,52 +2229,24 @@ mod tests {
             assert!(config.basis.is_some());
             assert_eq!(config.provider_type(), ProviderType::Basis);
             assert!(config.validate().is_ok());
-            assert_eq!(config.apiserver_vip_pool(), Some("cell-internal"));
-            match config.lb_advertisement() {
-                Some(LbAdvertisement::Bgp { peer, pools }) => {
-                    assert_eq!(peer.asn, 64500);
-                    assert_eq!(pools.len(), 1);
-                    assert_eq!(pools[0].name, "cell-internal");
-                }
-                other => panic!("expected BGP advertisement, got {other:?}"),
-            }
+            assert_eq!(config.external_ip_pool(), Some("cell-internal"));
         }
 
         #[test]
-        fn test_basis_apiserver_vip_pool_override() {
+        fn test_basis_external_ip_pool_override() {
             let mut basis = valid_basis_config();
-            basis.address_pools.push(AddressPoolBinding {
-                name: "cell-public".to_string(),
-                cidr: "10.0.0.176/28".to_string(),
-            });
-            basis.apiserver_vip_pool = Some("cell-public".to_string());
+            basis.external_ip_pool = Some("cell-public".to_string());
             let config = ProviderConfig::basis(basis);
             assert!(config.validate().is_ok());
-            assert_eq!(config.apiserver_vip_pool(), Some("cell-public"));
+            assert_eq!(config.external_ip_pool(), Some("cell-public"));
         }
 
         #[test]
-        fn test_basis_rejects_empty_address_pools() {
+        fn test_basis_rejects_non_power_of_two_external_service_ips() {
             let mut basis = valid_basis_config();
-            basis.address_pools.clear();
+            basis.external_service_ips = Some(17);
             let err = ProviderConfig::basis(basis).validate().unwrap_err();
-            assert!(err.to_string().contains("addressPools"));
-        }
-
-        #[test]
-        fn test_basis_rejects_unknown_apiserver_vip_pool() {
-            let mut basis = valid_basis_config();
-            basis.apiserver_vip_pool = Some("does-not-exist".to_string());
-            let err = ProviderConfig::basis(basis).validate().unwrap_err();
-            assert!(err.to_string().contains("apiserverVipPool"));
-        }
-
-        #[test]
-        fn test_basis_rejects_zero_asn() {
-            let mut basis = valid_basis_config();
-            basis.bgp_peer.asn = 0;
-            let err = ProviderConfig::basis(basis).validate().unwrap_err();
-            assert!(err.to_string().contains("asn"));
+            assert!(err.to_string().contains("externalServiceIps"));
         }
     }
 
@@ -2305,6 +2260,7 @@ mod tests {
                     version: "1.29.0".to_string(),
                     cert_sans: Some(vec!["10.0.0.1".to_string()]),
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -2321,6 +2277,7 @@ mod tests {
                 version: "1.29.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::default(),
+                cluster_network: ClusterNetworkSpec::default(),
             };
             let json =
                 serde_json::to_string(&spec).expect("KubernetesSpec serialization should succeed");

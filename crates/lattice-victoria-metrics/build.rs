@@ -5,12 +5,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("victoria-metrics-k8s-stack")
         .expect("versions.toml missing [charts.victoria-metrics-k8s-stack]");
-    let chart_path = lattice_helm_build::ensure_chart("victoria-metrics-k8s-stack", chart);
+    let chart_path = lattice_helm_build::ensure_chart("victoria-metrics-k8s-stack", chart)
+        .expect("ensure victoria-metrics-k8s-stack chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
@@ -43,7 +44,8 @@ fn main() {
             "--set",
             "vmalert.enabled=false",
         ],
-    );
+    )
+    .expect("render victoria-metrics HA chart");
     std::fs::write(out_dir.join("victoria-metrics-ha.yaml"), ha)
         .expect("write victoria-metrics-ha.yaml");
 
@@ -68,7 +70,8 @@ fn main() {
             "--set",
             "vmalert.enabled=false",
         ],
-    );
+    )
+    .expect("render victoria-metrics single chart");
     std::fs::write(out_dir.join("victoria-metrics-single.yaml"), single)
         .expect("write victoria-metrics-single.yaml");
 

@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("cert-manager")
         .expect("versions.toml missing [charts.cert-manager]");
-    let chart_path = lattice_helm_build::ensure_chart("cert-manager", chart);
+    let chart_path = lattice_helm_build::ensure_chart("cert-manager", chart)
+        .expect("ensure cert-manager chart");
 
     // CRDs rendered inline + control-plane tolerations across every cert-manager
     // workload so they can schedule on kubeadm-tainted CP nodes before workers exist.
@@ -44,7 +45,8 @@ fn main() {
             "--set",
             "startupapicheck.tolerations[0].effect=NoSchedule",
         ],
-    );
+    )
+    .expect("render cert-manager chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("cert-manager.yaml"), yaml).expect("write cert-manager.yaml");

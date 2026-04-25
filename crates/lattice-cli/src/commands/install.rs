@@ -642,7 +642,13 @@ impl Installer {
         let mgmt_client = self.management_client().await?;
 
         info!("Generating bootstrap manifests...");
-        let manifests = self.generate_bootstrap_manifests(&mgmt_client).await?;
+        // BasisCluster (and other CAPI infra CRs) live on the bootstrap
+        // kind cluster during install — basis-capi-provider runs there.
+        // mgmt_client is for the workload API; bootstrap_client is for
+        // provider-trait LB CIDR lookups.
+        let manifests = self
+            .generate_bootstrap_manifests(&mgmt_client, bootstrap_client)
+            .await?;
         info!("Applying {} bootstrap manifests...", manifests.len());
 
         kube_utils::apply_manifests_with_retry(
@@ -681,10 +687,26 @@ impl Installer {
     /// Generate all bootstrap manifests for the management cluster.
     ///
     /// Uses the same shared code as the bootstrap webhook to ensure consistency.
-    async fn generate_bootstrap_manifests(&self, mgmt_client: &Client) -> Result<Vec<String>> {
+    async fn generate_bootstrap_manifests(
+        &self,
+        mgmt_client: &Client,
+        infra_client: &Client,
+    ) -> Result<Vec<String>> {
         let generator = DefaultManifestGenerator::new();
 
-        let facts = ClusterFacts::from_cluster(&self.cluster, self.cluster_yaml.clone());
+        // Each provider answers `lb_cidr` for itself — Docker/Proxmox
+        // sync from spec, basis fetches `BasisCluster.spec.serviceBlockCidr`
+        // off the cluster where its CR lives (bootstrap kind cluster
+        // during install, since basis-capi-provider runs there).
+        // A retryable provider error here means basis hasn't allocated
+        // yet; install retries the bootstrap-manifest step until it
+        // resolves.
+        let provider = lattice_capi::provider::create_provider(self.provider(), &self.capi_ns())
+            .map_err(|e| Error::command_failed(e.to_string()))?;
+        let lb_cidr = self
+            .resolve_lb_cidr_with_retry(provider.as_ref(), infra_client)
+            .await?;
+        let facts = ClusterFacts::from_cluster(&self.cluster, self.cluster_yaml.clone(), lb_cidr);
         // Read the *internal* control plane endpoint from kubeadm-config —
         // anything else (host kubeconfig, Docker port-forward) is wrong for
         // Cilium agents running inside the cluster.
@@ -701,6 +723,28 @@ impl Installer {
         generate_bootstrap_bundle(&generator, &config)
             .await
             .map_err(|e| Error::command_failed(e.to_string()))
+    }
+
+    /// Resolve the provider's LB CIDR, retrying on retryable errors
+    /// (e.g. basis not yet finished allocating). Caps at 60s total —
+    /// in practice basis-capi-provider populates serviceBlockCidr
+    /// within seconds of seeing the BasisCluster CR.
+    async fn resolve_lb_cidr_with_retry(
+        &self,
+        provider: &dyn lattice_capi::provider::Provider,
+        infra_client: &Client,
+    ) -> Result<Option<String>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match provider.lb_cidr(&self.cluster, infra_client).await {
+                Ok(cidr) => return Ok(cidr),
+                Err(e) if Instant::now() < deadline => {
+                    info!(error = %e, "Waiting for provider LB CIDR to be ready...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(e) => return Err(Error::command_failed(e.to_string())),
+            }
+        }
     }
 
     /// Fetches the management cluster kubeconfig from the bootstrap cluster secret,

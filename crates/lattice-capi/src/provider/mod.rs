@@ -294,6 +294,10 @@ pub struct ClusterConfig<'a> {
     pub provider_type: ProviderType,
     /// Resolved registry mirror configs (upstream → mirror host, optional credentials content)
     pub registry_mirrors: Vec<registry::ResolvedMirror>,
+    /// Pod / service CIDR to write into the CAPI Cluster's
+    /// `clusterNetwork`. Cilium's `ipv4NativeRoutingCIDR` is pinned
+    /// to `pod_cidr` — both must match exactly.
+    pub cluster_network: lattice_crd::crd::ClusterNetworkSpec,
 }
 
 /// Infrastructure provider reference configuration
@@ -337,22 +341,13 @@ pub struct VipConfig {
     pub mode: VipMode,
 }
 
-/// How kube-vip announces the VIP.
+/// How kube-vip announces the VIP. ARP mode only — BGP mode used to
+/// be a basis-specific path, but basis advertises VIPs externally via
+/// its own BGP reflector + proxy-ARP, so kube-vip just claims the
+/// VIP at L2 on the cluster's primary NIC and runs leader election.
 #[derive(Clone, Debug)]
-pub enum VipMode {
-    /// gARP-based leader election on a chosen interface. Used by
-    /// providers that share an L2 segment with the VIP (Proxmox).
-    Arp { interface: String },
-    /// iBGP advertisement of the VIP /32 to a route reflector. Used by
-    /// providers where nodes don't sit on the same L2 as the VIP
-    /// (basis).
-    Bgp {
-        local_asn: u32,
-        peer_asn: u32,
-        peer_address: String,
-        /// NIC kube-vip reads its router ID from.
-        router_interface: String,
-    },
+pub struct VipMode {
+    pub interface: String,
 }
 
 use crate::constants::{DEFAULT_KUBE_VIP_IMAGE, KUBERNETES_API_SERVER_PORT};
@@ -362,39 +357,14 @@ impl VipConfig {
         Self {
             address,
             image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
-            mode: VipMode::Arp { interface },
-        }
-    }
-
-    pub fn bgp(
-        address: String,
-        local_asn: u32,
-        peer_asn: u32,
-        peer_address: String,
-        router_interface: String,
-        image: Option<String>,
-    ) -> Self {
-        Self {
-            address,
-            image: image.unwrap_or_else(|| DEFAULT_KUBE_VIP_IMAGE.to_string()),
-            mode: VipMode::Bgp {
-                local_asn,
-                peer_asn,
-                peer_address,
-                router_interface,
-            },
+            mode: VipMode { interface },
         }
     }
 
     /// The NIC where the node's primary IP lives. kubelet's `--node-ip`
     /// is read from here in pre-kubeadm scripts.
     pub fn node_interface(&self) -> &str {
-        match &self.mode {
-            VipMode::Arp { interface } => interface,
-            VipMode::Bgp {
-                router_interface, ..
-            } => router_interface,
-        }
+        &self.mode.interface
     }
 }
 
@@ -440,52 +410,16 @@ fn kube_vip_env(vip: &VipConfig) -> Vec<k8s_openapi::api::core::v1::EnvVar> {
         },
     ];
 
-    match &vip.mode {
-        VipMode::Arp { interface } => {
-            env.push(EnvVar {
-                name: "vip_interface".to_string(),
-                value: Some(interface.clone()),
-                ..Default::default()
-            });
-            env.push(EnvVar {
-                name: "vip_arp".to_string(),
-                value: Some("true".to_string()),
-                ..Default::default()
-            });
-        }
-        VipMode::Bgp {
-            local_asn,
-            peer_asn,
-            peer_address,
-            router_interface,
-        } => {
-            env.push(EnvVar {
-                name: "bgp_enable".to_string(),
-                value: Some("true".to_string()),
-                ..Default::default()
-            });
-            env.push(EnvVar {
-                name: "bgp_routerinterface".to_string(),
-                value: Some(router_interface.clone()),
-                ..Default::default()
-            });
-            env.push(EnvVar {
-                name: "bgp_as".to_string(),
-                value: Some(local_asn.to_string()),
-                ..Default::default()
-            });
-            env.push(EnvVar {
-                name: "bgp_peeraddress".to_string(),
-                value: Some(peer_address.clone()),
-                ..Default::default()
-            });
-            env.push(EnvVar {
-                name: "bgp_peeras".to_string(),
-                value: Some(peer_asn.to_string()),
-                ..Default::default()
-            });
-        }
-    }
+    env.push(EnvVar {
+        name: "vip_interface".to_string(),
+        value: Some(vip.mode.interface.clone()),
+        ..Default::default()
+    });
+    env.push(EnvVar {
+        name: "vip_arp".to_string(),
+        value: Some("true".to_string()),
+        ..Default::default()
+    });
 
     env
 }
@@ -1094,12 +1028,8 @@ pub fn generate_cluster(config: &ClusterConfig, infra: &InfrastructureRef) -> CA
     // In CAPI v1beta2, refs use apiGroup (not apiVersion) and no namespace
     let spec = serde_json::json!({
         "clusterNetwork": {
-            "pods": {
-                "cidrBlocks": ["192.168.0.0/16"]
-            },
-            "services": {
-                "cidrBlocks": ["10.128.0.0/12"]
-            }
+            "pods":     { "cidrBlocks": [config.cluster_network.pod_cidr] },
+            "services": { "cidrBlocks": [config.cluster_network.service_cidr] }
         },
         "controlPlaneRef": {
             "apiGroup": "controlplane.cluster.x-k8s.io",
@@ -1557,6 +1487,29 @@ pub trait Provider: Send + Sync {
     ///
     /// `Ok(())` if the spec is valid, or an error describing what's wrong
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()>;
+
+    /// Resolve the LB CIDR the workload cluster's
+    /// `CiliumLoadBalancerIPPool` should advertise via L2.
+    ///
+    /// Three return shapes, corresponding to the three states a
+    /// provider can be in at bootstrap time:
+    /// - `Ok(Some(cidr))` — provider has resolved its CIDR; bootstrap
+    ///   bundle can render the IPPool now.
+    /// - `Ok(None)` — provider doesn't advertise LB IPs (cloud
+    ///   providers using native LBs).
+    /// - `Err(Error::Provider { retryable: true, .. })` — provider
+    ///   has a CIDR coming but it isn't ready yet (e.g. basis still
+    ///   waiting for its controller to allocate). Caller requeues
+    ///   and tries again.
+    ///
+    /// `kube` is the management cluster's client for any provider
+    /// that needs to look up dynamic state on its own infra CR.
+    /// Static-spec providers (Docker, Proxmox) ignore it.
+    async fn lb_cidr(
+        &self,
+        cluster: &LatticeCluster,
+        kube: &kube::Client,
+    ) -> Result<Option<String>>;
 }
 
 /// Create a provider instance for the given provider type
@@ -1687,6 +1640,7 @@ mod tests {
                 bootstrap,
                 provider_type: ProviderType::Docker,
                 registry_mirrors: vec![],
+                cluster_network: lattice_crd::crd::ClusterNetworkSpec::default(),
             }
         }
 
@@ -2522,10 +2476,7 @@ mod tests {
             let vip = VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None);
             assert_eq!(vip.address, "10.0.0.100");
             assert_eq!(vip.image, DEFAULT_KUBE_VIP_IMAGE);
-            match &vip.mode {
-                VipMode::Arp { interface } => assert_eq!(interface, "eth0"),
-                _ => panic!("expected ARP mode"),
-            }
+            assert_eq!(vip.mode.interface, "eth0");
         }
 
         #[test]
@@ -2537,31 +2488,7 @@ mod tests {
             );
             assert_eq!(vip.address, "192.168.1.100");
             assert_eq!(vip.image, "custom-image:v1");
-            match &vip.mode {
-                VipMode::Arp { interface } => assert_eq!(interface, "ens192"),
-                _ => panic!("expected ARP mode"),
-            }
-        }
-
-        #[test]
-        fn test_vip_config_bgp_emits_bgp_env() {
-            let vip = VipConfig::bgp(
-                "10.0.0.100".to_string(),
-                64500,
-                64500,
-                "10.0.0.1".to_string(),
-                "ens3".to_string(),
-                None,
-            );
-            let env = kube_vip_env(&vip);
-            let names: Vec<_> = env.iter().map(|e| e.name.as_str()).collect();
-            assert!(names.contains(&"bgp_enable"));
-            assert!(names.contains(&"bgp_routerinterface"));
-            assert!(names.contains(&"bgp_as"));
-            assert!(names.contains(&"bgp_peeraddress"));
-            assert!(names.contains(&"bgp_peeras"));
-            assert!(!names.contains(&"vip_arp"));
-            assert!(!names.contains(&"vip_interface"));
+            assert_eq!(vip.mode.interface, "ens192");
         }
 
         #[test]

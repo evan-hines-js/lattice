@@ -7,11 +7,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use kube::api::Api;
 use kube::runtime::controller::Action;
+use kube::Client;
 
 use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
 use lattice_common::{ApiServerEndpoint, ControllerContext, ReconcileError};
-use lattice_crd::crd::CiliumInstall;
+use lattice_crd::crd::{CiliumInstall, LatticeCluster};
 
 use super::manifests;
 
@@ -33,7 +35,13 @@ pub async fn reconcile(
                 "failed to resolve API server endpoint for Cilium install: {e}"
             ))
         })?;
-    let mut manifests: Vec<String> = manifests::render_cilium_manifests(&endpoint);
+    // Pod CIDR comes from the local LatticeCluster CR — same value
+    // `lattice-capi` writes into the CAPI Cluster's
+    // `clusterNetwork.pods.cidrBlocks`. Cilium's
+    // `ipv4NativeRoutingCIDR` MUST match exactly; wider CIDRs leak
+    // pod IPs out of the cluster.
+    let pod_cidr = resolve_local_pod_cidr(&ctx.client).await?;
+    let mut manifests: Vec<String> = manifests::render_cilium_manifests(&endpoint, &pod_cidr);
     for policy in [
         serde_json::to_string_pretty(&manifests::generate_ztunnel_allowlist()),
         serde_json::to_string_pretty(&manifests::generate_default_deny()),
@@ -60,4 +68,26 @@ pub async fn reconcile(
         trust_domain: None,
     })
     .await
+}
+
+/// Read pod CIDR off the local LatticeCluster CR. Each workload
+/// cluster has exactly one (its own). Errors if missing — Cilium
+/// install can't proceed without the right CIDR; running with a
+/// stale default would silently break pod egress.
+async fn resolve_local_pod_cidr(client: &Client) -> Result<String, ReconcileError> {
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    let list = api
+        .list(&Default::default())
+        .await
+        .map_err(|e| ReconcileError::Validation(format!("list LatticeCluster: {e}")))?;
+    list.items
+        .into_iter()
+        .next()
+        .map(|c| c.spec.provider.kubernetes.cluster_network.pod_cidr)
+        .ok_or_else(|| {
+            ReconcileError::Validation(
+                "no LatticeCluster CR found; cannot resolve pod CIDR for Cilium install"
+                    .to_string(),
+            )
+        })
 }

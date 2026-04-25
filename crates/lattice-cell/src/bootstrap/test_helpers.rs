@@ -87,7 +87,8 @@ pub fn test_facts(cluster_id: &str, provider: ProviderType) -> ClusterFacts {
         bootstrap: lattice_crd::crd::BootstrapProvider::default(),
         k8s_version: "1.32.0".to_string(),
         autoscaling_enabled: false,
-        lb_advertisement: None,
+        lb_cidr: None,
+        pod_cidr: "192.168.0.0/16".to_string(),
         cluster_manifest: manifest,
     }
 }

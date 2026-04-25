@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("velero")
         .expect("versions.toml missing [charts.velero]");
-    let chart_path = lattice_helm_build::ensure_chart("velero", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("velero", chart).expect("ensure velero chart");
 
     // Node agent + snapshots + AWS plugin init container baked in. Empty
     // `backupStorageLocation` / `volumeSnapshotLocation` so chart hooks don't
@@ -40,7 +41,8 @@ fn main() {
             "--set-json",
             "configuration.volumeSnapshotLocation=[]",
         ],
-    );
+    )
+    .expect("render velero chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("velero.yaml"), yaml).expect("write velero.yaml");

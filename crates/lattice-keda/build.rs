@@ -3,12 +3,12 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("keda")
         .expect("versions.toml missing [charts.keda]");
-    let chart_path = lattice_helm_build::ensure_chart("keda", chart);
+    let chart_path = lattice_helm_build::ensure_chart("keda", chart).expect("ensure keda chart");
 
     // Control-plane tolerations on the operator + webhooks + metrics server so
     // they can schedule on kubeadm-tainted CP nodes before workers exist.
@@ -36,7 +36,8 @@ fn main() {
             "--set",
             "metricsServer.tolerations[0].effect=NoSchedule",
         ],
-    );
+    )
+    .expect("render keda chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("keda.yaml"), yaml).expect("write keda.yaml");

@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("external-secrets")
         .expect("versions.toml missing [charts.external-secrets]");
-    let chart_path = lattice_helm_build::ensure_chart("external-secrets", chart);
+    let chart_path = lattice_helm_build::ensure_chart("external-secrets", chart)
+        .expect("ensure external-secrets chart");
 
     // Render with CRDs inlined (installCRDs=true) and control-plane tolerations
     // so ESO schedules on the tainted control-plane nodes of kubeadm clusters.
@@ -38,7 +39,8 @@ fn main() {
             "--set",
             "certController.tolerations[0].effect=NoSchedule",
         ],
-    );
+    )
+    .expect("render external-secrets chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("eso.yaml"), yaml).expect("write eso.yaml");

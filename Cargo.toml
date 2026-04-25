@@ -213,6 +213,9 @@ schemars = { version = "1", features = ["chrono04"] }
 # UUID
 uuid = { version = "1.23", features = ["v4"] }
 
+# IP / CIDR math
+ipnet = "2.11"
+
 # Random
 rand = "0.10"
 

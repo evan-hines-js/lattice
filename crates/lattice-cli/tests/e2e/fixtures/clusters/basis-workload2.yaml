@@ -22,12 +22,7 @@ spec:
     config:
       basis:
         # Nested workload cluster — cell-internal only.
-        bgpPeer:
-          address: "10.0.0.1"
-          asn: 64500
-        addressPools:
-          - name: cell-internal
-            cidr: "10.255.4.48/28"
+        externalIpPool: cell-internal
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

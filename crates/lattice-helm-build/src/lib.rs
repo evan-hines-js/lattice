@@ -14,12 +14,17 @@
 //! Each consumer composes these in a handful of lines. Control-flow logic
 //! (what values to pass, how to post-process, when to bail out) stays in the
 //! consumer — this crate is plumbing only.
+//!
+//! All helpers return `Result<_, String>`. Build scripts `.expect()` at the
+//! call site so failures surface with a clear cargo error message.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Deserialize;
+
+pub type Result<T> = std::result::Result<T, String>;
 
 /// Parsed `versions.toml` at the workspace root.
 #[derive(Debug, Deserialize)]
@@ -54,58 +59,54 @@ pub struct Resource {
 
 /// Workspace root computed from `$CARGO_MANIFEST_DIR` (two `.parent()` hops
 /// from `crates/<crate>/`).
-///
-/// Consumers use this to locate `versions.toml` and the shared chart cache.
-pub fn workspace_root() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    Path::new(&manifest_dir)
+pub fn workspace_root() -> Result<PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|e| format!("CARGO_MANIFEST_DIR: {e}"))?;
+    let parent = Path::new(&manifest_dir)
         .parent()
-        .expect("CARGO_MANIFEST_DIR parent")
+        .ok_or_else(|| format!("CARGO_MANIFEST_DIR has no parent: {manifest_dir}"))?
         .parent()
-        .expect("workspace root")
-        .to_path_buf()
+        .ok_or_else(|| format!("workspace root not found from {manifest_dir}"))?;
+    Ok(parent.to_path_buf())
 }
 
 /// Directory charts and resources are downloaded into.
-///
-/// Shared across every consumer's build so a chart downloaded by one crate
-/// is reused by the next.
-pub fn charts_dir() -> PathBuf {
-    workspace_root().join("test-charts")
+pub fn charts_dir() -> Result<PathBuf> {
+    Ok(workspace_root()?.join("test-charts"))
 }
 
 /// Parse `workspace/versions.toml`. Emits `cargo:rerun-if-changed` for the
 /// file so build scripts re-run when versions bump.
-pub fn read_versions() -> Versions {
-    let path = workspace_root().join("versions.toml");
+pub fn read_versions() -> Result<Versions> {
+    let path = workspace_root()?.join("versions.toml");
     println!("cargo:rerun-if-changed={}", path.display());
-    let raw =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    toml::from_str(&raw).expect("versions.toml parse")
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    toml::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
 /// Absolute path to the chart tarball on disk, downloading if absent.
 ///
 /// Handles both OCI (`oci://…`) and classic helm repos. Classic repos are
 /// registered via `helm repo add` on first use.
-pub fn ensure_chart(name: &str, chart: &Chart) -> PathBuf {
-    let dir = charts_dir();
-    std::fs::create_dir_all(&dir).expect("create charts dir");
+pub fn ensure_chart(name: &str, chart: &Chart) -> Result<PathBuf> {
+    let dir = charts_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     let filename = chart
         .filename
         .as_ref()
-        .unwrap_or_else(|| panic!("chart {name}: missing filename"))
+        .ok_or_else(|| format!("chart {name}: missing filename"))?
         .replace("{version}", &chart.version);
     let path = dir.join(&filename);
     if path.exists() {
-        return path;
+        return Ok(path);
     }
 
     let chart_ref = chart
         .chart
         .as_ref()
-        .unwrap_or_else(|| panic!("chart {name}: missing chart ref"));
+        .ok_or_else(|| format!("chart {name}: missing chart ref"))?;
 
     eprintln!("cargo:warning=Downloading missing chart: {filename}");
 
@@ -123,15 +124,15 @@ pub fn ensure_chart(name: &str, chart: &Chart) -> PathBuf {
         let repo = chart
             .repo
             .as_ref()
-            .unwrap_or_else(|| panic!("non-OCI chart {name}: missing repo"));
+            .ok_or_else(|| format!("non-OCI chart {name}: missing repo"))?;
         let alias = chart_ref.split('/').next().unwrap_or(name);
         let repo_add = Command::new("helm")
             .args(["repo", "add", alias, repo, "--force-update"])
             .output()
-            .expect("helm repo add");
+            .map_err(|e| format!("helm repo add {alias}: {e}"))?;
         if !repo_add.status.success() {
             let stderr = String::from_utf8_lossy(&repo_add.stderr);
-            panic!("helm repo add {alias}: {stderr}");
+            return Err(format!("helm repo add {alias}: {stderr}"));
         }
         cmd.args([
             "pull",
@@ -145,41 +146,42 @@ pub fn ensure_chart(name: &str, chart: &Chart) -> PathBuf {
 
     let output = cmd
         .output()
-        .unwrap_or_else(|e| panic!("helm pull {chart_ref}: {e}"));
+        .map_err(|e| format!("helm pull {chart_ref}: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("helm pull {chart_ref} failed: {stderr}");
+        return Err(format!("helm pull {chart_ref} failed: {stderr}"));
     }
-    assert!(
-        path.exists(),
-        "helm pull succeeded but {} not found",
-        path.display()
-    );
-    path
+    if !path.exists() {
+        return Err(format!(
+            "helm pull succeeded but {} not found",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 /// Absolute path to a resource file on disk, downloading via `curl` if absent.
 ///
 /// For `[resources.*]` entries (plain URL-sourced YAML such as the Gateway API
 /// CRD bundle or the Volcano vGPU device plugin).
-pub fn ensure_resource(name: &str, resource: &Resource) -> PathBuf {
-    let dir = charts_dir();
-    std::fs::create_dir_all(&dir).expect("create charts dir");
+pub fn ensure_resource(name: &str, resource: &Resource) -> Result<PathBuf> {
+    let dir = charts_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     let filename = resource
         .filename
         .as_ref()
-        .unwrap_or_else(|| panic!("resource {name}: missing filename"))
+        .ok_or_else(|| format!("resource {name}: missing filename"))?
         .replace("{version}", &resource.version);
     let path = dir.join(&filename);
     if path.exists() {
-        return path;
+        return Ok(path);
     }
 
     let url = resource
         .url
         .as_ref()
-        .unwrap_or_else(|| panic!("resource {name}: missing url"))
+        .ok_or_else(|| format!("resource {name}: missing url"))?
         .replace("{version}", &resource.version);
 
     eprintln!("cargo:warning=Downloading missing resource: {filename}");
@@ -187,12 +189,12 @@ pub fn ensure_resource(name: &str, resource: &Resource) -> PathBuf {
     let output = Command::new("curl")
         .args(["-sL", "-o", &path.to_string_lossy(), &url])
         .output()
-        .unwrap_or_else(|e| panic!("curl {url}: {e}"));
+        .map_err(|e| format!("curl {url}: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("curl {url} failed: {stderr}");
+        return Err(format!("curl {url} failed: {stderr}"));
     }
-    path
+    Ok(path)
 }
 
 /// Run `helm template` and return the rendered YAML.
@@ -204,7 +206,7 @@ pub fn render_chart(
     release: &str,
     namespace: &str,
     extra_args: &[&str],
-) -> String {
+) -> Result<String> {
     let output = Command::new("helm")
         .args([
             "template",
@@ -216,10 +218,10 @@ pub fn render_chart(
         ])
         .args(extra_args)
         .output()
-        .unwrap_or_else(|e| panic!("helm template {release}: {e}"));
+        .map_err(|e| format!("helm template {release}: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!("helm template {release} failed: {stderr}");
+        return Err(format!("helm template {release} failed: {stderr}"));
     }
-    String::from_utf8(output.stdout).expect("helm template utf-8")
+    String::from_utf8(output.stdout).map_err(|e| format!("helm template {release} utf-8: {e}"))
 }

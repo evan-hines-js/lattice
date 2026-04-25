@@ -170,6 +170,40 @@ pub struct KubeClientImpl {
 }
 
 impl KubeClientImpl {
+    /// Read a JSON-pointer field off `BasisCluster.spec` for the
+    /// given cluster. Empty / missing values return `None`. Shared
+    /// by every basis-spec accessor (control-plane endpoint, service
+    /// block CIDR, …) so each new field is one line in the trait.
+    async fn get_basis_spec_field(
+        &self,
+        cluster_name: &str,
+        capi_namespace: &str,
+        pointer: &str,
+    ) -> Result<Option<String>, Error> {
+        use kube::api::{Api, ApiResource, DynamicObject};
+
+        let ar = ApiResource {
+            group: "infrastructure.cluster.x-k8s.io".to_string(),
+            version: "v1alpha1".to_string(),
+            api_version: "infrastructure.cluster.x-k8s.io/v1alpha1".to_string(),
+            kind: "BasisCluster".to_string(),
+            plural: "basisclusters".to_string(),
+        };
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), capi_namespace, &ar);
+        Ok(api
+            .get_opt(cluster_name)
+            .await
+            .map_err(Error::from)?
+            .and_then(|obj| {
+                obj.data
+                    .pointer(pointer)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            }))
+    }
+
     /// Create a new KubeClientImpl wrapping the given kube Client and resource cache.
     ///
     /// Node reads (`get_ready_node_counts`, `list_nodes`) are served from the
@@ -457,28 +491,8 @@ impl KubeClient for KubeClientImpl {
         cluster_name: &str,
         capi_namespace: &str,
     ) -> Result<Option<String>, Error> {
-        use kube::api::{Api, ApiResource, DynamicObject};
-
-        let ar = ApiResource {
-            group: "infrastructure.cluster.x-k8s.io".to_string(),
-            version: "v1alpha1".to_string(),
-            api_version: "infrastructure.cluster.x-k8s.io/v1alpha1".to_string(),
-            kind: "BasisCluster".to_string(),
-            plural: "basisclusters".to_string(),
-        };
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), capi_namespace, &ar);
-        Ok(api
-            .get_opt(cluster_name)
+        self.get_basis_spec_field(cluster_name, capi_namespace, "/spec/controlPlaneEndpoint/host")
             .await
-            .map_err(Error::from)?
-            .and_then(|obj| {
-                obj.data
-                    .pointer("/spec/controlPlaneEndpoint/host")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from)
-            }))
     }
 
     async fn cordon_node(&self, name: &str) -> Result<(), Error> {

@@ -178,6 +178,7 @@ impl Provider for OpenStackProvider {
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::OpenStack,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            cluster_network: spec.provider.kubernetes.cluster_network.clone(),
         };
 
         // No kube-vip for OpenStack - we use Octavia LB
@@ -291,6 +292,15 @@ impl Provider for OpenStackProvider {
 
         Ok(())
     }
+
+    async fn lb_cidr(
+        &self,
+        _cluster: &LatticeCluster,
+        _kube: &kube::Client,
+    ) -> Result<Option<String>> {
+        // OpenStack uses Octavia / native LBaaS; no Cilium L2 IP pool.
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -299,8 +309,9 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_crd::crd::LatticeClusterSpec;
     use lattice_crd::crd::{
-        BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
-        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec, InstanceType,
+        KubernetesSpec, MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume,
+        WorkerPoolSpec,
     };
 
     fn test_openstack_config() -> OpenStackConfig {
@@ -326,6 +337,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::openstack(test_openstack_config()),
                 },
@@ -405,6 +417,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::openstack(test_openstack_config()),
         };
@@ -415,6 +428,7 @@ mod tests {
                 version: "invalid".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::openstack(test_openstack_config()),
         };
@@ -433,6 +447,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::openstack(cfg),
         };

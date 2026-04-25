@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("metrics-server")
         .expect("versions.toml missing [charts.metrics-server]");
-    let chart_path = lattice_helm_build::ensure_chart("metrics-server", chart);
+    let chart_path = lattice_helm_build::ensure_chart("metrics-server", chart)
+        .expect("ensure metrics-server chart");
 
     // --kubelet-insecure-tls: kubeadm-provisioned kubelets serve on
     // self-signed certs by default; metrics-server would otherwise fail
@@ -30,7 +31,8 @@ fn main() {
             "--set",
             "tolerations[0].effect=NoSchedule",
         ],
-    );
+    )
+    .expect("render metrics-server chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("metrics-server.yaml"), yaml).expect("write metrics-server.yaml");

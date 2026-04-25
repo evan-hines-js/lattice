@@ -10,7 +10,7 @@
 //!    `BasisMachineTemplate`, `MachineDeployment`,
 //!    `KubeadmConfigTemplate`). Applying `BasisCluster` is what
 //!    triggers basis-capi-provider to call `Basis.CreateCluster`, which
-//!    allocates the VIP from the cluster's `apiserverVipPool` and
+//!    allocates the VIP from the cluster's `externalIpPool` and
 //!    writes it back to `BasisCluster.spec.controlPlaneEndpoint`.
 //! 2. Second reconcile pass — the LatticeCluster reconciler picks up
 //!    the endpoint and populates `bootstrap.control_plane_endpoint`.
@@ -92,21 +92,26 @@ impl BasisProvider {
         cluster.spec.provider.config.basis.as_ref()
     }
 
-    /// Render the `BasisCluster` CR. Forwards `apiserverVipPool` so the
-    /// allocator knows which pool to draw the VIP from.
+    /// Render the `BasisCluster` CR. Forwards the cluster's external
+    /// IP pool name (apiserver VIP + LB Service block come from the
+    /// same pool) and an optional override for the per-cluster
+    /// service IP count.
     fn generate_basis_cluster(&self, cluster: &LatticeCluster) -> Result<CAPIManifest> {
         let name = get_cluster_name(cluster)?;
         let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("basis config required"))?;
 
-        let pool = cfg.apiserver_vip_pool.as_deref().unwrap_or("cell-internal");
-        let spec = serde_json::json!({
+        let pool = cfg.external_ip_pool.as_deref().unwrap_or("cell-internal");
+        let mut spec = serde_json::json!({
             "credentialsRef": {
                 "name": BASIS_CREDENTIALS_SECRET,
                 "namespace": LOCAL_SECRETS_NAMESPACE,
             },
-            "apiserverVipPool": pool,
+            "externalIpPool": pool,
         });
+        if let Some(count) = cfg.external_service_ips {
+            spec["externalServiceIps"] = serde_json::json!(count);
+        }
 
         Ok(
             CAPIManifest::new(BASIS_API_VERSION, "BasisCluster", name, &self.namespace)
@@ -164,6 +169,7 @@ impl Provider for BasisProvider {
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Basis,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            cluster_network: spec.provider.kubernetes.cluster_network.clone(),
         };
 
         let infra = self.infra_ref();
@@ -181,18 +187,22 @@ impl Provider for BasisProvider {
         ];
 
         // KubeadmControlPlane carries kube-vip's static pod manifest
-        // (BGP mode, peering with the basis controller) and the VIP
-        // cert SAN. Emit it only once we know the endpoint.
+        // and the VIP cert SAN. Emit it only once we know the endpoint.
+        //
+        // kube-vip runs in ARP mode: external advertisement of the
+        // VIP is the basis layer's job (every host carrying the tree
+        // advertises the VIP /32 via the cell BGP reflector with
+        // itself as next-hop, plus proxy-ARP on the underlay).
+        // Inside the cluster, kube-vip just claims the VIP locally
+        // on the tree NIC and runs leader-election so a single CP
+        // node owns it at any time.
         if let Some(endpoint) = bootstrap.control_plane_endpoint.as_deref() {
             let mut cert_sans = build_cert_sans(cluster);
             if !cert_sans.iter().any(|s| s == endpoint) {
                 cert_sans.push(endpoint.to_string());
             }
-            let vip = Some(VipConfig::bgp(
+            let vip = Some(VipConfig::arp(
                 endpoint.to_string(),
-                cfg.bgp_peer.asn,
-                cfg.bgp_peer.asn,
-                cfg.bgp_peer.address.clone(),
                 BASIS_VIP_INTERFACE.to_string(),
                 cfg.kube_vip_image.clone(),
             ));
@@ -238,6 +248,53 @@ impl Provider for BasisProvider {
             .ok_or_else(|| Error::validation("basis config required"))?;
         Ok(())
     }
+
+    /// Resolve the Cilium LB Service block by reading
+    /// `BasisCluster.spec.serviceBlockCidr` — populated by
+    /// basis-capi-provider after `Basis.CreateCluster` returns. If
+    /// the field hasn't been written yet (eager reconcile, basis
+    /// hasn't allocated), we return a retryable provider error so
+    /// the cluster reconciler requeues until it appears.
+    async fn lb_cidr(
+        &self,
+        cluster: &LatticeCluster,
+        kube: &kube::Client,
+    ) -> Result<Option<String>> {
+        use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
+
+        let name = cluster
+            .metadata
+            .name
+            .as_deref()
+            .ok_or_else(|| Error::validation("LatticeCluster missing metadata.name"))?;
+        let namespace = lattice_common::capi_namespace(name);
+        let ar = ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "infrastructure.cluster.x-k8s.io",
+            "v1alpha1",
+            "BasisCluster",
+        ));
+        let api: Api<DynamicObject> = Api::namespaced_with(kube.clone(), &namespace, &ar);
+        let cidr = api
+            .get_opt(name)
+            .await
+            .map_err(|e| Error::provider_for(name, "basis", e.to_string()))?
+            .and_then(|obj| {
+                obj.data
+                    .pointer("/spec/serviceBlockCidr")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+            });
+        match cidr {
+            Some(c) => Ok(Some(c)),
+            None => Err(Error::provider_for(
+                name,
+                "basis",
+                "BasisCluster.spec.serviceBlockCidr not populated yet — \
+                 waiting for basis-capi-provider to allocate",
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,22 +302,15 @@ mod tests {
     use super::*;
     use kube::api::ObjectMeta;
     use lattice_crd::crd::{
-        AddressPoolBinding, BackupsConfig, BgpPeer, BootstrapProvider, ControlPlaneSpec,
-        KubernetesSpec, LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec,
-        ProviderConfig, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec, KubernetesSpec,
+        LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig,
+        WorkerPoolSpec,
     };
 
     fn test_basis_config() -> BasisConfig {
         BasisConfig {
-            bgp_peer: BgpPeer {
-                address: "10.0.0.1".to_string(),
-                asn: 64500,
-            },
-            address_pools: vec![AddressPoolBinding {
-                name: "cell-internal".to_string(),
-                cidr: "10.255.4.16/28".to_string(),
-            }],
-            apiserver_vip_pool: None,
+            external_ip_pool: None,
+            external_service_ips: None,
             kube_vip_image: None,
         }
     }
@@ -286,6 +336,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::basis(test_basis_config()),
                 },
@@ -360,15 +411,18 @@ mod tests {
             .find(|m| m.kind == "KubeadmControlPlane")
             .unwrap();
         let json = serde_json::to_string(&kcp.spec).unwrap();
-        assert!(json.contains("bgp_enable"), "kube-vip in BGP mode: {json}");
-        assert!(json.contains("bgp_as"));
-        assert!(json.contains("bgp_peeraddress"));
-        assert!(json.contains("64500"));
-        assert!(!json.contains("vip_arp"), "no ARP path on basis: {json}");
+        // kube-vip on basis runs in ARP mode — basis-side BGP is what
+        // gets the VIP routed externally, so kube-vip's job here is
+        // just intra-tree leader election + ARP for the VIP.
+        assert!(json.contains("vip_arp"), "kube-vip in ARP mode: {json}");
+        assert!(
+            !json.contains("bgp_enable"),
+            "kube-vip should NOT enable its BGP path on basis (basis advertises): {json}"
+        );
     }
 
     #[tokio::test]
-    async fn basis_cluster_carries_apiserver_vip_pool() {
+    async fn basis_cluster_carries_external_ip_pool() {
         let provider = BasisProvider::with_namespace("default");
         let cluster = test_cluster("basis-wkr");
         let manifests = provider
@@ -380,7 +434,30 @@ mod tests {
             .find(|m| m.kind == "BasisCluster")
             .unwrap();
         let json = serde_json::to_string(&bc.spec).unwrap();
-        assert!(json.contains(r#""apiserverVipPool":"cell-internal""#));
-        assert!(!json.contains("controlPlaneEdge"));
+        assert!(json.contains(r#""externalIpPool":"cell-internal""#));
+        // externalServiceIps is omitted in the default case so basis
+        // applies its cell-wide default — only present when the
+        // config explicitly overrides.
+        assert!(!json.contains("externalServiceIps"));
+    }
+
+    #[tokio::test]
+    async fn basis_cluster_forwards_external_service_ips_override() {
+        let mut basis_cfg = test_basis_config();
+        basis_cfg.external_service_ips = Some(32);
+        let mut cluster = test_cluster("basis-svc");
+        cluster.spec.provider.config = ProviderConfig::basis(basis_cfg);
+
+        let provider = BasisProvider::with_namespace("default");
+        let manifests = provider
+            .generate_capi_manifests(&cluster, &BootstrapInfo::default())
+            .await
+            .expect("manifest generation should succeed");
+        let bc = manifests
+            .iter()
+            .find(|m| m.kind == "BasisCluster")
+            .unwrap();
+        let json = serde_json::to_string(&bc.spec).unwrap();
+        assert!(json.contains(r#""externalServiceIps":32"#));
     }
 }

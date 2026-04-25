@@ -444,6 +444,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                 bootstrap: BootstrapProvider::default(),
+                cluster_network: Default::default(),
             },
             config: ProviderConfig::docker(),
         }
@@ -784,10 +785,12 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
         assert_eq!(spec.nodes.control_plane.replicas, 1);
         assert_eq!(spec.nodes.total_workers(), 2);
         assert_eq!(spec.provider.kubernetes.version, "1.35.0");
-        match spec.provider.config.lb_advertisement() {
-            Some(crate::crd::LbAdvertisement::L2 { cidr }) => assert_eq!(cidr, "172.18.255.1/32"),
-            other => panic!("expected L2 advertisement from docker config, got {other:?}"),
-        }
+        // LB CIDR is resolved via the provider trait at runtime; the
+        // spec carries the static value for Docker/Proxmox.
+        assert_eq!(
+            spec.provider.config.docker.as_ref().unwrap().lb_cidr.as_deref(),
+            Some("172.18.255.1/32")
+        );
         assert_eq!(
             spec.parent_config
                 .as_ref()

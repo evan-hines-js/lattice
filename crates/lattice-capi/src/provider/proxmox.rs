@@ -343,6 +343,7 @@ impl Provider for ProxmoxProvider {
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Proxmox,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            cluster_network: spec.provider.kubernetes.cluster_network.clone(),
         };
 
         // Build certSANs - also auto-add controlPlaneEndpoint for Proxmox
@@ -414,6 +415,20 @@ impl Provider for ProxmoxProvider {
     async fn validate_spec(&self, spec: &ProviderSpec) -> Result<()> {
         validate_k8s_version(&spec.kubernetes.version)
     }
+
+    async fn lb_cidr(
+        &self,
+        cluster: &LatticeCluster,
+        _kube: &kube::Client,
+    ) -> Result<Option<String>> {
+        Ok(cluster
+            .spec
+            .provider
+            .config
+            .proxmox
+            .as_ref()
+            .and_then(|p| p.lb_cidr.clone()))
+    }
 }
 
 #[cfg(test)]
@@ -421,9 +436,9 @@ mod tests {
     use super::*;
     use kube::api::ObjectMeta;
     use lattice_crd::crd::{
-        AdditionalNetwork, BackupsConfig, BootstrapProvider, ControlPlaneSpec, KubernetesSpec,
-        LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec, ProviderConfig,
-        WorkerPoolSpec,
+        AdditionalNetwork, BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec,
+        KubernetesSpec, LatticeClusterSpec, MonitoringConfig, NodeResourceSpec, NodeSpec,
+        ProviderConfig, WorkerPoolSpec,
     };
 
     fn test_proxmox_config() -> ProxmoxConfig {
@@ -474,6 +489,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::proxmox(test_proxmox_config()),
                 },
@@ -582,6 +598,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
         };
@@ -592,6 +609,7 @@ mod tests {
                 version: "invalid".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::proxmox(test_proxmox_config()),
         };

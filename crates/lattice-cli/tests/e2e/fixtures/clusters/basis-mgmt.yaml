@@ -17,19 +17,11 @@ spec:
       bootstrap: kubeadm
     config:
       basis:
-        # Management cluster — apiserver VIP comes from the cell-public
-        # pool so external callers (operator laptops, bootstrap kind
-        # cluster) can reach the apiserver directly. cell-public is a
-        # different LAN segment from cell-internal in production.
-        bgpPeer:
-          address: "10.0.0.1"
-          asn: 64500
-        apiserverVipPool: cell-public
-        addressPools:
-          - name: cell-internal
-            cidr: "10.255.4.16/28"
-          - name: cell-public
-            cidr: "10.0.0.176/28"
+        # Management cluster — external IPs (apiserver VIP +
+        # LoadBalancer Service block) come from cell-public so
+        # external callers (operator laptops, bootstrap kind cluster)
+        # can reach them directly.
+        externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

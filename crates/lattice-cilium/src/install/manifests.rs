@@ -20,22 +20,26 @@ static CILIUM_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/cilium.ya
 
 const PLACEHOLDER_HOST: &str = "__LATTICE_API_SERVER_HOST__";
 const PLACEHOLDER_PORT: &str = "__LATTICE_API_SERVER_PORT__";
+const PLACEHOLDER_POD_CIDR: &str = "__LATTICE_POD_CIDR__";
 
 /// Cilium chart version pinned at build time from `versions.toml`.
 pub fn cilium_version() -> &'static str {
     env!("CILIUM_VERSION")
 }
 
-/// Render Cilium manifests with the given API server endpoint substituted
-/// for the build-time placeholders.
+/// Render Cilium manifests with the given API server endpoint and pod
+/// CIDR substituted for the build-time placeholders.
 ///
-/// Single source of truth for installable Cilium manifests. Endpoint
-/// resolution is the caller's job — see [`lattice_common::ApiServerEndpoint`]
-/// for the source-specific constructors used at each lifecycle phase.
-pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint) -> Vec<String> {
+/// Single source of truth for installable Cilium manifests. The pod
+/// CIDR is critical: Cilium native-routing only skips masquerade for
+/// destinations inside `ipv4NativeRoutingCIDR`. Setting it wider than
+/// the actual pod CIDR (e.g. the underlay supernet) makes pod-egress
+/// to LAN destinations leak the pod IP and break return-path routing.
+pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint, pod_cidr: &str) -> Vec<String> {
     let yaml = CILIUM_TEMPLATE
         .replace(PLACEHOLDER_HOST, &endpoint.host)
-        .replace(PLACEHOLDER_PORT, &endpoint.port.to_string());
+        .replace(PLACEHOLDER_PORT, &endpoint.port.to_string())
+        .replace(PLACEHOLDER_POD_CIDR, pod_cidr);
     split_yaml_documents(&yaml)
 }
 
@@ -308,7 +312,7 @@ mod tests {
 
     #[test]
     fn manifests_contain_agent() {
-        let m = render_cilium_manifests(&test_endpoint());
+        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16");
         assert!(!m.is_empty());
         let combined = m.join("\n");
         assert!(combined.contains("kind: DaemonSet"));
@@ -317,7 +321,7 @@ mod tests {
 
     #[test]
     fn rendered_manifests_substitute_endpoint_placeholders() {
-        let m = render_cilium_manifests(&test_endpoint());
+        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16");
         let combined = m.join("\n");
         assert!(
             !combined.contains(PLACEHOLDER_HOST),
@@ -327,8 +331,13 @@ mod tests {
             !combined.contains(PLACEHOLDER_PORT),
             "port placeholder must be substituted"
         );
+        assert!(
+            !combined.contains(PLACEHOLDER_POD_CIDR),
+            "pod CIDR placeholder must be substituted"
+        );
         assert!(combined.contains("api.example.com"));
         assert!(combined.contains("6443"));
+        assert!(combined.contains("192.168.0.0/16"));
     }
 
     #[test]

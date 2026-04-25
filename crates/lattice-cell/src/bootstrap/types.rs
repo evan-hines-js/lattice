@@ -4,7 +4,7 @@
 //! manifest generator trait, and bundle configuration.
 
 use lattice_common::ApiServerEndpoint;
-use lattice_crd::crd::{LatticeCluster, LbAdvertisement, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderType};
 use serde::{Deserialize, Serialize};
 
 /// Bootstrap response containing manifests for the agent
@@ -30,13 +30,29 @@ pub struct ClusterFacts {
     pub bootstrap: lattice_crd::crd::BootstrapProvider,
     pub k8s_version: String,
     pub autoscaling_enabled: bool,
-    pub lb_advertisement: Option<LbAdvertisement>,
+    /// CIDR for the workload cluster's `CiliumLoadBalancerIPPool`,
+    /// resolved by the provider trait (`Provider::lb_cidr`). `None`
+    /// for cloud providers using native LBs, or for any provider
+    /// whose spec doesn't request one.
+    pub lb_cidr: Option<String>,
+    /// Pod CIDR — pinned into Cilium's `ipv4NativeRoutingCIDR` so
+    /// pod-egress to LAN destinations gets masqueraded to the node
+    /// IP instead of leaking the pod IP.
+    pub pod_cidr: String,
     pub cluster_manifest: String,
 }
 
 impl ClusterFacts {
-    /// Derive facts from a cluster CR plus its serialized manifest.
-    pub fn from_cluster(cluster: &LatticeCluster, cluster_manifest: String) -> Self {
+    /// Derive facts from a cluster CR plus its serialized manifest
+    /// and the provider-resolved LB CIDR. Each provider answers
+    /// `lb_cidr` for itself via the [`Provider::lb_cidr`] trait
+    /// method — synchronous spec lookups for static configs
+    /// (Docker, Proxmox), CR fetches for dynamic ones (basis).
+    pub fn from_cluster(
+        cluster: &LatticeCluster,
+        cluster_manifest: String,
+        lb_cidr: Option<String>,
+    ) -> Self {
         Self {
             cluster_name: cluster.metadata.name.clone().unwrap_or_default(),
             provider: cluster.spec.provider.config.provider_type(),
@@ -48,7 +64,8 @@ impl ClusterFacts {
                 .worker_pools
                 .values()
                 .any(|p| p.is_autoscaling_enabled()),
-            lb_advertisement: cluster.spec.provider.config.lb_advertisement(),
+            lb_cidr,
+            pod_cidr: cluster.spec.provider.kubernetes.cluster_network.pod_cidr.clone(),
             cluster_manifest,
         }
     }

@@ -300,6 +300,7 @@ impl Provider for DockerProvider {
             bootstrap: cluster.spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Docker,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            cluster_network: cluster.spec.provider.kubernetes.cluster_network.clone(),
         };
 
         let infra_api_version =
@@ -386,6 +387,20 @@ impl Provider for DockerProvider {
 
         Ok(())
     }
+
+    async fn lb_cidr(
+        &self,
+        cluster: &LatticeCluster,
+        _kube: &kube::Client,
+    ) -> Result<Option<String>> {
+        Ok(cluster
+            .spec
+            .provider
+            .config
+            .docker
+            .as_ref()
+            .and_then(|d| d.lb_cidr.clone()))
+    }
 }
 
 #[cfg(test)]
@@ -398,9 +413,9 @@ mod tests {
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_crd::crd::{
-        BackupsConfig, BootstrapProvider, ControlPlaneSpec, EndpointsSpec, KubernetesSpec,
-        LatticeClusterSpec, MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec,
-        WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec, EndpointsSpec,
+        KubernetesSpec, LatticeClusterSpec, MonitoringConfig, NodeSpec, ProviderConfig,
+        ProviderSpec, ServiceSpec, WorkerPoolSpec,
     };
 
     /// Helper to create a sample LatticeCluster for testing
@@ -430,6 +445,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: Some(vec!["127.0.0.1".to_string(), "localhost".to_string()]),
                         bootstrap: BootstrapProvider::default(),
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::docker(),
                 },
@@ -871,6 +887,7 @@ mod tests {
                     version: "1.32.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -889,6 +906,7 @@ mod tests {
                     version: "v1.32.0".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -907,6 +925,7 @@ mod tests {
                     version: "1.32".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -925,6 +944,7 @@ mod tests {
                     version: "".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -947,6 +967,7 @@ mod tests {
                     version: "latest".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };
@@ -966,6 +987,7 @@ mod tests {
                     version: "1.32.beta".to_string(),
                     cert_sans: None,
                     bootstrap: BootstrapProvider::default(),
+                    cluster_network: ClusterNetworkSpec::default(),
                 },
                 config: ProviderConfig::docker(),
             };

@@ -3,13 +3,14 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("gpu-operator")
         .expect("versions.toml missing [charts.gpu-operator]");
     // The NVIDIA chart artifact names the tarball with a `v` prefix: `gpu-operator-vX.Y.Z.tgz`.
-    let chart_path = lattice_helm_build::ensure_chart("gpu-operator", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("gpu-operator", chart).expect("ensure gpu-operator chart");
 
     // driver.enabled=false: Lattice assumes drivers are installed out-of-band
     // (most datacentre GPU images ship them). toolkit + device plugin + NFD +
@@ -35,7 +36,8 @@ fn main() {
             "--set",
             "gfd.enabled=true",
         ],
-    );
+    )
+    .expect("render gpu-operator chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("gpu-operator.yaml"), yaml).expect("write gpu-operator.yaml");

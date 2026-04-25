@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let istio_version = versions
         .charts
         .get("istio-base")
@@ -20,23 +20,28 @@ fn main() {
     let base_path = lattice_helm_build::ensure_chart(
         "istio-base",
         versions.charts.get("istio-base").expect("istio-base chart"),
-    );
+    )
+    .expect("ensure istio-base chart");
     let cni_path = lattice_helm_build::ensure_chart(
         "istio-cni",
         versions.charts.get("istio-cni").expect("istio-cni chart"),
-    );
+    )
+    .expect("ensure istio-cni chart");
     let istiod_path = lattice_helm_build::ensure_chart(
         "istiod",
         versions.charts.get("istiod").expect("istiod chart"),
-    );
+    )
+    .expect("ensure istiod chart");
     let ztunnel_path = lattice_helm_build::ensure_chart(
         "ztunnel",
         versions.charts.get("ztunnel").expect("ztunnel chart"),
-    );
+    )
+    .expect("ensure ztunnel chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
-    let base = lattice_helm_build::render_chart(&base_path, "istio-base", "istio-system", &[]);
+    let base = lattice_helm_build::render_chart(&base_path, "istio-base", "istio-system", &[])
+        .expect("render istio-base chart");
     std::fs::write(out_dir.join("istio-base.yaml"), base).expect("write istio-base.yaml");
 
     let cni = lattice_helm_build::render_chart(
@@ -49,7 +54,8 @@ fn main() {
             "--set",
             "cni.cniConfFileName=05-cilium.conflist",
         ],
-    );
+    )
+    .expect("render istio-cni chart");
     std::fs::write(out_dir.join("istio-cni.yaml"), cni).expect("write istio-cni.yaml");
 
     // istiod carries cluster-specific values (trust domain, meshID, network,
@@ -88,7 +94,8 @@ fn main() {
             "--set",
             "pilot.tolerations[0].effect=NoSchedule",
         ],
-    );
+    )
+    .expect("render istiod chart");
     std::fs::write(out_dir.join("istiod.yaml"), istiod).expect("write istiod.yaml");
 
     let ztunnel = lattice_helm_build::render_chart(
@@ -101,7 +108,8 @@ fn main() {
             "--set",
             "global.network=__LATTICE_CLUSTER_NAME__",
         ],
-    );
+    )
+    .expect("render ztunnel chart");
     std::fs::write(out_dir.join("ztunnel.yaml"), ztunnel).expect("write ztunnel.yaml");
 
     println!("cargo:rustc-env=ISTIO_VERSION={}", istio_version);

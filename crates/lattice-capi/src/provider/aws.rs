@@ -188,6 +188,7 @@ impl Provider for AwsProvider {
             bootstrap: spec.provider.kubernetes.bootstrap.clone(),
             provider_type: ProviderType::Aws,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            cluster_network: spec.provider.kubernetes.cluster_network.clone(),
         };
 
         // No kube-vip for AWS - we use NLB
@@ -313,6 +314,15 @@ impl Provider for AwsProvider {
 
         Ok(())
     }
+
+    async fn lb_cidr(
+        &self,
+        _cluster: &LatticeCluster,
+        _kube: &kube::Client,
+    ) -> Result<Option<String>> {
+        // AWS clusters use ELB/NLB; no Cilium L2 IP pool.
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -321,8 +331,9 @@ mod tests {
     use kube::api::ObjectMeta;
     use lattice_crd::crd::LatticeClusterSpec;
     use lattice_crd::crd::{
-        BackupsConfig, BootstrapProvider, ControlPlaneSpec, InstanceType, KubernetesSpec,
-        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume, WorkerPoolSpec,
+        BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec, InstanceType,
+        KubernetesSpec, MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, RootVolume,
+        WorkerPoolSpec,
     };
 
     fn test_aws_config() -> AwsConfig {
@@ -347,6 +358,7 @@ mod tests {
                         version: "1.32.0".to_string(),
                         cert_sans: None,
                         bootstrap: BootstrapProvider::Kubeadm,
+                        cluster_network: ClusterNetworkSpec::default(),
                     },
                     config: ProviderConfig::aws(test_aws_config()),
                 },
@@ -448,6 +460,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::aws(test_aws_config()),
         };
@@ -458,6 +471,7 @@ mod tests {
                 version: "invalid".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::aws(test_aws_config()),
         };
@@ -476,6 +490,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::aws(cfg),
         };
@@ -497,6 +512,7 @@ mod tests {
                 version: "1.32.0".to_string(),
                 cert_sans: None,
                 bootstrap: BootstrapProvider::Kubeadm,
+                cluster_network: ClusterNetworkSpec::default(),
             },
             config: ProviderConfig::aws(cfg),
         };

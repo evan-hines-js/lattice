@@ -7,12 +7,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let gateway = versions
         .resources
         .get("gateway-api")
         .expect("versions.toml missing [resources.gateway-api]");
-    let src = lattice_helm_build::ensure_resource("gateway-api", gateway);
+    let src = lattice_helm_build::ensure_resource("gateway-api", gateway)
+        .expect("ensure gateway-api resource");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let content =

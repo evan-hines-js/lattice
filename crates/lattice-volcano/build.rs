@@ -32,12 +32,13 @@ const VOLCANO_VALUES_YAML: &str = r#"custom:
 "#;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("volcano")
         .expect("versions.toml missing [charts.volcano]");
-    let chart_path = lattice_helm_build::ensure_chart("volcano", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("volcano", chart).expect("ensure volcano chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
@@ -61,7 +62,8 @@ fn main() {
             "--values",
             values_path.to_str().expect("values path utf-8"),
         ],
-    );
+    )
+    .expect("render volcano chart");
     std::fs::write(out_dir.join("volcano.yaml"), yaml).expect("write volcano.yaml");
 
     // vGPU device plugin: plain YAML download, then patch with a GPU-only
@@ -70,7 +72,8 @@ fn main() {
         .resources
         .get("volcano-vgpu-device-plugin")
         .expect("versions.toml missing [resources.volcano-vgpu-device-plugin]");
-    let vgpu_src = lattice_helm_build::ensure_resource("volcano-vgpu-device-plugin", vgpu_resource);
+    let vgpu_src = lattice_helm_build::ensure_resource("volcano-vgpu-device-plugin", vgpu_resource)
+        .expect("ensure volcano-vgpu-device-plugin resource");
     let raw = std::fs::read_to_string(&vgpu_src)
         .unwrap_or_else(|e| panic!("read {}: {e}", vgpu_src.display()));
     let patched = raw.replace(

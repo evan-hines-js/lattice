@@ -3,12 +3,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    let versions = lattice_helm_build::read_versions();
+    let versions = lattice_helm_build::read_versions().expect("read versions.toml");
     let chart = versions
         .charts
         .get("tetragon")
         .expect("versions.toml missing [charts.tetragon]");
-    let chart_path = lattice_helm_build::ensure_chart("tetragon", chart);
+    let chart_path =
+        lattice_helm_build::ensure_chart("tetragon", chart).expect("ensure tetragon chart");
 
     // `crds.installMethod=helm` renders TracingPolicy/TracingPolicyNamespaced
     // CRDs inline. Tetragon's default ("operator") defers CRD creation to the
@@ -28,7 +29,8 @@ fn main() {
             "--set",
             "crds.installMethod=helm",
         ],
-    );
+    )
+    .expect("render tetragon chart");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out_dir.join("tetragon.yaml"), yaml).expect("write tetragon.yaml");
