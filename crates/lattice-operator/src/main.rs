@@ -896,6 +896,7 @@ async fn activate_cell_services(
             &extra_sans,
             client.clone(),
             route_update_tx,
+            lattice_cluster::capi_lb_cidr_resolver(client.clone()),
         )
         .await?;
     tracing::info!("Cell servers started");

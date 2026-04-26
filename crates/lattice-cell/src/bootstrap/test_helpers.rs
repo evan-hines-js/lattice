@@ -12,7 +12,8 @@ use tokio::sync::RwLock;
 
 use super::errors::BootstrapError;
 use super::state::{
-    ApiServerEndpointResolver, BootstrapConfig, BootstrapState, ClusterBootstrapInfo,
+    noop_lb_cidr_resolver, ApiServerEndpointResolver, BootstrapConfig, BootstrapState,
+    ClusterBootstrapInfo,
 };
 use super::token::BootstrapToken;
 use super::types::{ClusterFacts, ClusterRegistration, ManifestGenerator};
@@ -59,6 +60,7 @@ pub fn test_state() -> BootstrapState<TestManifestGenerator> {
         kube_client: None,
         cluster_name: None,
         api_server_endpoint_resolver: test_endpoint_resolver(),
+        lb_cidr_resolver: noop_lb_cidr_resolver(),
     })
 }
 
@@ -72,6 +74,7 @@ pub fn test_state_with_ttl(ttl: Duration) -> BootstrapState<TestManifestGenerato
         kube_client: None,
         cluster_name: None,
         api_server_endpoint_resolver: test_endpoint_resolver(),
+        lb_cidr_resolver: noop_lb_cidr_resolver(),
     })
 }
 

@@ -265,6 +265,9 @@ pub struct ClusterwideIngressRule {
     /// From endpoints
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub from_endpoints: Vec<EndpointSelector>,
+    /// From entities (special Cilium entities like kube-apiserver, host, remote-node, world)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub from_entities: Vec<String>,
     /// To ports
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub to_ports: Vec<CiliumPortRule>,

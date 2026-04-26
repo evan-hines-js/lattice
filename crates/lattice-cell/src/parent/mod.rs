@@ -697,12 +697,17 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
     /// * `manifest_generator` - Generator for bootstrap manifests
     /// * `extra_sans` - Additional SANs to include in server certificate (e.g., cell host IP)
     /// * `kube_client` - Kubernetes client for K8s API access
+    /// * `lb_cidr_resolver` - Resolves the LB CIDR for a child cluster at
+    ///   bundle-render time. The cell crate can't dispatch to provider-specific
+    ///   logic itself (would create a cycle with `lattice-capi`), so the
+    ///   operator constructs and injects this.
     pub async fn ensure_running(
         &self,
         manifest_generator: G,
         extra_sans: &[String],
         kube_client: Client,
         route_update_tx: crate::route_reconciler::RouteUpdateSender,
+        lb_cidr_resolver: crate::bootstrap::LbCidrResolver,
     ) -> Result<bool, CellServerError> {
         // Use compare_exchange to atomically check and set
         if self
@@ -733,6 +738,7 @@ impl<G: ManifestGenerator + Send + Sync + 'static> ParentServers<G> {
             api_server_endpoint_resolver: crate::bootstrap::capi_cluster_endpoint_resolver(
                 kube_client.clone(),
             ),
+            lb_cidr_resolver,
         }));
 
         // Store bootstrap state
@@ -1048,7 +1054,13 @@ mod tests {
 
         let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
         let started = servers
-            .ensure_running(MockManifestGenerator, &[], client.clone(), route_tx.clone())
+            .ensure_running(
+                MockManifestGenerator,
+                &[],
+                client.clone(),
+                route_tx.clone(),
+                crate::bootstrap::noop_lb_cidr_resolver(),
+            )
             .await
             .expect("ensure_running should succeed");
         assert!(started);
@@ -1056,7 +1068,13 @@ mod tests {
 
         // Second call should return false (already running)
         let started = servers
-            .ensure_running(MockManifestGenerator, &[], client, route_tx)
+            .ensure_running(
+                MockManifestGenerator,
+                &[],
+                client,
+                route_tx,
+                crate::bootstrap::noop_lb_cidr_resolver(),
+            )
             .await
             .expect("ensure_running should succeed");
         assert!(!started);
@@ -1077,7 +1095,13 @@ mod tests {
         let client = try_test_client().await.expect("kubeconfig required");
         let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
         servers
-            .ensure_running(MockManifestGenerator, &[], client, route_tx)
+            .ensure_running(
+                MockManifestGenerator,
+                &[],
+                client,
+                route_tx,
+                crate::bootstrap::noop_lb_cidr_resolver(),
+            )
             .await
             .expect("ensure_running should succeed");
         servers.shutdown().await;
@@ -1100,7 +1124,13 @@ mod tests {
 
         let (route_tx, _route_rx) = tokio::sync::mpsc::channel(16);
         servers
-            .ensure_running(MockManifestGenerator, &[], client, route_tx)
+            .ensure_running(
+                MockManifestGenerator,
+                &[],
+                client,
+                route_tx,
+                crate::bootstrap::noop_lb_cidr_resolver(),
+            )
             .await
             .expect("ensure_running should succeed");
         assert!(servers.bootstrap_state().await.is_some());

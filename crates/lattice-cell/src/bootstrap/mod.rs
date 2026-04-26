@@ -42,8 +42,8 @@ pub use bundle::generate_bootstrap_bundle;
 pub use errors::BootstrapError;
 pub use generator::DefaultManifestGenerator;
 pub use state::{
-    capi_cluster_endpoint_resolver, ApiServerEndpointResolver, BootstrapConfig, BootstrapState,
-    ClusterBootstrapInfo,
+    capi_cluster_endpoint_resolver, noop_lb_cidr_resolver, ApiServerEndpointResolver,
+    BootstrapConfig, BootstrapState, ClusterBootstrapInfo, LbCidrResolver,
 };
 pub use token::BootstrapToken;
 pub use types::{

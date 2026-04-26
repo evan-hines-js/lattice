@@ -44,6 +44,7 @@ pub async fn reconcile(
     let mut manifests: Vec<String> = manifests::render_cilium_manifests(&endpoint, &pod_cidr);
     for policy in [
         serde_json::to_string_pretty(&manifests::generate_ztunnel_allowlist()),
+        serde_json::to_string_pretty(&manifests::generate_allow_node_ingress()),
         serde_json::to_string_pretty(&manifests::generate_default_deny()),
         serde_json::to_string_pretty(&manifests::generate_mesh_proxy_egress_policy()),
         serde_json::to_string_pretty(&manifests::generate_eastwest_gateway_policy()),

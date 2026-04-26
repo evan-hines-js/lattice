@@ -46,6 +46,28 @@ pub type ApiServerEndpointResolver = Arc<
         + Sync,
 >;
 
+/// Resolves the LB CIDR for a given child cluster id at bundle-render
+/// time, after CAPI manifests have been applied. Lazy resolution
+/// breaks the deadlock between CAPI manifest application (which needs
+/// a registered bootstrap token) and provider-side CIDR allocation
+/// (basis only writes `BasisCluster.spec.serviceBlockCidr` after the
+/// CR materializes).
+///
+/// Production injects a closure that dispatches by provider type
+/// (e.g. `Provider::lb_cidr`). Tests inject a no-op resolver.
+pub type LbCidrResolver = Arc<
+    dyn Fn(String) -> BoxFuture<'static, Result<Option<String>, BootstrapError>>
+        + Send
+        + Sync,
+>;
+
+/// No-op resolver for tests + paths that don't render LB-IPAM resources
+/// (cloud providers using native LBs, install-time bundle generation
+/// where the caller resolves CIDR upstream).
+pub fn noop_lb_cidr_resolver() -> LbCidrResolver {
+    Arc::new(|_| Box::pin(async { Ok(None) }))
+}
+
 /// Build the production resolver: read the endpoint from the child's CAPI
 /// `Cluster` CR via `ApiServerEndpoint::from_capi_cluster`.
 pub fn capi_cluster_endpoint_resolver(client: Client) -> ApiServerEndpointResolver {
@@ -111,6 +133,8 @@ pub struct BootstrapConfig<G: ManifestGenerator> {
     pub cluster_name: Option<String>,
     /// Resolves the API server endpoint baked into a child's bootstrap bundle.
     pub api_server_endpoint_resolver: ApiServerEndpointResolver,
+    /// Resolves the LB CIDR for the child cluster at bundle-render time.
+    pub lb_cidr_resolver: LbCidrResolver,
 }
 
 /// Bootstrap endpoint state
@@ -133,6 +157,8 @@ pub struct BootstrapState<G: ManifestGenerator = super::generator::DefaultManife
     pub(crate) cluster_name: Option<String>,
     /// Resolves the API server endpoint for the bootstrap bundle.
     pub(crate) api_server_endpoint_resolver: ApiServerEndpointResolver,
+    /// Resolves the LB CIDR at bundle-render time.
+    pub(crate) lb_cidr_resolver: LbCidrResolver,
 }
 
 impl<G: ManifestGenerator> BootstrapState<G> {
@@ -148,6 +174,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             kube_client: config.kube_client,
             cluster_name: config.cluster_name,
             api_server_endpoint_resolver: config.api_server_endpoint_resolver,
+            lb_cidr_resolver: config.lb_cidr_resolver,
         }
     }
 
@@ -413,10 +440,20 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         let api_server_endpoint =
             (self.api_server_endpoint_resolver)(info.facts.cluster_name.clone()).await?;
 
+        // Resolve the LB CIDR lazily — registration happens before CAPI
+        // manifests are applied, so providers like basis (which read the
+        // CIDR off `BasisCluster.spec.serviceBlockCidr`) can't answer
+        // synchronously at registration time. By the time the agent
+        // calls into bootstrap, the CR exists and the field is populated.
+        let lb_cidr =
+            (self.lb_cidr_resolver)(info.facts.cluster_name.clone()).await?;
+        let mut facts = info.facts.clone();
+        facts.lb_cidr = lb_cidr;
+
         // Child clusters receive the lattice-registry Secret via distribution,
         // not baked into the operator manifests.
         let bundle_config = BootstrapBundleConfig {
-            facts: &info.facts,
+            facts: &facts,
             image: bootstrap_image,
             registry_credentials: None,
             api_server_endpoint: &api_server_endpoint,
@@ -1260,6 +1297,7 @@ mod tests {
             kube_client: None,
             cluster_name: None,
             api_server_endpoint_resolver: test_endpoint_resolver(),
+            lb_cidr_resolver: super::noop_lb_cidr_resolver(),
         });
 
         state.clusters.insert(
@@ -1312,6 +1350,7 @@ mod tests {
             kube_client: None,
             cluster_name: None,
             api_server_endpoint_resolver: test_endpoint_resolver(),
+            lb_cidr_resolver: super::noop_lb_cidr_resolver(),
         });
 
         state.clusters.insert(

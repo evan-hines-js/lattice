@@ -1104,10 +1104,16 @@ fn generate_kubeadm_control_plane(
         api_server["certSANs"] = serde_json::json!(cp_config.cert_sans);
     }
 
-    // Skip the kube-proxy addon at init time. Cilium runs with
-    // kubeProxyReplacement=true and refuses to start if kube-proxy is
-    // present. Same skip on join — joined control-plane nodes mustn't
-    // re-deploy the addon.
+    // Skip the kube-proxy addon at init time only when Cilium is
+    // running with `kubeProxyReplacement=true` — Cilium refuses to
+    // start with a stock kube-proxy alongside it. With kPR off, let
+    // kubeadm install kube-proxy as usual.
+    let mut init_configuration = serde_json::json!({
+        "nodeRegistration": node_registration.clone(),
+    });
+    if lattice_cilium::install::KUBE_PROXY_REPLACEMENT {
+        init_configuration["skipPhases"] = serde_json::json!(["addon/kube-proxy"]);
+    }
     let mut kubeadm_config_spec = serde_json::json!({
         "clusterConfiguration": {
             "apiServer": api_server,
@@ -1120,10 +1126,7 @@ fn generate_kubeadm_control_plane(
                 ]
             }
         },
-        "initConfiguration": {
-            "nodeRegistration": node_registration.clone(),
-            "skipPhases": ["addon/kube-proxy"]
-        },
+        "initConfiguration": init_configuration,
         "joinConfiguration": {
             "nodeRegistration": node_registration
         }

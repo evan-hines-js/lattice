@@ -35,6 +35,11 @@ pub fn cilium_version() -> &'static str {
 /// destinations inside `ipv4NativeRoutingCIDR`. Setting it wider than
 /// the actual pod CIDR (e.g. the underlay supernet) makes pod-egress
 /// to LAN destinations leak the pod IP and break return-path routing.
+///
+/// `endpoint` is only consulted when the chart was rendered with
+/// `KUBE_PROXY_REPLACEMENT = true` (the host/port placeholders are
+/// only emitted in that mode). With stock kube-proxy the param is
+/// kept on the signature so callers don't churn when the toggle flips.
 pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint, pod_cidr: &str) -> Vec<String> {
     let yaml = CILIUM_TEMPLATE
         .replace(PLACEHOLDER_HOST, &endpoint.host)
@@ -75,6 +80,43 @@ pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
             ingress: vec![ClusterwideIngressRule {
                 from_cidr: vec!["169.254.7.127/32".to_string()],
                 from_endpoints: vec![],
+                from_entities: vec![],
+                to_ports: vec![],
+            }],
+            egress: vec![],
+        },
+    )
+}
+
+/// Allow ingress from the local node (`host`) and peer nodes
+/// (`remote-node`) to every pod, on any port.
+///
+/// Required for kubelet liveness/readiness probes, kube-apiserver
+/// webhook callbacks, Service traffic SNATed to the node IP, and
+/// Cilium health probes between nodes. Without it, any pod whose
+/// namespace falls under `default-deny` and has a per-pod CNP silently
+/// drops these flows the moment a second node joins, since they
+/// arrive identified as `remote-node` (or `host` for the local
+/// kubelet) rather than as a known pod identity.
+///
+/// `enableDefaultDeny: { ingress: false }` is critical: this policy
+/// is purely additive and must not flip pods into default-deny ingress.
+pub fn generate_allow_node_ingress() -> CiliumClusterwideNetworkPolicy {
+    CiliumClusterwideNetworkPolicy::new(
+        ClusterwideMetadata::new("allow-node-ingress"),
+        CiliumClusterwideSpec {
+            description: Some(
+                "Allow ingress from host + remote-node to all pods. Required for kubelet probes, webhooks, SNATed Service traffic, and cilium-health.".to_string(),
+            ),
+            enable_default_deny: Some(EnableDefaultDeny {
+                egress: false,
+                ingress: false,
+            }),
+            endpoint_selector: EndpointSelector::default(),
+            ingress: vec![ClusterwideIngressRule {
+                from_cidr: vec![],
+                from_endpoints: vec![],
+                from_entities: vec!["host".to_string(), "remote-node".to_string()],
                 to_ports: vec![],
             }],
             egress: vec![],
@@ -281,6 +323,7 @@ pub fn generate_eastwest_gateway_policy() -> CiliumClusterwideNetworkPolicy {
             ingress: vec![ClusterwideIngressRule {
                 from_cidr: vec!["0.0.0.0/0".to_string()],
                 from_endpoints: vec![],
+                from_entities: vec![],
                 to_ports: vec![CiliumPortRule {
                     ports: vec![CiliumPort {
                         port: HBONE_PORT.to_string(),
@@ -320,24 +363,30 @@ mod tests {
     }
 
     #[test]
-    fn rendered_manifests_substitute_endpoint_placeholders() {
+    fn rendered_manifests_substitute_placeholders() {
         let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16");
         let combined = m.join("\n");
         assert!(
             !combined.contains(PLACEHOLDER_HOST),
-            "host placeholder must be substituted"
+            "host placeholder must not appear in rendered output"
         );
         assert!(
             !combined.contains(PLACEHOLDER_PORT),
-            "port placeholder must be substituted"
+            "port placeholder must not appear in rendered output"
         );
         assert!(
             !combined.contains(PLACEHOLDER_POD_CIDR),
             "pod CIDR placeholder must be substituted"
         );
-        assert!(combined.contains("api.example.com"));
-        assert!(combined.contains("6443"));
         assert!(combined.contains("192.168.0.0/16"));
+        // Host/port placeholders only appear in the rendered chart when
+        // kube-proxy replacement is enabled (chart sets `k8sServiceHost`
+        // / `k8sServicePort` only in that mode). Verify substitution
+        // happened in that case; skip otherwise.
+        if super::super::KUBE_PROXY_REPLACEMENT {
+            assert!(combined.contains("api.example.com"));
+            assert!(combined.contains("6443"));
+        }
     }
 
     #[test]
@@ -349,6 +398,25 @@ mod tests {
             .ingress
             .iter()
             .any(|r| r.from_cidr.contains(&"169.254.7.127/32".to_string())));
+    }
+
+    #[test]
+    fn allow_node_ingress_is_additive_and_unrestricted() {
+        let p = generate_allow_node_ingress();
+        assert_eq!(p.metadata.name, "allow-node-ingress");
+        let dd = p
+            .spec
+            .enable_default_deny
+            .as_ref()
+            .expect("enableDefaultDeny must be set");
+        assert!(!dd.ingress, "must not flip pods into default-deny ingress");
+        assert!(p.spec.endpoint_selector.match_labels.is_empty());
+        assert!(p.spec.endpoint_selector.match_expressions.is_empty());
+        let rule = &p.spec.ingress[0];
+        assert!(rule.from_entities.contains(&"host".to_string()));
+        assert!(rule.from_entities.contains(&"remote-node".to_string()));
+        assert!(rule.to_ports.is_empty(), "no port restriction");
+        assert!(p.spec.egress.is_empty());
     }
 
     #[test]
