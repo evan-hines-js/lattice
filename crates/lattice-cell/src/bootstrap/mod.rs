@@ -158,8 +158,14 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
         }
     }
 
-    // Join with YAML document separator
-    let yaml_output = all_manifests.join("\n---\n");
+    // Join with YAML document separator. The leading `---` is load-bearing:
+    // the first manifest is `serde_json::to_string(&LatticeCluster::crd())`
+    // — single-line JSON. Without a YAML token first, kubectl's
+    // `YAMLOrJSONDecoder.GuessJSONStream` peeks `{` and locks the stream
+    // into JSON mode, which decodes one value then chokes on the next
+    // `\n---\n` ("invalid character '-' in numeric literal"). Forcing YAML
+    // mode handles JSON-flow and block-style docs uniformly.
+    let yaml_output = format!("---\n{}\n", all_manifests.join("\n---\n"));
 
     Ok((
         [(axum::http::header::CONTENT_TYPE, "application/x-yaml")],
