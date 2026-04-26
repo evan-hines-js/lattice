@@ -41,7 +41,7 @@ use lattice_crd::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus};
 
 use lattice_common::events::{actions, reasons};
 use lattice_common::metrics::{self, ReconcileTimer};
-use lattice_common::{Error, PARENT_CONFIG_SECRET};
+use lattice_common::{ApiServerEndpoint, Error, PARENT_CONFIG_SECRET};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use crate::phases::{
@@ -177,6 +177,15 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
 
     debug!(?current_phase, is_self, "current cluster phase");
 
+    // Refresh `status.endpoint` from the canonical source on every
+    // reconcile, before phase dispatch. This is the single field every
+    // in-cluster reconciler (cilium controller, etc.) reads — keeping it
+    // current is what unblocks dependents when CAPI finishes populating
+    // `controlPlaneEndpoint`. Failure here is non-fatal: log and proceed.
+    if let Err(e) = refresh_status_endpoint(&cluster, &ctx, is_self).await {
+        warn!(error = %e, cluster = %name, "failed to refresh status.endpoint");
+    }
+
     // State machine: dispatch to phase handlers
     let result = match current_phase {
         ClusterPhase::Pending => handle_pending(&cluster, &ctx, is_self).await,
@@ -257,6 +266,39 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
     }
 
     result
+}
+
+/// Resolve the apiserver endpoint via the canonical source and patch
+/// `status.endpoint` if it differs from what's currently stored.
+///
+/// Idempotent: emits no API write when the value hasn't changed.
+/// `ctx.client` is `None` only in tests using a mock kube backend; in
+/// that case we skip the resolution entirely (the test fixture sets
+/// status.endpoint directly).
+async fn refresh_status_endpoint(
+    cluster: &LatticeCluster,
+    ctx: &Context,
+    is_self: bool,
+) -> Result<(), Error> {
+    let Some(client) = ctx.client.as_ref() else {
+        return Ok(());
+    };
+    let name = cluster.name_any();
+    let resolved = ApiServerEndpoint::resolve_for_cluster(client, &name, is_self)
+        .await?
+        .map(|ep| ep.to_host_port());
+    let current = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.endpoint.clone());
+    if current == resolved {
+        return Ok(());
+    }
+    let new_status = LatticeClusterStatus {
+        endpoint: resolved,
+        ..cluster.status.clone().unwrap_or_default()
+    };
+    ctx.kube.patch_status(&name, &new_status).await
 }
 
 /// Error policy for the cluster controller.

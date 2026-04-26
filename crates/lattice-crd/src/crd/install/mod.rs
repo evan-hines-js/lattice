@@ -196,42 +196,22 @@ impl std::fmt::Display for InstallPhase {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpgradePolicy {
-    /// Automatically roll back to the previous version on health-gate breach.
+    /// Automatically roll back to the previous version when an upgrade
+    /// fails a health gate. Currently informational — the rollback driver
+    /// (vendored prior-version manifest render + re-apply + soak) is
+    /// reserved for the upgrade-orchestrator follow-up; today the
+    /// controller simply marks a failed install `Failed` regardless of
+    /// this flag.
     #[serde(default = "super::default_true")]
     pub auto_rollback: bool,
-    /// Health signal thresholds for gating upgrade progress.
-    #[serde(default)]
-    pub health_gate: HealthGate,
 }
 
 impl Default for UpgradePolicy {
     fn default() -> Self {
         Self {
             auto_rollback: true,
-            health_gate: HealthGate::default(),
         }
     }
-}
-
-/// Health-gate settings used during upgrade verification.
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthGate {
-    /// Seconds of sustained healthy signal required before advancing a phase.
-    #[serde(default = "default_stabilization_seconds")]
-    pub stabilization_seconds: u32,
-}
-
-impl Default for HealthGate {
-    fn default() -> Self {
-        Self {
-            stabilization_seconds: default_stabilization_seconds(),
-        }
-    }
-}
-
-fn default_stabilization_seconds() -> u32 {
-    300
 }
 
 /// One install or upgrade attempt recorded in status for audit.

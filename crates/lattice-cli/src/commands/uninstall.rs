@@ -279,7 +279,13 @@ impl Uninstaller {
             &self.capi_namespace,
         )
         .await
-        .map_err(|e| Error::command_failed(e.to_string()))?;
+        .map_err(|e| Error::command_failed(e.to_string()))?
+        .ok_or_else(|| {
+            Error::command_failed(format!(
+                "CAPI Cluster {}/{} has no controlPlaneEndpoint",
+                self.capi_namespace, self.cluster_name
+            ))
+        })?;
         let server_url = format!("https://{}:{}", endpoint.host, endpoint.port);
 
         let secrets: Api<Secret> = Api::namespaced(client.clone(), &self.capi_namespace);

@@ -17,7 +17,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::ByteString;
 
 use kube::CustomResourceExt;
-use lattice_common::{OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET};
+use lattice_common::{LOCAL_SECRETS_NAMESPACE, OPERATOR_NAME, REGISTRY_CREDENTIALS_SECRET};
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_DOCKERCONFIG};
 use lattice_crd::crd::{LatticeCluster, ProviderType};
 
@@ -52,10 +52,23 @@ impl DefaultManifestGenerator {
     ) -> Result<Vec<String>, serde_json::Error> {
         let registry_creds = registry_credentials.map(|s| s.to_string());
 
-        // 1. Namespace
+        // 1. Namespaces
         let namespace = Namespace {
             metadata: ObjectMeta {
                 name: Some(LATTICE_SYSTEM_NAMESPACE.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // `lattice-secrets` ships in the bundle alongside `lattice-system`
+        // because basis-credentials, image-registry-credentials, and any
+        // other distributed secret resources land there. Without it the
+        // bootstrap kubectl loop wastes ~45s retrying with
+        // `namespaces "lattice-secrets" not found` until something else
+        // (operator's secret-provider startup) gets around to creating it.
+        let secrets_namespace = Namespace {
+            metadata: ObjectMeta {
+                name: Some(LOCAL_SECRETS_NAMESPACE.to_string()),
                 ..Default::default()
             },
             ..Default::default()
@@ -280,6 +293,7 @@ impl DefaultManifestGenerator {
         let mut manifests = vec![serde_json::to_string(&crd)?];
 
         manifests.push(serde_json::to_string(&namespace)?);
+        manifests.push(serde_json::to_string(&secrets_namespace)?);
         manifests.push(serde_json::to_string(&cert_blocklist_cm)?);
         if let Some(ref reg_secret) = registry_secret {
             manifests.push(serde_json::to_string(reg_secret)?);

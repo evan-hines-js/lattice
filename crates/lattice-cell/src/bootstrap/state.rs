@@ -74,18 +74,19 @@ pub fn capi_cluster_endpoint_resolver(client: Client) -> ApiServerEndpointResolv
     Arc::new(move |cluster_id: String| {
         let client = client.clone();
         Box::pin(async move {
-            ApiServerEndpoint::from_capi_cluster(
-                &client,
-                &cluster_id,
-                &capi_namespace(&cluster_id),
-            )
-            .await
-            .map_err(|e| {
-                BootstrapError::Internal(format!(
-                    "failed to resolve API server endpoint for {}: {}",
-                    cluster_id, e
-                ))
-            })
+            let ns = capi_namespace(&cluster_id);
+            ApiServerEndpoint::from_capi_cluster(&client, &cluster_id, &ns)
+                .await
+                .map_err(|e| {
+                    BootstrapError::Internal(format!(
+                        "failed to resolve API server endpoint for {cluster_id}: {e}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    BootstrapError::Internal(format!(
+                        "CAPI Cluster {ns}/{cluster_id} has no controlPlaneEndpoint yet"
+                    ))
+                })
         })
     })
 }

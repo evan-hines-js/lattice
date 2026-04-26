@@ -166,7 +166,9 @@ pub async fn update_status(
         phase,
         message: Some(message.to_string()),
         conditions,
-        // Preserve persistent fields
+        // Preserve persistent fields. `endpoint` is refreshed on every
+        // reconcile by `refresh_status_endpoint` in the controller's
+        // entry point; here we just preserve whatever's already there.
         worker_pools: current_status.worker_pools,
         ready_workers: current_status.ready_workers,
         ready_control_plane: current_status.ready_control_plane,

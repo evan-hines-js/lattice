@@ -1279,6 +1279,20 @@ fn generate_rke2_control_plane(
         api_server_extra_args.push(format!("advertise-address={}", vip.address));
     }
 
+    // RKE2 ships kube-proxy by default; when Cilium is running with
+    // `kubeProxyReplacement=true`, listing `kubeProxy` here makes the
+    // CAPI RKE2 provider emit `disable: ["kube-proxy"]` in
+    // /etc/rancher/rke2/config.yaml on each control-plane node, the
+    // direct equivalent of kubeadm's
+    // `init_configuration.skipPhases = ["addon/kube-proxy"]`. Without
+    // this, RKE2 stands up kube-proxy alongside Cilium kPR — the two
+    // double-program iptables/eBPF for the kubernetes ClusterIP and
+    // Cilium can't actually replace kube-proxy on RKE2 nodes.
+    let mut disabled_components = vec!["cloudController"];
+    if lattice_cilium::install::KUBE_PROXY_REPLACEMENT {
+        disabled_components.push("kubeProxy");
+    }
+
     let mut spec = serde_json::json!({
         "replicas": cp_config.replicas,
         "version": format_capi_version(config.k8s_version, &config.bootstrap),
@@ -1301,7 +1315,7 @@ fn generate_rke2_control_plane(
             "tlsSan": cp_config.cert_sans,
             "cni": "none",
             "disableComponents": {
-                "kubernetesComponents": ["cloudController"]
+                "kubernetesComponents": disabled_components
             },
             "kubeAPIServer": {
                 "extraArgs": api_server_extra_args

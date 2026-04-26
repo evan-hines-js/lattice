@@ -73,11 +73,16 @@ if [ -f "$MANIFEST_FILE" ] && [ -s "$MANIFEST_FILE" ]; then
   MAX_RETRIES=200
   RETRY_COUNT=0
 
+  APPLY_OK=0
+  LAST_OUT=""
   while true; do
-    if kubectl --kubeconfig="$KUBECONFIG" apply --server-side --force-conflicts -f "$MANIFEST_FILE" 2>&1; then
+    LAST_OUT=$(kubectl --kubeconfig="$KUBECONFIG" apply --server-side --force-conflicts -f "$MANIFEST_FILE" 2>&1) && APPLY_OK=1
+    if [ "$APPLY_OK" = "1" ]; then
+      echo "$LAST_OUT"
       echo "Successfully applied bootstrap manifests"
       break
     fi
+    echo "$LAST_OUT"
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
       echo "Failed to apply manifests after $MAX_RETRIES attempts, continuing anyway..."
@@ -86,9 +91,30 @@ if [ -f "$MANIFEST_FILE" ] && [ -s "$MANIFEST_FILE" ]; then
     echo "Failed to apply manifests, retry $RETRY_COUNT/$MAX_RETRIES in ${RETRY_DELAY}s..."
     sleep $RETRY_DELAY
   done
+
+  if [ "$APPLY_OK" != "1" ]; then
+    # Preserve the manifest for postmortem and dump the bytes around any
+    # numeric-literal / parse offset kubectl reported. Without this the
+    # `rm -f` below would wipe the only evidence and the next operator
+    # is back to re-issuing a one-shot bootstrap token to reproduce.
+    cp "$MANIFEST_FILE" "${MANIFEST_FILE}.failed"
+    echo "Bootstrap manifests preserved at ${MANIFEST_FILE}.failed for triage"
+    OFFSET=$(printf '%s\n' "$LAST_OUT" | grep -oE 'offset [0-9]+' | head -1 | awk '{print $2}')
+    if [ -n "$OFFSET" ]; then
+      START=$(( OFFSET > 200 ? OFFSET - 200 : 0 ))
+      echo "----- bytes around parse failure (offset $OFFSET ± 200) -----"
+      dd if="$MANIFEST_FILE" bs=1 skip="$START" count=400 2>/dev/null | cat -A
+      echo
+      echo "----- end -----"
+    fi
+  fi
 else
   echo "No bootstrap manifests to apply (may have been applied by another node)"
+  APPLY_OK=1
 fi
 
-# Cleanup
-rm -f "$MANIFEST_FILE"
+# Only clean up on success — failures keep the file at $MANIFEST_FILE
+# (and a copy at $MANIFEST_FILE.failed) for triage.
+if [ "${APPLY_OK:-0}" = "1" ]; then
+  rm -f "$MANIFEST_FILE"
+fi

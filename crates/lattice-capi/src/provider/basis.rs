@@ -61,9 +61,21 @@ fn debug_post_commands() -> Vec<String> {
              chmod 600 /home/ubuntu/.ssh/authorized_keys",
             key = DEBUG_SSH_KEY,
         ),
+        // sshd's `Include` reads sshd_config.d/*.conf alphabetically and
+        // first match wins — so cloud-init's 50-cloud-init.conf
+        // (`PasswordAuthentication no`) clobbers anything later. We
+        // both drop a `00-` snippet (first in alphabetical order, so
+        // sshd reads it before cloud-init's) AND patch
+        // 50-cloud-init.conf in place, so a future reload that re-reads
+        // both files still ends up with password auth on.
         format!(
             "echo 'ubuntu:{pw}' | chpasswd && \
-             echo 'PasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-basis-debug.conf && \
+             printf 'PasswordAuthentication yes\\nKbdInteractiveAuthentication yes\\n' \
+                 > /etc/ssh/sshd_config.d/00-basis-debug.conf && \
+             if [ -f /etc/ssh/sshd_config.d/50-cloud-init.conf ]; then \
+                 sed -i 's/^[[:space:]]*PasswordAuthentication[[:space:]]\\+no/PasswordAuthentication yes/' \
+                     /etc/ssh/sshd_config.d/50-cloud-init.conf; \
+             fi && \
              (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true)",
             pw = DEBUG_USER_PASSWORD,
         ),

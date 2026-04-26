@@ -75,8 +75,8 @@ pub use install::velero::{VeleroInstall, VeleroInstallSpec};
 pub use install::victoria_metrics::{VictoriaMetricsInstall, VictoriaMetricsInstallSpec};
 pub use install::volcano::{VolcanoInstall, VolcanoInstallSpec};
 pub use install::{
-    Dependency, HealthGate, InstallPhase, InstallResource, InstallSpecBase, InstallStatus,
-    Subsystem, UpgradeAttempt, UpgradeOutcome, UpgradePolicy,
+    Dependency, InstallPhase, InstallResource, InstallSpecBase, InstallStatus, Subsystem,
+    UpgradeAttempt, UpgradeOutcome, UpgradePolicy,
 };
 pub use issuer::{
     AcmeIssuerSpec, CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerSpec, CertIssuerStatus,
