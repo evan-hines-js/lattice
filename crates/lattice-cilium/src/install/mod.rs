@@ -5,7 +5,7 @@ pub mod ensure;
 pub mod manifests;
 
 pub use controller::reconcile;
-pub use ensure::{ensure_install, DEFAULT_INSTALL_NAME};
+pub use ensure::ensure_install;
 
 use lattice_crd::crd::Dependency;
 

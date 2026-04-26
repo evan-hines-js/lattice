@@ -2,20 +2,18 @@
 
 use kube::Client;
 
-use lattice_common::install::apply_cluster_resource;
+use lattice_common::install::{apply_cluster_resource, INSTALL_SINGLETON};
 use lattice_crd::crd::{
     InstallSpecBase, MetricsServerInstall, MetricsServerInstallSpec, UpgradePolicy,
 };
 
 use super::manifests;
 
-pub const DEFAULT_INSTALL_NAME: &str = "default";
-
 const FIELD_MANAGER: &str = "lattice-cluster-orchestrator";
 
 pub async fn ensure_install(client: &Client) -> Result<(), kube::Error> {
     let install = MetricsServerInstall::new(
-        DEFAULT_INSTALL_NAME,
+        INSTALL_SINGLETON,
         MetricsServerInstallSpec {
             base: InstallSpecBase {
                 version: manifests::metrics_server_version().to_string(),
@@ -24,5 +22,5 @@ pub async fn ensure_install(client: &Client) -> Result<(), kube::Error> {
             },
         },
     );
-    apply_cluster_resource(client, &install, DEFAULT_INSTALL_NAME, FIELD_MANAGER).await
+    apply_cluster_resource(client, &install, INSTALL_SINGLETON, FIELD_MANAGER).await
 }

@@ -210,7 +210,7 @@ pub async fn re_register_existing_clusters<G: ManifestGenerator>(
         let provider_type = cluster.spec.provider.config.provider_type();
         let provider = match lattice_capi::provider::create_provider(
             provider_type,
-            &lattice_common::capi_namespace(&name),
+            &lattice_common::capi_namespace(name),
         ) {
             Ok(p) => p,
             Err(e) => {

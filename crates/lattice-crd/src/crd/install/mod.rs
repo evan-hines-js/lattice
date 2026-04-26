@@ -251,6 +251,50 @@ pub struct UpgradeAttempt {
     pub failure_reason: Option<String>,
 }
 
+impl UpgradeAttempt {
+    /// Open a fresh attempt or resume an in-flight one targeting the same
+    /// version.
+    ///
+    /// When `prior` records an open attempt (no `outcome`) for the same
+    /// `to_version`, `started_at` is preserved so duration metrics span the
+    /// whole apply/wait loop instead of restarting on every reconcile. A
+    /// retarget (different `to_version`) abandons the prior open attempt
+    /// and stamps a new `started_at`.
+    pub fn started(
+        prior: Option<&Self>,
+        target_version: impl Into<String>,
+        from_version: Option<&str>,
+    ) -> Self {
+        let target_version = target_version.into();
+        let now = chrono::Utc::now().to_rfc3339();
+        let started_at = prior
+            .filter(|p| p.to_version == target_version && p.outcome.is_none())
+            .and_then(|p| p.started_at.clone())
+            .unwrap_or(now);
+        Self {
+            from_version: from_version.map(str::to_string),
+            to_version: target_version,
+            started_at: Some(started_at),
+            completed_at: None,
+            outcome: None,
+            failure_reason: None,
+        }
+    }
+
+    /// Stamp terminal fields onto an in-progress attempt.
+    ///
+    /// `failure_reason` is only meaningful for `UpgradeOutcome::Failed` /
+    /// `RolledBack`; pass `None` for `Succeeded`.
+    pub fn finished(&self, outcome: UpgradeOutcome, failure_reason: Option<String>) -> Self {
+        Self {
+            completed_at: Some(chrono::Utc::now().to_rfc3339()),
+            outcome: Some(outcome),
+            failure_reason,
+            ..self.clone()
+        }
+    }
+}
+
 /// Terminal outcome of an upgrade attempt.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
@@ -258,4 +302,83 @@ pub enum UpgradeOutcome {
     Succeeded,
     RolledBack,
     Failed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn started_records_initial_install() {
+        let a = UpgradeAttempt::started(None, "1.19.1", None);
+        assert_eq!(a.from_version, None);
+        assert_eq!(a.to_version, "1.19.1");
+        assert!(a.started_at.is_some());
+        assert_eq!(a.completed_at, None);
+        assert_eq!(a.outcome, None);
+    }
+
+    #[test]
+    fn started_records_upgrade_from_prior_observed() {
+        let a = UpgradeAttempt::started(None, "1.19.1", Some("1.18.0"));
+        assert_eq!(a.from_version.as_deref(), Some("1.18.0"));
+        assert_eq!(a.to_version, "1.19.1");
+    }
+
+    #[test]
+    fn started_preserves_timestamp_within_attempt() {
+        // Mid-flight reconcile must not reset duration metrics.
+        let prior = UpgradeAttempt {
+            from_version: Some("1.18.0".into()),
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: None,
+            outcome: None,
+            failure_reason: None,
+        };
+        let a = UpgradeAttempt::started(Some(&prior), "1.19.1", Some("1.18.0"));
+        assert_eq!(a.started_at.as_deref(), Some("2026-04-25T10:00:00Z"));
+    }
+
+    #[test]
+    fn started_resets_on_retarget() {
+        // Different to_version → fresh attempt, prior open one is abandoned.
+        let prior = UpgradeAttempt {
+            from_version: Some("1.18.0".into()),
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: None,
+            outcome: None,
+            failure_reason: None,
+        };
+        let a = UpgradeAttempt::started(Some(&prior), "1.19.2", Some("1.18.0"));
+        assert_ne!(a.started_at.as_deref(), Some("2026-04-25T10:00:00Z"));
+        assert_eq!(a.to_version, "1.19.2");
+    }
+
+    #[test]
+    fn finished_stamps_terminal_fields() {
+        let started = UpgradeAttempt {
+            from_version: Some("1.18.0".into()),
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: None,
+            outcome: None,
+            failure_reason: None,
+        };
+        let done = started.finished(UpgradeOutcome::Succeeded, None);
+        assert_eq!(done.outcome, Some(UpgradeOutcome::Succeeded));
+        assert!(done.completed_at.is_some());
+        assert_eq!(done.from_version.as_deref(), Some("1.18.0"));
+
+        let failed = started.finished(
+            UpgradeOutcome::Failed,
+            Some("readiness gate failed".into()),
+        );
+        assert_eq!(failed.outcome, Some(UpgradeOutcome::Failed));
+        assert_eq!(
+            failed.failure_reason.as_deref(),
+            Some("readiness gate failed"),
+        );
+    }
 }

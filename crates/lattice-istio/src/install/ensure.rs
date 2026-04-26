@@ -6,12 +6,10 @@
 
 use kube::Client;
 
-use lattice_common::install::apply_cluster_resource;
+use lattice_common::install::{apply_cluster_resource, INSTALL_SINGLETON};
 use lattice_crd::crd::{InstallSpecBase, IstioInstall, IstioInstallSpec, UpgradePolicy};
 
 use super::manifests;
-
-pub const DEFAULT_INSTALL_NAME: &str = "default";
 
 const FIELD_MANAGER: &str = "lattice-cluster-orchestrator";
 
@@ -21,7 +19,7 @@ pub async fn ensure_install(
     remote_networks: Option<Vec<String>>,
 ) -> Result<(), kube::Error> {
     let install = IstioInstall::new(
-        DEFAULT_INSTALL_NAME,
+        INSTALL_SINGLETON,
         IstioInstallSpec {
             base: InstallSpecBase {
                 version: manifests::istio_version().to_string(),
@@ -32,5 +30,5 @@ pub async fn ensure_install(
             remote_networks,
         },
     );
-    apply_cluster_resource(client, &install, DEFAULT_INSTALL_NAME, FIELD_MANAGER).await
+    apply_cluster_resource(client, &install, INSTALL_SINGLETON, FIELD_MANAGER).await
 }

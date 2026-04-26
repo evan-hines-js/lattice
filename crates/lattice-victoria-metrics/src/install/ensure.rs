@@ -2,14 +2,12 @@
 
 use kube::Client;
 
-use lattice_common::install::apply_cluster_resource;
+use lattice_common::install::{apply_cluster_resource, INSTALL_SINGLETON};
 use lattice_crd::crd::{
     InstallSpecBase, UpgradePolicy, VictoriaMetricsInstall, VictoriaMetricsInstallSpec,
 };
 
 use super::manifests;
-
-pub const DEFAULT_INSTALL_NAME: &str = "default";
 
 const FIELD_MANAGER: &str = "lattice-cluster-orchestrator";
 
@@ -19,7 +17,7 @@ const FIELD_MANAGER: &str = "lattice-cluster-orchestrator";
 /// controller reads it back off the CR spec to pick the chart variant.
 pub async fn ensure_install(client: &Client, ha: bool) -> Result<(), kube::Error> {
     let install = VictoriaMetricsInstall::new(
-        DEFAULT_INSTALL_NAME,
+        INSTALL_SINGLETON,
         VictoriaMetricsInstallSpec {
             base: InstallSpecBase {
                 version: manifests::victoria_metrics_version().to_string(),
@@ -29,5 +27,5 @@ pub async fn ensure_install(client: &Client, ha: bool) -> Result<(), kube::Error
             ha,
         },
     );
-    apply_cluster_resource(client, &install, DEFAULT_INSTALL_NAME, FIELD_MANAGER).await
+    apply_cluster_resource(client, &install, INSTALL_SINGLETON, FIELD_MANAGER).await
 }

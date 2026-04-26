@@ -399,7 +399,8 @@ where
         InstallPhase::Installing
     };
     let prior_attempt = install.install_status().and_then(|s| s.last_upgrade.clone());
-    let started_attempt = start_attempt(prior_attempt.as_ref(), &version, prior_observed.as_deref());
+    let started_attempt =
+        UpgradeAttempt::started(prior_attempt.as_ref(), &version, prior_observed.as_deref());
 
     info!(
         install = %name, kind = %log_kind,
@@ -417,17 +418,13 @@ where
 
     if let Err(e) = apply_manifests(&ctx.client, &manifests, &ApplyOptions::default()).await {
         warn!(install = %name, kind = %log_kind, error = %e, "install apply failed");
-        let failed_attempt = finish_attempt(
-            &started_attempt,
-            UpgradeOutcome::Failed,
-            Some(format!("apply failed: {e}")),
-        );
+        let failed = started_attempt
+            .finished(UpgradeOutcome::Failed, Some(format!("apply failed: {e}")));
         write_with_td(
             &ctx.client,
             install_ref,
             field_manager,
-            StatusUpdate::failed(format!("apply failed: {e}"))
-                .with_last_upgrade(failed_attempt),
+            StatusUpdate::failed(format!("apply failed: {e}")).with_last_upgrade(failed),
             td,
         )
         .await?;
@@ -437,13 +434,12 @@ where
     match readiness.run(&ctx.client).await {
         Ok(()) => {
             info!(install = %name, kind = %log_kind, version = %version, "install Ready");
-            let succeeded_attempt =
-                finish_attempt(&started_attempt, UpgradeOutcome::Succeeded, None);
+            let succeeded = started_attempt.finished(UpgradeOutcome::Succeeded, None);
             write_with_td(
                 &ctx.client,
                 install_ref,
                 field_manager,
-                StatusUpdate::ready(&version).with_last_upgrade(succeeded_attempt),
+                StatusUpdate::ready(&version).with_last_upgrade(succeeded),
                 td,
             )
             .await?;
@@ -451,8 +447,7 @@ where
         }
         Err(e) => {
             warn!(install = %name, kind = %log_kind, error = %e, "install readiness gate failed");
-            let failed_attempt = finish_attempt(
-                &started_attempt,
+            let failed = started_attempt.finished(
                 UpgradeOutcome::Failed,
                 Some(format!("readiness gate failed: {e}")),
             );
@@ -461,51 +456,12 @@ where
                 install_ref,
                 field_manager,
                 StatusUpdate::failed(format!("readiness gate failed: {e}"))
-                    .with_last_upgrade(failed_attempt),
+                    .with_last_upgrade(failed),
                 td,
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
-    }
-}
-
-/// Build the in-progress `UpgradeAttempt` for an install/upgrade.
-///
-/// Reuses `started_at` when a prior open attempt targets the same version,
-/// so multi-reconcile installs (re-apply / readiness re-check) record one
-/// continuous attempt instead of restarting the clock each loop.
-fn start_attempt(
-    prior: Option<&UpgradeAttempt>,
-    target_version: &str,
-    from_version: Option<&str>,
-) -> UpgradeAttempt {
-    let now = chrono::Utc::now().to_rfc3339();
-    let started_at = prior
-        .filter(|p| p.to_version == target_version && p.outcome.is_none())
-        .and_then(|p| p.started_at.clone())
-        .unwrap_or(now);
-    UpgradeAttempt {
-        from_version: from_version.map(str::to_string),
-        to_version: target_version.to_string(),
-        started_at: Some(started_at),
-        completed_at: None,
-        outcome: None,
-        failure_reason: None,
-    }
-}
-
-/// Stamp the terminal fields onto an in-progress attempt.
-fn finish_attempt(
-    started: &UpgradeAttempt,
-    outcome: UpgradeOutcome,
-    failure_reason: Option<String>,
-) -> UpgradeAttempt {
-    UpgradeAttempt {
-        completed_at: Some(chrono::Utc::now().to_rfc3339()),
-        outcome: Some(outcome),
-        failure_reason,
-        ..started.clone()
     }
 }
 
@@ -544,8 +500,10 @@ where
 // controller also `.watches()` the CRDs of its dependencies, so a dependency
 // flipping to Ready re-fires this controller immediately.
 
-/// Singleton install CR name. Each `*Install` kind has exactly one instance.
-const INSTALL_SINGLETON: &str = "default";
+/// Name of the singleton CR every `*Install` kind has. Each cluster runs
+/// exactly one instance per managed dependency, so the install CRs are
+/// effectively singletons keyed by their kind.
+pub const INSTALL_SINGLETON: &str = "default";
 
 /// Condition `type` published when `spec.requires` blocks an upgrade.
 pub const COND_UPGRADE_BLOCKED: &str = "UpgradeBlocked";
@@ -732,83 +690,6 @@ mod tests {
         let err = evaluate_dependency(&dep(Subsystem::Cilium, ">=1.31"), Some("v1.31"))
             .expect_err("should block");
         assert!(err.contains("unparsable version"));
-    }
-
-    #[test]
-    fn start_attempt_records_initial_install() {
-        // No prior attempt + no prior observed_version → fresh install,
-        // from_version is None.
-        let a = start_attempt(None, "1.19.1", None);
-        assert_eq!(a.from_version, None);
-        assert_eq!(a.to_version, "1.19.1");
-        assert!(a.started_at.is_some());
-        assert_eq!(a.completed_at, None);
-        assert_eq!(a.outcome, None);
-    }
-
-    #[test]
-    fn start_attempt_records_upgrade_from_prior() {
-        // Prior observed 1.18.0 → upgrading to 1.19.1.
-        let a = start_attempt(None, "1.19.1", Some("1.18.0"));
-        assert_eq!(a.from_version.as_deref(), Some("1.18.0"));
-        assert_eq!(a.to_version, "1.19.1");
-    }
-
-    #[test]
-    fn start_attempt_preserves_started_at_within_attempt() {
-        // A reconcile mid-install should keep the original started_at —
-        // otherwise duration metrics restart on every loop.
-        let prior = UpgradeAttempt {
-            from_version: Some("1.18.0".into()),
-            to_version: "1.19.1".into(),
-            started_at: Some("2026-04-25T10:00:00Z".into()),
-            completed_at: None,
-            outcome: None,
-            failure_reason: None,
-        };
-        let a = start_attempt(Some(&prior), "1.19.1", Some("1.18.0"));
-        assert_eq!(a.started_at.as_deref(), Some("2026-04-25T10:00:00Z"));
-    }
-
-    #[test]
-    fn start_attempt_resets_when_target_changes() {
-        // User retargets to 1.19.2 mid-flight → new attempt, fresh
-        // started_at, prior open attempt is abandoned.
-        let prior = UpgradeAttempt {
-            from_version: Some("1.18.0".into()),
-            to_version: "1.19.1".into(),
-            started_at: Some("2026-04-25T10:00:00Z".into()),
-            completed_at: None,
-            outcome: None,
-            failure_reason: None,
-        };
-        let a = start_attempt(Some(&prior), "1.19.2", Some("1.18.0"));
-        assert_ne!(a.started_at.as_deref(), Some("2026-04-25T10:00:00Z"));
-        assert_eq!(a.to_version, "1.19.2");
-    }
-
-    #[test]
-    fn finish_attempt_stamps_terminal_fields() {
-        let started = UpgradeAttempt {
-            from_version: Some("1.18.0".into()),
-            to_version: "1.19.1".into(),
-            started_at: Some("2026-04-25T10:00:00Z".into()),
-            completed_at: None,
-            outcome: None,
-            failure_reason: None,
-        };
-        let done = finish_attempt(&started, UpgradeOutcome::Succeeded, None);
-        assert_eq!(done.outcome, Some(UpgradeOutcome::Succeeded));
-        assert!(done.completed_at.is_some());
-        assert_eq!(done.from_version.as_deref(), Some("1.18.0"));
-
-        let failed = finish_attempt(
-            &started,
-            UpgradeOutcome::Failed,
-            Some("readiness gate failed".into()),
-        );
-        assert_eq!(failed.outcome, Some(UpgradeOutcome::Failed));
-        assert_eq!(failed.failure_reason.as_deref(), Some("readiness gate failed"));
     }
 
     #[test]

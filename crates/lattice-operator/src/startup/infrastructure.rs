@@ -80,7 +80,7 @@ pub async fn ensure_capi_infrastructure(
             // is what the in-cluster basis-capi-provider needs so every
             // child it creates becomes a descendant in the same basis tree.
             let basis_self_cluster_id = if provider_type == ProviderType::Basis {
-                read_self_basis_cluster_id(client, &c).await?
+                read_self_basis_cluster_id(client, c).await?
             } else {
                 None
             };

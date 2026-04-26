@@ -173,6 +173,61 @@ impl SpawnContext {
 }
 
 impl SpawnContext {
+    /// Shared scaffolding for [`Self::spawn_provider`] and
+    /// [`Self::spawn_install`]: jitter sleep, CRD readiness wait,
+    /// `ControllerContext` build, leader-loop wiring. The `build` closure
+    /// produces the actual `Controller<K>` (with whatever `.watches()` it
+    /// needs) given a fresh `Client`.
+    fn spawn_with_controller<K, ReconcileFut, Err, Build>(
+        &self,
+        lease: &'static str,
+        reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
+        label: &'static str,
+        build: Build,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        ReconcileFut:
+            Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
+        Err: std::error::Error + lattice_common::Retryable + Send + 'static,
+        Build: Fn(&Client) -> Controller<K> + Clone + Send + Sync + 'static,
+    {
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let jitter = self.next_jitter();
+        tokio::spawn(leader_controller(
+            self.client.clone(),
+            self.pod_name.clone(),
+            lease,
+            self.cancel.clone(),
+            false,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                let build = build.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(jitter).await;
+                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
+                    let ctx = Arc::new(lattice_common::ControllerContext::new(
+                        client.clone(),
+                        config,
+                    ));
+                    build(&client)
+                        .shutdown_on_signal()
+                        .run(reconcile_fn, lattice_common::default_error_policy, ctx)
+                        .for_each(log_reconcile_result(label))
+                        .await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            },
+        ))
+    }
+
     /// Spawn a simple provider controller with its own lease and CRD readiness wait.
     pub fn spawn_provider<K, ReconcileFut, Err>(
         &self,
@@ -192,29 +247,12 @@ impl SpawnContext {
             Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
         Err: std::error::Error + lattice_common::Retryable + Send + 'static,
     {
-        let client = self.client.clone();
-        let config = self.config.clone();
-        let jitter = self.next_jitter();
-        tokio::spawn(leader_controller(
-            self.client.clone(),
-            self.pod_name.clone(),
-            lease,
-            self.cancel.clone(),
-            false,
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                Box::pin(async move {
-                    tokio::time::sleep(jitter).await;
-                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
-                    let ctx = Arc::new(lattice_common::ControllerContext::new(
-                        client.clone(),
-                        config,
-                    ));
-                    simple_controller(Api::<K>::all(client), reconcile_fn, ctx, label).await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            },
-        ))
+        self.spawn_with_controller(lease, reconcile_fn, label, |client| {
+            Controller::new(
+                Api::<K>::all(client.clone()),
+                WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+            )
+        })
     }
 
     /// Spawn an install controller that also reconciles when a dependency
@@ -250,42 +288,17 @@ impl SpawnContext {
             Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
         Err: std::error::Error + lattice_common::Retryable + Send + 'static,
     {
-        let client = self.client.clone();
-        let config = self.config.clone();
-        let jitter = self.next_jitter();
         let dep_subsystems: Vec<Subsystem> = requires.into_iter().map(|d| d.subsystem).collect();
-        tokio::spawn(leader_controller(
-            self.client.clone(),
-            self.pod_name.clone(),
-            lease,
-            self.cancel.clone(),
-            false,
-            move || {
-                let client = client.clone();
-                let config = config.clone();
-                let dep_subsystems = dep_subsystems.clone();
-                Box::pin(async move {
-                    tokio::time::sleep(jitter).await;
-                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
-                    let ctx = Arc::new(lattice_common::ControllerContext::new(
-                        client.clone(),
-                        config,
-                    ));
-                    let mut controller = Controller::new(
-                        Api::<K>::all(client.clone()),
-                        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
-                    );
-                    for dep in &dep_subsystems {
-                        controller = add_install_dep_watch::<K>(controller, *dep, &client);
-                    }
-                    let fut = controller
-                        .shutdown_on_signal()
-                        .run(reconcile_fn, lattice_common::default_error_policy, ctx)
-                        .for_each(log_reconcile_result(label));
-                    fut.await;
-                }) as Pin<Box<dyn Future<Output = ()> + Send>>
-            },
-        ))
+        self.spawn_with_controller(lease, reconcile_fn, label, move |client| {
+            let mut controller = Controller::new(
+                Api::<K>::all(client.clone()),
+                WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+            );
+            for dep in &dep_subsystems {
+                controller = add_install_dep_watch::<K>(controller, *dep, client);
+            }
+            controller
+        })
     }
 
     /// Spawn a workload controller (Service, Job, or Model) with its own lease.
@@ -520,7 +533,7 @@ where
             controller.watches(
                 Api::<$kind>::all(client.clone()),
                 watcher_config(),
-                |_| std::iter::once(ObjectRef::<K>::new("default")),
+                |_| std::iter::once(ObjectRef::<K>::new(lattice_common::install::INSTALL_SINGLETON)),
             )
         };
     }
