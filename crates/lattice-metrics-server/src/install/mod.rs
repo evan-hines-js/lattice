@@ -6,3 +6,11 @@ pub mod manifests;
 
 pub use controller::reconcile;
 pub use ensure::{ensure_install, DEFAULT_INSTALL_NAME};
+
+use lattice_crd::crd::{Dependency, Subsystem};
+
+/// `MetricsServerInstall.spec.requires`. Needs CNI to scrape kubelet
+/// `/metrics` over pod networking.
+pub fn install_requires() -> Vec<Dependency> {
+    vec![Dependency::new(Subsystem::Cilium, ">=1.18, <2")]
+}

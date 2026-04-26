@@ -72,6 +72,17 @@ pub struct Dependency {
     pub version_constraint: String,
 }
 
+impl Dependency {
+    /// Construct a `Dependency` with a `&str` constraint, mirroring the
+    /// shape every install crate's `install_requires()` uses.
+    pub fn new(subsystem: Subsystem, version_constraint: impl Into<String>) -> Self {
+        Self {
+            subsystem,
+            version_constraint: version_constraint.into(),
+        }
+    }
+}
+
 /// Identifies a managed-dependency subsystem.
 ///
 /// One variant per Install CRD kind. Used in `Dependency::subsystem` so

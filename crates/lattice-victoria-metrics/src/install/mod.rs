@@ -7,3 +7,14 @@ pub mod policies;
 
 pub use controller::reconcile;
 pub use ensure::{ensure_install, DEFAULT_INSTALL_NAME};
+
+use lattice_crd::crd::{Dependency, Subsystem};
+
+/// `VictoriaMetricsInstall.spec.requires`. Needs CNI for scraping pod
+/// targets and cert-manager for the vmoperator webhook cert.
+pub fn install_requires() -> Vec<Dependency> {
+    vec![
+        Dependency::new(Subsystem::Cilium, ">=1.18, <2"),
+        Dependency::new(Subsystem::CertManager, ">=1.18, <2"),
+    ]
+}

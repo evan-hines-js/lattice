@@ -24,7 +24,7 @@ pub async fn ensure_install(client: &Client, ha: bool) -> Result<(), kube::Error
             base: InstallSpecBase {
                 version: manifests::victoria_metrics_version().to_string(),
                 upgrade_policy: UpgradePolicy::default(),
-                requires: Vec::new(),
+                requires: super::install_requires(),
             },
             ha,
         },

@@ -26,11 +26,11 @@ use lattice_common::{CrdRegistry, LeaderElector};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_cost::CostProvider;
 use lattice_crd::crd::{
-    CedarPolicy, CertManagerInstall, CiliumInstall, ClusterConfig, ESOInstall, GpuOperatorInstall,
-    IstioInstall, KedaInstall, KthenaInstall, LatticeCluster, LatticeClusterRoutes, LatticeJob,
-    LatticeMeshMember, LatticeModel, LatticeService, MetricsServerInstall, MonitoringConfig,
-    ProviderType, RookInstall, Subsystem, TetragonInstall, VeleroInstall, VictoriaMetricsInstall,
-    VolcanoInstall,
+    CedarPolicy, CertManagerInstall, CiliumInstall, ClusterConfig, Dependency, ESOInstall,
+    GpuOperatorInstall, IstioInstall, KedaInstall, KthenaInstall, LatticeCluster,
+    LatticeClusterRoutes, LatticeJob, LatticeMeshMember, LatticeModel, LatticeService,
+    MetricsServerInstall, MonitoringConfig, ProviderType, RookInstall, Subsystem, TetragonInstall,
+    VeleroInstall, VictoriaMetricsInstall, VolcanoInstall,
 };
 use lattice_graph::ServiceGraph;
 use lattice_mesh_member::controller as mesh_member_ctrl;
@@ -220,22 +220,23 @@ impl SpawnContext {
     /// Spawn an install controller that also reconciles when a dependency
     /// Install CR changes.
     ///
-    /// This is the same shape as [`Self::spawn_provider`] plus a
-    /// `.watches()` per `dep` so the controller wakes up immediately when a
-    /// peer subsystem reports a new `status.observedVersion` — that's what
-    /// makes the cross-subsystem `spec.requires` gating in
+    /// Same shape as [`Self::spawn_provider`] plus a `.watches()` per
+    /// dependency so the controller wakes up immediately when a peer
+    /// subsystem reports a new `status.observedVersion` — that's what makes
+    /// the cross-subsystem `spec.requires` gating in
     /// `run_simple_install_reconcile` resolve in one sweep instead of
     /// idling on the requeue timer.
     ///
-    /// `deps` is a static list (we don't have dynamic subsystem
-    /// registration) and should mirror the values that controllers put
-    /// into their CR's `spec.requires`.
+    /// `requires` is the same list each crate's `install_requires()` puts
+    /// into the CR's `spec.requires`; only the `Subsystem` half is consumed
+    /// here (for typed watches), but accepting the full `Dependency` keeps
+    /// each crate's wiring to a single source of truth.
     pub fn spawn_install<K, ReconcileFut, Err>(
         &self,
         lease: &'static str,
         reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
         label: &'static str,
-        deps: &'static [Subsystem],
+        requires: Vec<Dependency>,
     ) -> tokio::task::JoinHandle<()>
     where
         K: kube::Resource<DynamicType = ()>
@@ -252,6 +253,7 @@ impl SpawnContext {
         let client = self.client.clone();
         let config = self.config.clone();
         let jitter = self.next_jitter();
+        let dep_subsystems: Vec<Subsystem> = requires.into_iter().map(|d| d.subsystem).collect();
         tokio::spawn(leader_controller(
             self.client.clone(),
             self.pod_name.clone(),
@@ -261,6 +263,7 @@ impl SpawnContext {
             move || {
                 let client = client.clone();
                 let config = config.clone();
+                let dep_subsystems = dep_subsystems.clone();
                 Box::pin(async move {
                     tokio::time::sleep(jitter).await;
                     lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
@@ -272,7 +275,7 @@ impl SpawnContext {
                         Api::<K>::all(client.clone()),
                         WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
                     );
-                    for dep in deps {
+                    for dep in &dep_subsystems {
                         controller = add_install_dep_watch::<K>(controller, *dep, &client);
                     }
                     let fut = controller

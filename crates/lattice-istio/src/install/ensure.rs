@@ -7,9 +7,7 @@
 use kube::Client;
 
 use lattice_common::install::apply_cluster_resource;
-use lattice_crd::crd::{
-    Dependency, InstallSpecBase, IstioInstall, IstioInstallSpec, Subsystem, UpgradePolicy,
-};
+use lattice_crd::crd::{InstallSpecBase, IstioInstall, IstioInstallSpec, UpgradePolicy};
 
 use super::manifests;
 
@@ -28,14 +26,7 @@ pub async fn ensure_install(
             base: InstallSpecBase {
                 version: manifests::istio_version().to_string(),
                 upgrade_policy: UpgradePolicy::default(),
-                // Istio's ambient dataplane runs on top of Cilium's eBPF
-                // routing — istiod can't program endpoints until the CNI
-                // is observed-Ready. Permissive constraint for now;
-                // tighten once the compatibility matrix is encoded.
-                requires: vec![Dependency {
-                    subsystem: Subsystem::Cilium,
-                    version_constraint: ">=1.0".into(),
-                }],
+                requires: super::install_requires(),
             },
             cluster_name: cluster_name.to_string(),
             remote_networks,

@@ -40,7 +40,7 @@ use lattice_common::{
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
-    LatticeQuota, LatticeService, OIDCProvider, Subsystem,
+    LatticeQuota, LatticeService, OIDCProvider,
 };
 use lattice_graph::ServiceGraph;
 use lattice_operator::agent::start_agent_with_retry;
@@ -559,67 +559,83 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_backup::service_backup_controller::reconcile,
         "ServiceBackup",
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "tetragon-install",
         lattice_tetragon::install::reconcile,
         "TetragonInstall",
+        lattice_tetragon::install::install_requires(),
     );
-    ctx.spawn_provider("eso-install", lattice_eso::install::reconcile, "ESOInstall");
-    ctx.spawn_provider(
+    ctx.spawn_install(
+        "eso-install",
+        lattice_eso::install::reconcile,
+        "ESOInstall",
+        lattice_eso::install::install_requires(),
+    );
+    ctx.spawn_install(
         "cert-manager-install",
         lattice_cert_manager::install::reconcile,
         "CertManagerInstall",
+        lattice_cert_manager::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "volcano-install",
         lattice_volcano::install::reconcile,
         "VolcanoInstall",
+        lattice_volcano::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "cilium-install",
         lattice_cilium::install::reconcile,
         "CiliumInstall",
+        lattice_cilium::install::install_requires(),
     );
     ctx.spawn_install(
         "istio-install",
         lattice_istio::install::reconcile,
         "IstioInstall",
-        &[Subsystem::Cilium],
+        lattice_istio::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "metrics-server-install",
         lattice_metrics_server::install::reconcile,
         "MetricsServerInstall",
+        lattice_metrics_server::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "velero-install",
         lattice_velero::install::reconcile,
         "VeleroInstall",
+        lattice_velero::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "keda-install",
         lattice_keda::install::reconcile,
         "KedaInstall",
+        lattice_keda::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "gpu-operator-install",
         lattice_gpu_operator::install::reconcile,
         "GpuOperatorInstall",
+        lattice_gpu_operator::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "kthena-install",
         lattice_kthena::install::reconcile,
         "KthenaInstall",
+        lattice_kthena::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "victoria-metrics-install",
         lattice_victoria_metrics::install::reconcile,
         "VictoriaMetricsInstall",
+        lattice_victoria_metrics::install::install_requires(),
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "rook-install",
         lattice_rook::install::reconcile,
         "RookInstall",
+        lattice_rook::install::install_requires(),
     );
 
     // ── Wait for shutdown signal ──

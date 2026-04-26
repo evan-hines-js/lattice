@@ -18,7 +18,7 @@ pub async fn ensure_install(client: &Client) -> Result<(), kube::Error> {
             base: InstallSpecBase {
                 version: manifests::tetragon_version().to_string(),
                 upgrade_policy: UpgradePolicy::default(),
-                requires: Vec::new(),
+                requires: super::install_requires(),
             },
         },
     );

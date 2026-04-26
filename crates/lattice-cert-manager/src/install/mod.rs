@@ -7,6 +7,14 @@ pub mod manifests;
 pub use controller::reconcile;
 pub use ensure::{ensure_install, DEFAULT_INSTALL_NAME};
 
+use lattice_crd::crd::{Dependency, Subsystem};
+
+/// `CertManagerInstall.spec.requires`. Webhooks + the startup-apicheck
+/// Job need pod networking, so the CNI must be up.
+pub fn install_requires() -> Vec<Dependency> {
+    vec![Dependency::new(Subsystem::Cilium, ">=1.18, <2")]
+}
+
 use std::time::Duration;
 
 use kube::Client;
