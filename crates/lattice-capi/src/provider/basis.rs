@@ -30,7 +30,8 @@ use super::{
 use crate::constants::{BASIS_API_VERSION, BASIS_VIP_INTERFACE, INFRASTRUCTURE_API_GROUP};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
 use lattice_crd::crd::{
-    BasisConfig, BootstrapProvider, InstanceType, LatticeCluster, ProviderSpec, ProviderType,
+    BasisConfig, BootstrapProvider, InstanceType, LatticeCluster, PlacementSpec, ProviderSpec,
+    ProviderType,
 };
 
 /// Hardcoded debug SSH key, appended to `ubuntu`'s `authorized_keys` on
@@ -209,6 +210,7 @@ impl BasisProvider {
         sizing: MachineSizing,
         image: &str,
         suffix: &str,
+        placement: Option<&PlacementSpec>,
     ) -> CAPIManifest {
         let mut spec = serde_json::json!({
             "cpu": sizing.cpu,
@@ -218,6 +220,14 @@ impl BasisProvider {
         });
         if !sizing.data_disk_gibs.is_empty() {
             spec["extraDiskGibs"] = serde_json::json!(sizing.data_disk_gibs);
+        }
+        if let Some(p) = placement.filter(|p| !p.requires.is_empty() || !p.prefers.is_empty()) {
+            // Lattice's `PlacementSpec` is field-for-field identical to
+            // BasisMachine's, so a direct serde round-trip is the
+            // canonical mapping — no per-field copy that would drift
+            // when basis adds an op-type or weight knob.
+            spec["placement"] = serde_json::to_value(p)
+                .expect("PlacementSpec serializes to JSON infallibly");
         }
         CAPIManifest::new(
             BASIS_API_VERSION,
@@ -263,7 +273,13 @@ impl Provider for BasisProvider {
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_basis_cluster(cluster)?,
-            self.generate_machine_template(name, cp_sizing, &image, "control-plane"),
+            self.generate_machine_template(
+                name,
+                cp_sizing,
+                &image,
+                "control-plane",
+                spec.nodes.control_plane.placement.as_ref(),
+            ),
         ];
 
         // KubeadmControlPlane carries kube-vip's static pod manifest
@@ -323,7 +339,13 @@ impl Provider for BasisProvider {
                 &infra,
                 &pool_config,
             ));
-            manifests.push(self.generate_machine_template(name, worker_sizing, &image, &suffix));
+            manifests.push(self.generate_machine_template(
+                name,
+                worker_sizing,
+                &image,
+                &suffix,
+                pool_spec.placement.as_ref(),
+            ));
             let mut wp_template = generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
@@ -445,7 +467,7 @@ mod tests {
                             sockets: 1,
                             data_disk_gibs: Vec::new(),
                         })),
-                        root_volume: None,
+                        ..Default::default()
                     },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),

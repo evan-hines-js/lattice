@@ -1,0 +1,22 @@
+# Rook-Ceph storage for the backend cluster.
+#
+# Sized for the 3-worker backend fixture: failureDomain=host with
+# replication=3 places one replica per worker, mon.count=3 forms a
+# real quorum (one mon per worker). Each worker contributes its
+# /dev/vdc (the dataDiskGibs[0] disk) as a single OSD.
+#
+# defaultStorageClass=true makes `rook-ceph-block` the cluster default;
+# the RookInstall controller demotes any other default StorageClass
+# (e.g. local-path-provisioner's `standard`) on apply so the cluster
+# ends up with exactly one default.
+apiVersion: lattice.dev/v1alpha1
+kind: RookInstall
+metadata:
+  name: default
+spec:
+  version: "1.18.0"
+  replication: 3
+  monCount: 3
+  failureDomain: host
+  encryptOsds: true
+  defaultStorageClass: true

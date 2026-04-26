@@ -452,8 +452,7 @@ mod tests {
                 nodes: NodeSpec {
                     control_plane: ControlPlaneSpec {
                         replicas: 1,
-                        instance_type: None,
-                        root_volume: None,
+                        ..Default::default()
                     },
                     worker_pools,
                 },

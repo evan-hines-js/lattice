@@ -503,7 +503,7 @@ mod tests {
                             sockets: 1,
                             data_disk_gibs: Vec::new(),
                         })),
-                        root_volume: None,
+                        ..Default::default()
                     },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),

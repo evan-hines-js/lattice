@@ -41,7 +41,7 @@ const DEVICE_FILTER: &str = "^vd[c-z]$";
 /// Annotation that marks a StorageClass as the cluster default. Kubernetes
 /// enforces at most one default; the controller clears the annotation on
 /// any existing default before applying this one.
-const DEFAULT_SC_ANNOTATION: &str = "storageclass.kubernetes.io/is-default-class";
+pub const DEFAULT_SC_ANNOTATION: &str = "storageclass.kubernetes.io/is-default-class";
 
 static OPERATOR_MANIFESTS: LazyLock<Vec<String>> = LazyLock::new(|| {
     split_yaml_documents(include_str!(concat!(

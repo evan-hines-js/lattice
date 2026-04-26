@@ -35,6 +35,9 @@ spec:
         cores: 16
         memoryGib: 32
         diskGib: 50
+      placement:
+        prefers:
+          - { key: tier, value: fast, weight: 100 }
     workerPools:
       default:
         replicas: 1
@@ -42,3 +45,6 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
+        placement:
+          requires:
+            - { key: tier, values: [slow] }

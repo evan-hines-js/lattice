@@ -13,31 +13,17 @@ spec:
     enabled: false
   backups:
     enabled: false
-  providerRef: proxmox
+  providerRef: basis
   provider:
     kubernetes:
       version: "1.32.0"
       bootstrap: kubeadm
     config:
-      proxmox:
-        sshAuthorizedKeys:
-          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com"
-        sourceNode: "poweredge-lg"
-        templateId: 9000
-        controlPlaneEndpoint: "10.0.0.100"
-        bridge: "vmbr0"
-        ipv4Pool:
-          range: "10.0.0.101-105/24"
-          gateway: "10.0.0.1"
-        dnsServers:
-          - "10.0.0.1"
-        virtualIpNetworkInterface: "ens18"
-        lbCidr: "10.0.0.200/28"
-        additionalNetworks:
-          - bridge: "vmbr1"
-            ipv4Pool:
-              range: "10.0.1.201-210/24"
-              gateway: "10.0.1.1"
+      basis:
+        # Edge sits at the LAN boundary — apiserver VIP and the Cilium
+        # LoadBalancer block (which fronts haproxy-fw) come from a pool
+        # that's reachable from LAN clients.
+        externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"
@@ -63,3 +49,34 @@ spec:
     bootstrapPort: 8443
     service:
       type: LoadBalancer
+---
+# InfraProvider referenced by spec.providerRef above.
+# `credentials.id: basis-credentials` points at the Secret the installer seeds
+# from BASIS_CONTROLLER_URL / BASIS_CLIENT_CERT / BASIS_CLIENT_KEY / BASIS_CA_CERT.
+# Replace serverUrl with your Basis controller's gRPC endpoint.
+apiVersion: lattice.dev/v1alpha1
+kind: InfraProvider
+metadata:
+  name: basis
+  namespace: lattice-system
+spec:
+  type: basis
+  credentials:
+    id: basis-credentials
+    provider: lattice-local
+  basis:
+    serverUrl: "https://10.0.0.206:7443"
+  imagePullSecrets:
+    - name: default
+---
+apiVersion: lattice.dev/v1alpha1
+kind: ImageProvider
+metadata:
+  name: default
+  namespace: lattice-system
+spec:
+  type: ghcr
+  registry: ghcr.io
+  credentials:
+    id: image-registry-credentials
+    provider: lattice-local

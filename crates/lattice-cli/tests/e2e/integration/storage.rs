@@ -86,12 +86,25 @@ pub async fn run_storage_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Storage] Writing persistence marker...");
     write_marker(kubeconfig).await?;
 
-    info!("[Storage] Deleting writer pod, waiting for replacement...");
-    delete_writer_pod(kubeconfig).await?;
-    wait_for_pod_running(kubeconfig, NAMESPACE, POD_LABEL_SELECTOR).await?;
+    // Cordon the writer's node so the replacement pod is forced onto the
+    // other worker. Without this the scheduler usually keeps the pod on
+    // its original host (the RBD volume is already attached there), so a
+    // successful read only proves "RBD detach/reattach works" — not that
+    // the replica on the other host is consistent. By forcing CSI to
+    // attach the RBD on a different host we exercise the cross-host read
+    // path that replication=2/failure_domain=host is supposed to provide.
+    let original_node = pod_node(kubeconfig).await?;
+    info!("[Storage] Cordoning writer node {original_node} to force reschedule onto replica host...");
+    cordon_node(kubeconfig, &original_node).await?;
 
-    info!("[Storage] Verifying marker survived pod restart...");
-    verify_marker(kubeconfig).await?;
+    let persistence_result = run_persistence_check(kubeconfig, &original_node).await;
+
+    // Always uncordon, even on failure — leaving a node cordoned would
+    // poison whatever runs next on this fixture.
+    if let Err(e) = uncordon_node(kubeconfig, &original_node).await {
+        info!("[Storage] uncordon of {original_node} failed: {e}");
+    }
+    persistence_result?;
 
     // Leave the namespace behind if the whole test passed — the
     // unified_e2e teardown drops the cluster, and keeping it on failure
@@ -283,6 +296,57 @@ async fn delete_writer_pod(kubeconfig: &str) -> Result<(), String> {
         "--wait=true",
     ])
     .await?;
+    Ok(())
+}
+
+async fn pod_node(kubeconfig: &str) -> Result<String, String> {
+    let out = run_kubectl(&[
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "pods",
+        "-n",
+        NAMESPACE,
+        "-l",
+        POD_LABEL_SELECTOR,
+        "-o",
+        "jsonpath={.items[0].spec.nodeName}",
+    ])
+    .await?;
+    let name = out.trim();
+    if name.is_empty() {
+        return Err("writer pod has no spec.nodeName yet".to_string());
+    }
+    Ok(name.to_string())
+}
+
+async fn cordon_node(kubeconfig: &str, node: &str) -> Result<(), String> {
+    run_kubectl(&["--kubeconfig", kubeconfig, "cordon", node])
+        .await
+        .map(|_| ())
+}
+
+async fn uncordon_node(kubeconfig: &str, node: &str) -> Result<(), String> {
+    run_kubectl(&["--kubeconfig", kubeconfig, "uncordon", node])
+        .await
+        .map(|_| ())
+}
+
+async fn run_persistence_check(kubeconfig: &str, original_node: &str) -> Result<(), String> {
+    info!("[Storage] Deleting writer pod, waiting for replacement on a different host...");
+    delete_writer_pod(kubeconfig).await?;
+    wait_for_pod_running(kubeconfig, NAMESPACE, POD_LABEL_SELECTOR).await?;
+
+    let new_node = pod_node(kubeconfig).await?;
+    if new_node == original_node {
+        return Err(format!(
+            "replacement pod landed on the same node ({new_node}); cordon failed or fixture has only one schedulable worker — replication path was not exercised"
+        ));
+    }
+    info!("[Storage] Replacement pod scheduled on {new_node} (was {original_node})");
+
+    info!("[Storage] Verifying marker survived pod restart on different host...");
+    verify_marker(kubeconfig).await?;
     Ok(())
 }
 

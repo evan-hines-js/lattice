@@ -589,7 +589,7 @@ pub struct RootVolume {
 }
 
 /// Control plane specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPlaneSpec {
     /// Number of control plane nodes (must be positive odd number for HA)
@@ -602,6 +602,41 @@ pub struct ControlPlaneSpec {
     /// Root volume configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_volume: Option<RootVolume>,
+
+    /// Optional placement constraints for the underlying machines.
+    /// Provider-specific: today only Basis honors this. Other providers
+    /// ignore it. Empty/absent = default placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementSpec>,
+}
+
+/// Provider-side placement constraints, mirrored onto the
+/// infrastructure CRD. `requires` is a hard label filter (the host
+/// must match for the machine to land there); `prefers` is a soft
+/// tiebreak weight. Empty either side disables that mechanism.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementSpec {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<PlacementRequirement>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefers: Vec<PlacementPreference>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementRequirement {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacementPreference {
+    pub key: String,
+    pub value: String,
+    pub weight: u32,
 }
 
 /// Node capacity hints for the cluster autoscaler's scale-from-zero.
@@ -661,6 +696,12 @@ pub struct WorkerPoolSpec {
     /// Not needed for resource-based types (capacity derived from cores/memoryGib).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity: Option<NodeCapacityHint>,
+
+    /// Optional placement constraints for the underlying machines.
+    /// Provider-specific: today only Basis honors this. Other providers
+    /// ignore it. Empty/absent = default placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PlacementSpec>,
 }
 
 impl WorkerPoolSpec {
@@ -1455,8 +1496,7 @@ mod tests {
         fn cp(replicas: u32) -> ControlPlaneSpec {
             ControlPlaneSpec {
                 replicas,
-                instance_type: None,
-                root_volume: None,
+                ..Default::default()
             }
         }
 
@@ -1652,6 +1692,14 @@ mod tests {
                     size_gb: 50,
                     type_: Some("gp3".to_string()),
                 }),
+                placement: Some(PlacementSpec {
+                    requires: vec![],
+                    prefers: vec![PlacementPreference {
+                        key: "tier".into(),
+                        value: "fast".into(),
+                        weight: 100,
+                    }],
+                }),
             };
             let json = serde_json::to_string(&spec).unwrap();
             let parsed: ControlPlaneSpec = serde_json::from_str(&json).unwrap();
@@ -1704,6 +1752,13 @@ mod tests {
                 min: Some(1),
                 max: Some(10),
                 capacity: None,
+                placement: Some(PlacementSpec {
+                    requires: vec![PlacementRequirement {
+                        key: "tier".into(),
+                        values: vec!["slow".into()],
+                    }],
+                    prefers: vec![],
+                }),
             };
             let json =
                 serde_json::to_string(&pool).expect("WorkerPoolSpec serialization should succeed");

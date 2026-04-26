@@ -22,9 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Node;
-use kube::api::{Api, ListParams};
+use k8s_openapi::api::storage::v1::StorageClass;
+use kube::api::{Api, ListParams, Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
+use serde_json::json;
+use tracing::info;
 
 use lattice_common::install::{
     run_simple_install_reconcile, write_install_status, ReadinessCheck, SimpleInstallConfig,
@@ -36,6 +39,7 @@ use lattice_core::system_namespaces::ROOK_CEPH_NAMESPACE;
 use lattice_crd::crd::RookInstall;
 
 use super::manifests;
+use super::manifests::{BLOCK_POOL_NAME, DEFAULT_SC_ANNOTATION};
 
 const FIELD_MANAGER: &str = "lattice-rook-install-controller";
 
@@ -74,6 +78,15 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(
             REQUEUE_CRD_NOT_FOUND_SECS,
         )));
+    }
+
+    // Kubernetes enforces at most one default StorageClass; if a prior
+    // bootstrap addon (e.g. local-path-provisioner's `standard`) already
+    // claims the default, demote it before applying ours so the cluster
+    // ends up with exactly one default. Idempotent — patches only the
+    // SCs whose annotation actually says "true".
+    if install.spec.default_storage_class {
+        demote_other_default_storage_classes(&ctx.client).await?;
     }
 
     let mut all_manifests: Vec<String> = Vec::new();
@@ -159,6 +172,56 @@ fn has_control_plane_taint(node: &Node) -> bool {
         .and_then(|s| s.taints.as_ref())
         .map(|taints| taints.iter().any(|t| t.key == CONTROL_PLANE_TAINT))
         .unwrap_or(false)
+}
+
+/// Patch every StorageClass other than `rook-ceph-block` whose
+/// `is-default-class` annotation is `"true"` to `"false"`. Kubernetes
+/// permits only one default; without this, applying the Rook SC on top
+/// of an existing default (typically local-path-provisioner's
+/// `standard`) leaves the cluster in a "two defaults, ambiguous" state.
+async fn demote_other_default_storage_classes(client: &Client) -> Result<(), ReconcileError> {
+    let api: Api<StorageClass> = Api::all(client.clone());
+    let list = api.list(&ListParams::default()).await.map_err(ReconcileError::Kube)?;
+
+    for sc in list.items {
+        let name = sc.name_any();
+        if name == BLOCK_POOL_NAME {
+            continue;
+        }
+        let is_default = sc
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(DEFAULT_SC_ANNOTATION))
+            .map(|v| v == "true")
+            .unwrap_or(false);
+        if !is_default {
+            continue;
+        }
+
+        // Strategic-merge patch: setting the annotation to `"false"` (a
+        // string, per kube convention) clears the default without
+        // touching the rest of the SC. Server-side apply with a
+        // separate field manager would conflict with whoever installed
+        // it; a plain patch on this single annotation is the surgical
+        // option.
+        let patch = json!({
+            "metadata": {
+                "annotations": {
+                    DEFAULT_SC_ANNOTATION: "false"
+                }
+            }
+        });
+        api.patch(&name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(ReconcileError::Kube)?;
+        info!(
+            storage_class = %name,
+            "demoted prior default StorageClass so rook-ceph-block can take over"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

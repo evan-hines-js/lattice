@@ -345,7 +345,7 @@ mod tests {
                     control_plane: ControlPlaneSpec {
                         replicas: 3,
                         instance_type: Some(InstanceType::named("b2-30")),
-                        root_volume: None,
+                        ..Default::default()
                     },
                     worker_pools: std::collections::BTreeMap::from([(
                         "default".to_string(),

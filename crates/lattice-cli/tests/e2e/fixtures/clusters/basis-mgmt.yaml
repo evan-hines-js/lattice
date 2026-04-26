@@ -34,6 +34,12 @@ spec:
         cores: 16
         memoryGib: 32
         diskGib: 50
+      # Soft tier preference: CP lands on `tier=fast` hosts when one
+      # is available; otherwise falls back so the cluster can still
+      # come up when the fast tier is full or down.
+      placement:
+        prefers:
+          - { key: tier, value: fast, weight: 100 }
     workerPools:
       default:
         replicas: 1
@@ -41,6 +47,11 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
+        # Hard tier requirement: workers must land on `tier=slow`
+        # hosts so they don't compete with etcd for fast-disk IOPS.
+        placement:
+          requires:
+            - { key: tier, values: [slow] }
   parentConfig:
     grpcPort: 50051
     bootstrapPort: 8443

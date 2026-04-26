@@ -1,27 +1,33 @@
 # Homelab: Edge HAProxy DMZ + Media Stack
 
-Two-cluster Proxmox setup. The edge cluster runs HAProxy as a DMZ/firewall.
-The backend cluster runs the media stack (jellyfin, sonarr, nzbget + VPN).
+Two-cluster Basis setup. The edge cluster runs HAProxy as a DMZ/firewall on
+the LAN-reachable `cell-public` pool. The backend cluster runs the media
+stack (jellyfin, sonarr, nzbget + VPN) on the internal-only `cell-internal`
+pool, with Rook-Ceph providing durable block storage for media.
+
 Routes are discovered automatically via heartbeats — no manual IP management.
 
-See [lattice-homelab](https://github.com/evan-hines-js/lattice-homelab) for a live implementation of this setup.
+See [lattice-homelab](https://github.com/evan-hines-js/lattice-homelab) for a
+live implementation of this setup.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    Client[LAN Clients] --> LB[Cilium LB\n10.0.0.200/28\nvmbr0]
+    Client[LAN Clients] --> EdgeLB[Edge Cilium LB\ncell-public pool]
 
-    subgraph Edge["Edge Cluster — vmbr0 (10.0.0.0/24)"]
-        LB --> HAProxy[haproxy-fw]
+    subgraph Edge["Edge Cluster — cell-public pool (LAN-reachable)"]
+        EdgeLB --> HAProxy[haproxy-fw]
         HAProxy --> RA[route-adapter sidecar]
         RA -->|watches| CRD[LatticeClusterRoutes]
     end
 
-    subgraph Backend["Backend Cluster — vmbr1 (10.0.1.0/24)"]
+    subgraph Backend["Backend Cluster — cell-internal pool (cell-only)"]
         Agent[Lattice Agent]
-        GW[Istio Ingress Gateway\n10.0.1.216/28]
-        Media[media]
+        GW[Istio Ingress Gateway]
+        Rook[Rook-Ceph\nrook-ceph-block SC]
+        Media[media stack]
+        Media --> Rook
     end
 
     HAProxy -->|HTTP via Host header| GW
@@ -29,84 +35,57 @@ flowchart TD
     Agent -->|outbound gRPC\nheartbeats + routes| Edge
 ```
 
-**Network layout** (configured by `scripts/infra/proxmox-network-setup.sh`):
+| Pool | Reachable from | What lives there |
+|------|----------------|------------------|
+| `cell-public` | LAN | edge apiserver VIP, edge Cilium LB block (haproxy-fw front IP) |
+| `cell-internal` | within the cell only | backend apiserver VIP, backend Istio Gateway LB IPs |
 
-| Network | Subnet | Purpose | LAN-reachable |
-|---------|--------|---------|---------------|
-| vmbr0 | 10.0.0.0/24 | LB VIPs, kube-vip | Yes |
-| vmbr0 VLAN 100 | 10.0.100.0/24 | Edge cluster nodes | No |
-| vmbr1 | 10.0.1.0/24 | Backend cluster | No |
+The basis controller's network config defines these pools. The cell-internal
+pool is reachable from the edge cluster (east-west) but not advertised to LAN,
+so backend services are only accessible through HAProxy.
 
 ## How it works
 
 - Backend services set `advertise: { allowedServices: ["*"] }` on ingress routes
-- Route reconciler discovers these + resolves Gateway LB IPs
-- Agent reads LatticeClusterRoutes CRD and heartbeats routes to parent
-- Parent merges child routes into per-child LatticeClusterRoutes CRDs
-- Istio multi-cluster: operator creates remote secrets + Service stubs
-  so istiod discovers backend services natively
-- HAProxy north-south: route-adapter sidecar watches the CRD, renders haproxy.cfg,
-  and routes by Host header to backend ingress gateways via their LoadBalancer IPs
+- Route reconciler discovers these + resolves Gateway LB IPs (cell-internal)
+- Agent reads LatticeClusterRoutes CRD and heartbeats routes to the edge
+- Edge merges child routes into per-child LatticeClusterRoutes CRDs
+- Istio multi-cluster: the operator wires remote secrets + Service stubs so
+  istiod discovers backend services natively
+- HAProxy north-south: route-adapter sidecar watches the CRD, renders
+  `haproxy.cfg`, and routes by Host header to backend Gateway LB IPs
+- Persistent volumes on backend land on `rook-ceph-block`, replicated across
+  the three workers (failureDomain=host, replication=3)
 
 ## Prerequisites
 
-- Proxmox VE with an Ubuntu cloud-init template
-- SSH key configured on the template
-- Lattice operator installed on a bootstrap cluster (or use the edge cluster itself)
+- A Basis controller reachable on the LAN with at least two IP pools defined:
+  `cell-public` (LAN-routed) and `cell-internal` (cell-only)
+- Lattice operator installed on a bootstrap cluster (or use the edge cluster
+  itself to bootstrap)
 - `kubectl` and `docker` CLI tools
-- A cert-manager `ClusterIssuer` named `homelab-selfsigned` (or change the issuer name in the media YAMLs)
+- A cert-manager `ClusterIssuer` named `homelab-selfsigned` on the backend
+  cluster (or change the issuer name in the media YAMLs)
 
-## Before you start: customize the YAMLs
+## Step 1: Create the Basis InfraProvider
 
-Edit these values in `edge-cluster.yaml` and `backend-cluster.yaml` to match your environment:
-
-| Field | What to change |
-|-------|---------------|
-| `sshAuthorizedKeys` | Your SSH public key |
-| `sourceNode` | Your Proxmox node name |
-| `templateId` | Your cloud-init template ID |
-| `controlPlaneEndpoint` | Free IP for kube-vip VIP |
-| `ipv4Pool.range` | Free IP range for cluster nodes |
-| `ipv4Pool.gateway` | Your network gateway |
-| `dnsServers` | Your DNS server |
-| `lbCidr` | Free IP range for LoadBalancer services |
-
-Default IP allocation:
-
-| Resource | Network | IP |
-|----------|---------|-----|
-| Edge VIP (kube-vip) | vmbr0 | 10.0.0.100 |
-| Edge nodes | vmbr0 | 10.0.0.101-105 |
-| Edge LB (Cilium) | vmbr0 | 10.0.0.200/28 |
-| Backend VIP (kube-vip) | vmbr1 | 10.0.1.110 |
-| Backend nodes | vmbr1 | 10.0.1.111-120 |
-| Backend LB (Cilium) | vmbr1 | 10.0.1.216/28 |
-
-These are offset from the E2E test fixtures (which use `.150-.155` and `.240/28`) so both can run on the same Proxmox host simultaneously. Run `scripts/infra/proxmox-network-setup.sh` on the Proxmox host first to create the bridges.
-
-## Step 1: Create the InfraProvider
-
-The clusters need Proxmox credentials. Create a Secret and InfraProvider on the bootstrap/edge cluster:
+The clusters need Basis controller credentials. Seed them on the bootstrap
+cluster from the four `BASIS_*` env vars (the installer expects these). Then
+apply the InfraProvider — the existing `edge-cluster.yaml` already includes a
+matching `InfraProvider` and `ImageProvider`, so this step only matters for
+the bootstrap cluster:
 
 ```bash
-kubectl create secret generic proxmox-credentials \
-  -n lattice-system \
-  --from-literal=PROXMOX_URL=https://your-proxmox:8006/api2/json \
-  --from-literal=PROXMOX_TOKEN_ID=lattice@pam!lattice \
-  --from-literal=PROXMOX_SECRET=your-api-token-secret
+export BASIS_CONTROLLER_URL=https://your-basis:7443
+export BASIS_CLIENT_CERT="$(cat client.crt)"
+export BASIS_CLIENT_KEY="$(cat client.key)"
+export BASIS_CA_CERT="$(cat ca.crt)"
 
-kubectl apply -f - <<EOF
-apiVersion: lattice.dev/v1alpha1
-kind: InfraProvider
-metadata:
-  name: proxmox
-spec:
-  type: proxmox
-  secretRef:
-    name: proxmox-credentials
-    namespace: lattice-system
-EOF
+# (installer seeds the basis-credentials Secret in lattice-system from these)
 ```
+
+Then update `serverUrl` in `edge-cluster.yaml` to point at your Basis
+controller before applying.
 
 ## Step 2: Build and push the route-adapter image
 
@@ -124,6 +103,9 @@ kubectl apply -f edge-cluster.yaml
 kubectl wait --for=condition=Ready latticecluster/edge --timeout=20m
 ```
 
+This applies the LatticeCluster, the basis InfraProvider, and the default
+ImageProvider in one shot.
+
 ## Step 4: Deploy HAProxy on the edge
 
 ```bash
@@ -134,7 +116,7 @@ kubectl wait --for=condition=Ready latticeservice/haproxy-fw -n edge --timeout=5
 
 ## Step 5: Create the backend cluster
 
-The edge cluster provisions the backend:
+The edge cluster provisions the backend on `cell-internal`:
 
 ```bash
 kubectl apply -f backend-cluster.yaml
@@ -151,19 +133,45 @@ BACKEND_KC=/tmp/backend-kubeconfig
 kubectl get secret backend-kubeconfig -o jsonpath='{.data.value}' | base64 -d > $BACKEND_KC
 ```
 
-## Step 7: Deploy the media stack on the backend
+## Step 7: Install Rook-Ceph storage on the backend
+
+The backend cluster has 3 workers with a 250 GiB raw data disk each
+(`/dev/vdc`). Install Rook to claim them as OSDs:
+
+```bash
+kubectl --kubeconfig=$BACKEND_KC apply -f backend/storage/rook-install.yaml
+kubectl --kubeconfig=$BACKEND_KC wait --for=jsonpath='{.status.phase}'=Ready \
+  rookinstall/default --timeout=20m
+```
+
+When the controller flips `rook-ceph-block` to default it also demotes any
+other default StorageClass (the bootstrap-installed `standard`) so the
+cluster ends up with exactly one default. Verify:
+
+```bash
+kubectl --kubeconfig=$BACKEND_KC get sc
+# rook-ceph-block (default)   rook-ceph.rbd.csi.ceph.com   ...
+# standard                    rancher.io/local-path        ...
+```
+
+## Step 8: Deploy the media stack on the backend
 
 ```bash
 kubectl --kubeconfig=$BACKEND_KC apply -f backend/media/namespace.yaml
 kubectl --kubeconfig=$BACKEND_KC apply -f backend/media/
 ```
 
-## Step 8: Configure DNS
+The volume resources in `backend/media/` don't pin a `storageClassName`, so
+they bind against the cluster default — `rook-ceph-block` — and survive node
+failures.
 
-Find the edge HAProxy LoadBalancer IP:
+## Step 9: Configure DNS
+
+Find the edge HAProxy LoadBalancer IP (allocated from `cell-public`):
 
 ```bash
-kubectl get svc -n edge -l lattice.dev/service=haproxy-fw -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
+kubectl get svc -n edge -l lattice.dev/service=haproxy-fw \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
 ```
 
 Add to your router's DNS or `/etc/hosts`:
@@ -174,14 +182,17 @@ Add to your router's DNS or `/etc/hosts`:
 <edge-lb-ip>  nzbget.home.arpa
 ```
 
-## Step 9: Verify
+## Step 10: Verify
 
 ```bash
-# Check routes propagated from backend to edge
+# Routes propagated from backend to edge
 kubectl get latticeclusterroutes
 
-# Check all services are Ready on backend
+# All services Ready on backend
 kubectl --kubeconfig=$BACKEND_KC get latticeservices -A
+
+# Ceph healthy
+kubectl --kubeconfig=$BACKEND_KC -n rook-ceph get cephcluster
 
 # Access UIs
 curl http://jellyfin.home.arpa
@@ -190,7 +201,13 @@ curl http://sonarr.home.arpa
 
 ## Customization
 
-- **VPN egress**: Edit the wireguard sidecar config in `backend/media/nzbget.yaml` with your WireGuard credentials
-- **Storage sizes**: Adjust `size` in volume resources
+- **VPN egress**: Edit the wireguard sidecar config in `backend/media/nzbget.yaml`
+  with your WireGuard credentials
+- **Storage sizes**: Adjust `size` in volume resources; OSD disks are sized via
+  `dataDiskGibs` on the backend worker pool
 - **VM sizing**: Edit `instanceType` in cluster YAMLs
-- **Restrict access**: Change `allowedServices: ["*"]` to specific callers like `["edge/haproxy-fw"]`
+- **Restrict access**: Change `allowedServices: ["*"]` to specific callers like
+  `["edge/haproxy-fw"]`
+- **Smaller backend**: Drop to 2 workers if disk is scarce, then lower
+  `replication` and `monCount` in `rook-install.yaml` (mon=1 with
+  `allowMultipleMonsPerNode: true` works for single-node dev only)

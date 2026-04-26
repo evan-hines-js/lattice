@@ -37,6 +37,9 @@ spec:
         cores: 16
         memoryGib: 32
         diskGib: 50
+      placement:
+        prefers:
+          - { key: tier, value: fast, weight: 100 }
     workerPools:
       default:
         replicas: 2
@@ -48,3 +51,6 @@ spec:
           # install test as OSD-backed storage. Basis attaches it as
           # /dev/vdc; rook-ceph claims it via the cluster's deviceFilter.
           dataDiskGibs: [50]
+        placement:
+          requires:
+            - { key: tier, values: [slow] }
