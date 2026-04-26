@@ -314,8 +314,60 @@ pub struct SimpleInstallConfig<'a, K> {
     pub trust_domain: Option<String>,
 }
 
+/// Where the install sits in its post-readiness stabilization window.
+///
+/// The soak gate keeps an install at `Installing`/`Upgrading` for
+/// `health_gate.stabilization_seconds` of sustained-healthy reads after the
+/// readiness gate first flips OK, so a workload that comes up only to
+/// crash 30s later is reported as `Failed` instead of being prematurely
+/// marked `Ready`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoakState {
+    /// No `Soaking=True` condition observed — readiness has not yet been
+    /// reported healthy in this attempt.
+    NotStarted,
+    /// `Soaking=True` is set; window is still open.
+    InProgress {
+        /// Minimum time left before the next reconcile can flip to `Ready`.
+        remaining: Duration,
+    },
+    /// `Soaking=True` lastTransitionTime is `>= stabilization_seconds`
+    /// in the past — the install has held steady long enough.
+    Complete,
+}
+
+/// Compute soak progress from the resource's existing conditions.
+///
+/// Pulls the `Soaking=True` condition's `lastTransitionTime` and compares
+/// it to `stabilization`. Pure for unit testing — `now` is parameterised
+/// so tests can pin the clock.
+pub fn soak_state(
+    conditions: &[Condition],
+    stabilization: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> SoakState {
+    let Some(soaking) = conditions
+        .iter()
+        .find(|c| c.type_ == COND_SOAKING && c.status == ConditionStatus::True)
+    else {
+        return SoakState::NotStarted;
+    };
+    let elapsed = now
+        .signed_duration_since(soaking.last_transition_time)
+        .to_std()
+        .unwrap_or(Duration::ZERO);
+    if elapsed >= stabilization {
+        SoakState::Complete
+    } else {
+        SoakState::InProgress {
+            remaining: stabilization - elapsed,
+        }
+    }
+}
+
 /// Drive an install CR through its lifecycle: apply manifests, wait on
-/// readiness, transition to `Ready` or `Failed`.
+/// readiness, hold steady through the soak window, then transition to
+/// `Ready` or `Failed`.
 ///
 /// If `status` already reports `Ready` at the current generation, no-ops and
 /// requeues at the drift-detection interval. Callers that need pre-flight
@@ -431,31 +483,91 @@ where
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
+    let stabilization = Duration::from_secs(
+        u64::from(install.spec_base().upgrade_policy.health_gate.stabilization_seconds),
+    );
+    let prior_conditions: &[Condition] = install
+        .install_status()
+        .map(|s| s.conditions.as_slice())
+        .unwrap_or(&[]);
+    let soak = soak_state(prior_conditions, stabilization, chrono::Utc::now());
+
     match readiness.run(&ctx.client).await {
-        Ok(()) => {
-            info!(install = %name, kind = %log_kind, version = %version, "install Ready");
-            let succeeded = started_attempt.finished(UpgradeOutcome::Succeeded, None);
-            write_with_td(
-                &ctx.client,
-                install_ref,
-                field_manager,
-                StatusUpdate::ready(&version).with_last_upgrade(succeeded),
-                td,
-            )
-            .await?;
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
-        }
+        Ok(()) => match soak {
+            SoakState::Complete => {
+                info!(install = %name, kind = %log_kind, version = %version, "install Ready");
+                let succeeded = started_attempt.finished(UpgradeOutcome::Succeeded, None);
+                write_with_td(
+                    &ctx.client,
+                    install_ref,
+                    field_manager,
+                    StatusUpdate::ready(&version).with_last_upgrade(succeeded),
+                    td,
+                )
+                .await?;
+                Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
+            }
+            SoakState::NotStarted | SoakState::InProgress { .. } => {
+                let remaining = match soak {
+                    SoakState::InProgress { remaining } => remaining,
+                    _ => stabilization,
+                };
+                info!(
+                    install = %name, kind = %log_kind,
+                    remaining_secs = remaining.as_secs(),
+                    "install soaking",
+                );
+                // Stamp/preserve `Soaking=True`. Condition::merge_into keeps
+                // the original lastTransitionTime when type+status+reason match,
+                // so subsequent reconciles measure soak from first-healthy,
+                // not last-healthy.
+                let soaking_cond = Condition::new(
+                    COND_SOAKING,
+                    ConditionStatus::True,
+                    REASON_STABILIZING,
+                    format!("awaiting {}s of stable readiness", remaining.as_secs()),
+                );
+                let soaking_update = StatusUpdate {
+                    phase: in_progress_phase,
+                    ..Default::default()
+                }
+                .with_condition(requires_cond.clone())
+                .with_condition(soaking_cond)
+                .with_last_upgrade(started_attempt.clone());
+                write_with_td(&ctx.client, install_ref, field_manager, soaking_update, td)
+                    .await?;
+                // Re-check a few seconds early so timing edge cases don't
+                // leave us idling for a full requeue cycle past the deadline.
+                Ok(Action::requeue(remaining + Duration::from_secs(2)))
+            }
+        },
         Err(e) => {
-            warn!(install = %name, kind = %log_kind, error = %e, "install readiness gate failed");
-            let failed = started_attempt.finished(
-                UpgradeOutcome::Failed,
-                Some(format!("readiness gate failed: {e}")),
+            let was_soaking = !matches!(soak, SoakState::NotStarted);
+            let (msg, reason) = if was_soaking {
+                (
+                    format!("soak regressed: {e}"),
+                    REASON_SOAK_REGRESSED,
+                )
+            } else {
+                (format!("readiness gate failed: {e}"), "ReadinessFailed")
+            };
+            warn!(install = %name, kind = %log_kind, error = %e, soaking = was_soaking, "install readiness gate failed");
+            let failed = started_attempt.finished(UpgradeOutcome::Failed, Some(msg.clone()));
+            // Flip `Soaking=False` so observers see the regression and the
+            // next attempt starts with a clean window (merge_into stamps a
+            // fresh lastTransitionTime when status differs).
+            let soaking_off = Condition::new(
+                COND_SOAKING,
+                ConditionStatus::False,
+                reason,
+                msg.clone(),
             );
             write_with_td(
                 &ctx.client,
                 install_ref,
                 field_manager,
-                StatusUpdate::failed(format!("readiness gate failed: {e}"))
+                StatusUpdate::failed(msg)
+                    .with_condition(soaking_off)
                     .with_last_upgrade(failed),
                 td,
             )
@@ -511,6 +623,14 @@ pub const COND_UPGRADE_BLOCKED: &str = "UpgradeBlocked";
 pub const REASON_REQUIRES_UNSATISFIED: &str = "RequiresUnsatisfied";
 /// Reason set on `UpgradeBlocked=False`.
 pub const REASON_REQUIRES_SATISFIED: &str = "RequiresSatisfied";
+
+/// Condition `type` published while an install is holding readiness
+/// stable before flipping to `Ready`.
+pub const COND_SOAKING: &str = "Soaking";
+/// Reason set on `Soaking=True` while the stabilization window is open.
+pub const REASON_STABILIZING: &str = "Stabilizing";
+/// Reason set on `Soaking=False` after readiness regresses mid-soak.
+pub const REASON_SOAK_REGRESSED: &str = "SoakRegressed";
 
 /// Outcome of evaluating an Install's `spec.requires`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -690,6 +810,81 @@ mod tests {
         let err = evaluate_dependency(&dep(Subsystem::Cilium, ">=1.31"), Some("v1.31"))
             .expect_err("should block");
         assert!(err.contains("unparsable version"));
+    }
+
+    fn soaking_at(when: chrono::DateTime<chrono::Utc>) -> Condition {
+        Condition {
+            type_: COND_SOAKING.to_string(),
+            status: ConditionStatus::True,
+            reason: REASON_STABILIZING.to_string(),
+            message: String::new(),
+            last_transition_time: when,
+        }
+    }
+
+    #[test]
+    fn soak_not_started_when_condition_absent() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            soak_state(&[], Duration::from_secs(300), now),
+            SoakState::NotStarted,
+        );
+    }
+
+    #[test]
+    fn soak_not_started_when_condition_is_false() {
+        let now = chrono::Utc::now();
+        let cond = Condition {
+            type_: COND_SOAKING.to_string(),
+            status: ConditionStatus::False,
+            reason: REASON_SOAK_REGRESSED.to_string(),
+            message: String::new(),
+            last_transition_time: now,
+        };
+        // Soaking=False means the prior soak failed; current attempt has
+        // not yet observed healthy readiness, so it's NotStarted.
+        assert_eq!(
+            soak_state(std::slice::from_ref(&cond), Duration::from_secs(300), now),
+            SoakState::NotStarted,
+        );
+    }
+
+    #[test]
+    fn soak_in_progress_returns_remaining() {
+        let started = chrono::Utc::now() - chrono::Duration::seconds(120);
+        let conds = [soaking_at(started)];
+        match soak_state(&conds, Duration::from_secs(300), chrono::Utc::now()) {
+            SoakState::InProgress { remaining } => {
+                // Allow a little jitter from real `Utc::now()` calls.
+                assert!(remaining.as_secs() <= 180 && remaining.as_secs() >= 178);
+            }
+            other => panic!("expected InProgress, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn soak_complete_when_window_elapsed() {
+        let started = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let conds = [soaking_at(started)];
+        assert_eq!(
+            soak_state(&conds, Duration::from_secs(300), chrono::Utc::now()),
+            SoakState::Complete,
+        );
+    }
+
+    #[test]
+    fn soak_complete_when_started_is_in_future() {
+        // Pathological clock skew: soaking_at is later than `now`. We
+        // saturate elapsed to zero and stay InProgress with the full
+        // window remaining — never Complete in this path.
+        let future = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let conds = [soaking_at(future)];
+        match soak_state(&conds, Duration::from_secs(300), chrono::Utc::now()) {
+            SoakState::InProgress { remaining } => {
+                assert_eq!(remaining, Duration::from_secs(300));
+            }
+            other => panic!("expected InProgress, got {other:?}"),
+        }
     }
 
     #[test]
