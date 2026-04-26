@@ -21,8 +21,8 @@ spec:
       bootstrap: kubeadm
     config:
       basis:
-        # Nested workload cluster — cell-internal only.
-        externalIpPool: cell-internal
+        # Nested workload cluster — cell-public pool.
+        externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

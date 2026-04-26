@@ -40,7 +40,7 @@ use lattice_common::{
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CedarPolicy, LatticeCluster, LatticeJob, LatticeMeshMember, LatticeModel, LatticePackage,
-    LatticeQuota, LatticeService, OIDCProvider,
+    LatticeQuota, LatticeService, OIDCProvider, Subsystem,
 };
 use lattice_graph::ServiceGraph;
 use lattice_operator::agent::start_agent_with_retry;
@@ -580,10 +580,11 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_cilium::install::reconcile,
         "CiliumInstall",
     );
-    ctx.spawn_provider(
+    ctx.spawn_install(
         "istio-install",
         lattice_istio::install::reconcile,
         "IstioInstall",
+        &[Subsystem::Cilium],
     );
     ctx.spawn_provider(
         "metrics-server-install",

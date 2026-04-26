@@ -229,6 +229,9 @@ url = "2"
 # Regex
 regex = "1"
 
+# Semver constraint matching (used by Install `requires` gating)
+semver = { version = "1.0", features = ["serde"] }
+
 # Git
 git2 = "0.20"
 

@@ -109,6 +109,7 @@ async fn apply_rook_install(kubeconfig: &str) -> Result<(), String> {
             base: InstallSpecBase {
                 version: lattice_rook::install::manifests::rook_ceph_version().to_string(),
                 upgrade_policy: UpgradePolicy::default(),
+                requires: Vec::new(),
             },
             // 2 replicas spread across 2 worker hosts (failure_domain=host,
             // the production default). Enough to exercise the replication

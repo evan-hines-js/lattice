@@ -35,10 +35,10 @@ use serde::{Deserialize, Serialize};
 pub struct BasisConfig {
     /// Named LAN pool the cluster's external IPs come from — both the
     /// apiserver VIP and the Cilium LoadBalancer Service block.
-    /// Forwarded to `BasisCluster.spec.externalIpPool`. Defaults to
-    /// `cell-internal` for child clusters; root/management clusters
-    /// typically set `cell-public` so external callers can reach the
-    /// apiserver directly.
+    /// Forwarded to `BasisCluster.spec.externalIpPool`. Required: the
+    /// pool name must match an entry in the basis controller's
+    /// `network.pools` config. There is intentionally no default —
+    /// silently picking a pool name has masked misconfigurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ip_pool: Option<String>,
 

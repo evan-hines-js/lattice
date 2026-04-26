@@ -26,8 +26,11 @@ use lattice_common::{CrdRegistry, LeaderElector};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_cost::CostProvider;
 use lattice_crd::crd::{
-    CedarPolicy, ClusterConfig, LatticeCluster, LatticeClusterRoutes, LatticeJob,
-    LatticeMeshMember, LatticeModel, LatticeService, MonitoringConfig, ProviderType,
+    CedarPolicy, CertManagerInstall, CiliumInstall, ClusterConfig, ESOInstall, GpuOperatorInstall,
+    IstioInstall, KedaInstall, KthenaInstall, LatticeCluster, LatticeClusterRoutes, LatticeJob,
+    LatticeMeshMember, LatticeModel, LatticeService, MetricsServerInstall, MonitoringConfig,
+    ProviderType, RookInstall, Subsystem, TetragonInstall, VeleroInstall, VictoriaMetricsInstall,
+    VolcanoInstall,
 };
 use lattice_graph::ServiceGraph;
 use lattice_mesh_member::controller as mesh_member_ctrl;
@@ -209,6 +212,74 @@ impl SpawnContext {
                         config,
                     ));
                     simple_controller(Api::<K>::all(client), reconcile_fn, ctx, label).await;
+                }) as Pin<Box<dyn Future<Output = ()> + Send>>
+            },
+        ))
+    }
+
+    /// Spawn an install controller that also reconciles when a dependency
+    /// Install CR changes.
+    ///
+    /// This is the same shape as [`Self::spawn_provider`] plus a
+    /// `.watches()` per `dep` so the controller wakes up immediately when a
+    /// peer subsystem reports a new `status.observedVersion` — that's what
+    /// makes the cross-subsystem `spec.requires` gating in
+    /// `run_simple_install_reconcile` resolve in one sweep instead of
+    /// idling on the requeue timer.
+    ///
+    /// `deps` is a static list (we don't have dynamic subsystem
+    /// registration) and should mirror the values that controllers put
+    /// into their CR's `spec.requires`.
+    pub fn spawn_install<K, ReconcileFut, Err>(
+        &self,
+        lease: &'static str,
+        reconcile_fn: fn(Arc<K>, Arc<lattice_common::ControllerContext>) -> ReconcileFut,
+        label: &'static str,
+        deps: &'static [Subsystem],
+    ) -> tokio::task::JoinHandle<()>
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + std::fmt::Debug
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
+        ReconcileFut:
+            Future<Output = Result<kube::runtime::controller::Action, Err>> + Send + 'static,
+        Err: std::error::Error + lattice_common::Retryable + Send + 'static,
+    {
+        let client = self.client.clone();
+        let config = self.config.clone();
+        let jitter = self.next_jitter();
+        tokio::spawn(leader_controller(
+            self.client.clone(),
+            self.pod_name.clone(),
+            lease,
+            self.cancel.clone(),
+            false,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(jitter).await;
+                    lattice_operator::startup::wait_for_api_ready_for::<K>(&client).await;
+                    let ctx = Arc::new(lattice_common::ControllerContext::new(
+                        client.clone(),
+                        config,
+                    ));
+                    let mut controller = Controller::new(
+                        Api::<K>::all(client.clone()),
+                        WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS),
+                    );
+                    for dep in deps {
+                        controller = add_install_dep_watch::<K>(controller, *dep, &client);
+                    }
+                    let fut = controller
+                        .shutdown_on_signal()
+                        .run(reconcile_fn, lattice_common::default_error_policy, ctx)
+                        .for_each(log_reconcile_result(label));
+                    fut.await;
                 }) as Pin<Box<dyn Future<Output = ()> + Send>>
             },
         ))
@@ -419,6 +490,52 @@ where
             .run(reconcile_fn, lattice_common::default_error_policy, ctx)
             .for_each(log_reconcile_result(name)),
     )
+}
+
+/// Attach a `.watches()` for the dependency Install CRD identified by
+/// `dep`, mapping every event to the singleton primary CR named "default".
+///
+/// Used by [`SpawnContext::spawn_install`] so cross-subsystem `spec.requires`
+/// gating advances on a watch event, not on the next requeue.
+fn add_install_dep_watch<K>(
+    controller: Controller<K>,
+    dep: Subsystem,
+    client: &Client,
+) -> Controller<K>
+where
+    K: kube::Resource<DynamicType = ()>
+        + Clone
+        + std::fmt::Debug
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+{
+    let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
+    macro_rules! watch_dep {
+        ($kind:ty) => {
+            controller.watches(
+                Api::<$kind>::all(client.clone()),
+                watcher_config(),
+                |_| std::iter::once(ObjectRef::<K>::new("default")),
+            )
+        };
+    }
+    match dep {
+        Subsystem::CertManager => watch_dep!(CertManagerInstall),
+        Subsystem::Cilium => watch_dep!(CiliumInstall),
+        Subsystem::Eso => watch_dep!(ESOInstall),
+        Subsystem::GpuOperator => watch_dep!(GpuOperatorInstall),
+        Subsystem::Istio => watch_dep!(IstioInstall),
+        Subsystem::Keda => watch_dep!(KedaInstall),
+        Subsystem::Kthena => watch_dep!(KthenaInstall),
+        Subsystem::MetricsServer => watch_dep!(MetricsServerInstall),
+        Subsystem::Rook => watch_dep!(RookInstall),
+        Subsystem::Tetragon => watch_dep!(TetragonInstall),
+        Subsystem::Velero => watch_dep!(VeleroInstall),
+        Subsystem::VictoriaMetrics => watch_dep!(VictoriaMetricsInstall),
+        Subsystem::Volcano => watch_dep!(VolcanoInstall),
+    }
 }
 
 // ---------------------------------------------------------------------------

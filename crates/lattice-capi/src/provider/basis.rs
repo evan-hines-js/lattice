@@ -101,7 +101,11 @@ impl BasisProvider {
         let cfg =
             Self::get_config(cluster).ok_or_else(|| Error::validation("basis config required"))?;
 
-        let pool = cfg.external_ip_pool.as_deref().unwrap_or("cell-internal");
+        let pool = cfg.external_ip_pool.as_deref().ok_or_else(|| {
+            Error::validation(
+                "basis.externalIpPool is required and must name a pool defined in the controller's network.pools",
+            )
+        })?;
         let mut spec = serde_json::json!({
             "credentialsRef": {
                 "name": BASIS_CREDENTIALS_SECRET,
@@ -309,7 +313,7 @@ mod tests {
 
     fn test_basis_config() -> BasisConfig {
         BasisConfig {
-            external_ip_pool: None,
+            external_ip_pool: Some("cell-public".to_string()),
             external_service_ips: None,
             kube_vip_image: None,
         }
@@ -434,7 +438,7 @@ mod tests {
             .find(|m| m.kind == "BasisCluster")
             .unwrap();
         let json = serde_json::to_string(&bc.spec).unwrap();
-        assert!(json.contains(r#""externalIpPool":"cell-internal""#));
+        assert!(json.contains(r#""externalIpPool":"cell-public""#));
         // externalServiceIps is omitted in the default case so basis
         // applies its cell-wide default — only present when the
         // config explicitly overrides.

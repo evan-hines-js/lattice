@@ -20,12 +20,11 @@ spec:
       bootstrap: rke2
     config:
       basis:
-        # Workload cluster — cell-internal only. External IPs come
-        # from basis's cell-internal pool (apiserver VIP + Cilium LB
-        # Service block); LB IPs aren't reachable from outside the
+        # Workload cluster — cell-public pool (apiserver VIP + Cilium
+        # LB Service block). LB IPs aren't reachable from outside the
         # cell. External traffic enters via the root cluster's
         # cell-public ingress.
-        externalIpPool: cell-internal
+        externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
       mirror: "http://10.0.0.131:5555"

@@ -47,6 +47,73 @@ pub struct InstallSpecBase {
     /// Upgrade strategy overrides.
     #[serde(default)]
     pub upgrade_policy: UpgradePolicy,
+    /// Other subsystems this install needs to be at a specific version range
+    /// before it will progress to `spec.version`.
+    ///
+    /// Each controller checks `requires` on every reconcile. If any entry's
+    /// `version_constraint` is not satisfied by the dependency's
+    /// `status.observedVersion`, the controller publishes `UpgradeBlocked`
+    /// and stays at the current version. Watches on the listed subsystem
+    /// CRDs trigger immediate re-reconcile when the dependency advances.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<Dependency>,
+}
+
+/// One entry in `InstallSpecBase::requires`.
+///
+/// Holds the dependency subsystem and the SemVer range that must be matched by
+/// that dependency's `status.observedVersion`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Dependency {
+    /// Which subsystem we depend on.
+    pub subsystem: Subsystem,
+    /// SemVer range expression (e.g. `">=1.31, <2"`, `"^1.31"`).
+    pub version_constraint: String,
+}
+
+/// Identifies a managed-dependency subsystem.
+///
+/// One variant per Install CRD kind. Used in `Dependency::subsystem` so
+/// upgrade ordering constraints can name a peer without each controller
+/// knowing about every other CRD type. The string representation is the
+/// kind's kebab-case name (`cilium`, `cert-manager`, `victoria-metrics`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum Subsystem {
+    CertManager,
+    Cilium,
+    Eso,
+    GpuOperator,
+    Istio,
+    Keda,
+    Kthena,
+    MetricsServer,
+    Rook,
+    Tetragon,
+    Velero,
+    VictoriaMetrics,
+    Volcano,
+}
+
+impl std::fmt::Display for Subsystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CertManager => write!(f, "cert-manager"),
+            Self::Cilium => write!(f, "cilium"),
+            Self::Eso => write!(f, "eso"),
+            Self::GpuOperator => write!(f, "gpu-operator"),
+            Self::Istio => write!(f, "istio"),
+            Self::Keda => write!(f, "keda"),
+            Self::Kthena => write!(f, "kthena"),
+            Self::MetricsServer => write!(f, "metrics-server"),
+            Self::Rook => write!(f, "rook"),
+            Self::Tetragon => write!(f, "tetragon"),
+            Self::Velero => write!(f, "velero"),
+            Self::VictoriaMetrics => write!(f, "victoria-metrics"),
+            Self::Volcano => write!(f, "volcano"),
+        }
+    }
 }
 
 /// Observed-state shape shared by every Install CRD.

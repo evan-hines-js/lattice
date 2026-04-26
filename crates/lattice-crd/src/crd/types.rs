@@ -280,12 +280,12 @@ impl ProviderConfig {
 
     /// Named pool the cluster's external IPs (apiserver VIP and
     /// Cilium LB Service block) come from. `None` for non-basis
-    /// clusters; defaults to `cell-internal` for basis clusters that
-    /// don't set it explicitly.
+    /// clusters or when the basis config omits it (rejected by
+    /// `validate`).
     pub fn external_ip_pool(&self) -> Option<&str> {
         self.basis
             .as_ref()
-            .map(|b| b.external_ip_pool.as_deref().unwrap_or("cell-internal"))
+            .and_then(|b| b.external_ip_pool.as_deref())
     }
 
     /// Validate provider configuration: exactly one provider, plus
@@ -311,6 +311,15 @@ impl ProviderConfig {
             ));
         }
         if let Some(ref basis) = self.basis {
+            if basis
+                .external_ip_pool
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(crate::ValidationError::new(
+                    "basis.externalIpPool is required and must name a pool defined in the controller's network.pools",
+                ));
+            }
             if let Some(count) = basis.external_service_ips {
                 if count == 0 || !count.is_power_of_two() {
                     return Err(crate::ValidationError::new(format!(
@@ -2217,7 +2226,7 @@ mod tests {
 
         fn valid_basis_config() -> BasisConfig {
             BasisConfig {
-                external_ip_pool: None,
+                external_ip_pool: Some("cell-public".to_string()),
                 external_service_ips: None,
                 kube_vip_image: None,
             }
@@ -2229,16 +2238,23 @@ mod tests {
             assert!(config.basis.is_some());
             assert_eq!(config.provider_type(), ProviderType::Basis);
             assert!(config.validate().is_ok());
-            assert_eq!(config.external_ip_pool(), Some("cell-internal"));
+            assert_eq!(config.external_ip_pool(), Some("cell-public"));
         }
 
         #[test]
-        fn test_basis_external_ip_pool_override() {
+        fn test_basis_requires_external_ip_pool() {
             let mut basis = valid_basis_config();
-            basis.external_ip_pool = Some("cell-public".to_string());
-            let config = ProviderConfig::basis(basis);
-            assert!(config.validate().is_ok());
-            assert_eq!(config.external_ip_pool(), Some("cell-public"));
+            basis.external_ip_pool = None;
+            let err = ProviderConfig::basis(basis).validate().unwrap_err();
+            assert!(err.to_string().contains("externalIpPool"));
+        }
+
+        #[test]
+        fn test_basis_rejects_empty_external_ip_pool() {
+            let mut basis = valid_basis_config();
+            basis.external_ip_pool = Some(String::new());
+            let err = ProviderConfig::basis(basis).validate().unwrap_err();
+            assert!(err.to_string().contains("externalIpPool"));
         }
 
         #[test]

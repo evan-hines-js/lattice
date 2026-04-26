@@ -33,6 +33,7 @@ dashmap.workspace = true
 futures.workspace = true
 async-stream.workspace = true
 regex.workspace = true
+semver.workspace = true
 zeroize.workspace = true
 
 # OpenTelemetry
