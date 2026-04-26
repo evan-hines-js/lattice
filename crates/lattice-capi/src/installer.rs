@@ -447,7 +447,6 @@ pub async fn ensure_capi_providers_for(
     provider_type: ProviderType,
     cp: Option<&InfraProvider>,
     field_manager: &str,
-    basis_self_cluster_id: Option<String>,
 ) -> Result<(), Error> {
     tracing::info!(infrastructure = ?provider_type, "Installing CAPI providers");
 
@@ -498,9 +497,8 @@ pub async fn ensure_capi_providers_for(
         }
     }
 
-    let config = CapiProviderConfig::new(provider_type)?
-        .with_image_pull_secrets(image_pull_secret_names)
-        .with_basis_self_cluster_id(basis_self_cluster_id);
+    let config =
+        CapiProviderConfig::new(provider_type)?.with_image_pull_secrets(image_pull_secret_names);
     installer.ensure(&config).await?;
 
     tracing::info!(infrastructure = ?provider_type, "CAPI providers installed");
@@ -634,29 +632,6 @@ pub struct CapiProviderConfig {
     /// should reference via `imagePullSecrets`. Used when the CAPI provider
     /// image lives in a private registry.
     pub image_pull_secret_names: Vec<String>,
-    /// The hosting cluster's own `basisClusterId` — the value is "self" from
-    /// this cluster's perspective, and gets stamped onto the
-    /// basis-capi-provider controller container's `BASIS_PARENT_CLUSTER_ID`
-    /// env (the env var is named "parent" because that's the role the id
-    /// plays for the children the provider will create). Only consulted when
-    /// `infrastructure == ProviderType::Basis`.
-    ///
-    /// Semantics:
-    /// - `Some(id)`: the installer rewrites the controller-manager container's
-    ///   env so every `BasisCluster` the provider reconciles becomes a child
-    ///   of `id` in the basis tree. Callers read this from the local
-    ///   `BasisCluster.status.basisClusterId` (populated by whichever
-    ///   upstream provider created this cluster, then moved down during
-    ///   pivot).
-    /// - `Some("")` or `None`: the env is left unset; the provider runs
-    ///   rootless and each cluster it creates allocates a fresh basis tree.
-    ///   Correct on the bootstrap-kind provider (no parent by definition)
-    ///   and during the pre-pivot window where the self `BasisCluster` CR
-    ///   hasn't been moved down yet. The post-pivot reconcile re-applies the
-    ///   Deployment with the resolved id, and force SSA (field manager
-    ///   `"lattice"` via `kube_utils::apply_one`) rewrites the env in place
-    ///   — one pod restart, no conflict.
-    pub basis_self_cluster_id: Option<String>,
 }
 
 impl CapiProviderConfig {
@@ -672,7 +647,6 @@ impl CapiProviderConfig {
             infra_info,
             credentials_secret_override: None,
             image_pull_secret_names: Vec::new(),
-            basis_self_cluster_id: None,
         })
     }
 
@@ -686,16 +660,6 @@ impl CapiProviderConfig {
     /// namespace (typically materialized by ESO).
     pub fn with_image_pull_secrets(mut self, names: Vec<String>) -> Self {
         self.image_pull_secret_names = names;
-        self
-    }
-
-    /// Attach the hosting cluster's own `basisClusterId` so the
-    /// basis-capi-provider's controller container gets
-    /// `BASIS_PARENT_CLUSTER_ID` set before SSA. See
-    /// [`CapiProviderConfig::basis_self_cluster_id`] for the full
-    /// pre-pivot / post-pivot contract.
-    pub fn with_basis_self_cluster_id(mut self, id: Option<String>) -> Self {
-        self.basis_self_cluster_id = id;
         self
     }
 
@@ -743,7 +707,6 @@ impl CapiProviderConfig {
             infra_info,
             credentials_secret_override: None,
             image_pull_secret_names: Vec::new(),
-            basis_self_cluster_id: None,
         })
     }
 
@@ -861,16 +824,12 @@ impl NativeInstaller {
     }
 
     /// Apply a single provider's manifests with env var substitution.
-    ///
-    /// `basis_self_cluster_id` is only consulted when `desired` is the basis
-    /// infrastructure provider; callers pass `None` in every other case.
     async fn apply_provider(
         client: &KubeClient,
         providers_dir: &Path,
         desired: &DesiredProvider,
         env_vars: &[(String, String)],
         image_pull_secret_names: &[String],
-        basis_self_cluster_id: Option<&str>,
     ) -> Result<(), Error> {
         let dir_name = provider_dir_name(&desired.name, desired.provider_type);
         let components = provider_component_files(&desired.name, desired.provider_type);
@@ -889,22 +848,7 @@ impl NativeInstaller {
         // any required imagePullSecrets. Patching post-apply forced a second
         // ReplicaSet revision and — on private registries — an ImagePullBackOff
         // cycle while the first revision waited for a non-existent pull secret.
-        //
-        // `basis_self_cluster_id` only applies to the basis provider's
-        // Deployment — gated inside `inject_one` on (provider name, container
-        // name). All SSAs of this Deployment go through
-        // `kube_utils::apply_one` with field manager `"lattice"` + `.force()`,
-        // so successive reconciles (e.g. pre-pivot `None` → post-pivot
-        // `Some(id)`) rewrite the env cleanly without managed-field conflicts.
-        let is_basis_infra =
-            desired.provider_type == CapiProviderType::Infrastructure && desired.name == "basis";
-        let basis_env = if is_basis_infra {
-            basis_self_cluster_id
-        } else {
-            None
-        };
-        let all_documents =
-            inject_deployment_overrides(all_documents, image_pull_secret_names, basis_env)?;
+        let all_documents = inject_deployment_overrides(all_documents, image_pull_secret_names)?;
 
         info!(
             provider = %desired.name,
@@ -932,33 +876,25 @@ impl NativeInstaller {
 }
 
 /// Rewrite every `Deployment` document's `spec.template.spec` to carry the
-/// control-plane `NoSchedule` toleration, any caller-supplied
-/// `imagePullSecrets`, and — when `basis_self_cluster_id` is `Some(non_empty)`
-/// and the doc is basis-capi-provider's Deployment — the
-/// `BASIS_PARENT_CLUSTER_ID` env var on its `manager` container. Non-Deployment
-/// documents pass through unchanged.
+/// control-plane `NoSchedule` toleration and any caller-supplied
+/// `imagePullSecrets`. Non-Deployment documents pass through unchanged.
 ///
-/// Merges rather than replaces: existing tolerations, pull secrets, and env
-/// entries are preserved; re-injection is idempotent (duplicates skipped by
-/// `key`+`effect`, `name`, and env `name` respectively).
+/// Merges rather than replaces: existing tolerations and pull secrets are
+/// preserved; re-injection is idempotent (duplicates skipped by
+/// `key`+`effect` and by `name`).
 ///
 /// Deployment docs round-trip through `serde_json`, so they come out as JSON —
 /// `apply_manifests` accepts both JSON and YAML.
 fn inject_deployment_overrides(
     docs: Vec<String>,
     image_pull_secret_names: &[String],
-    basis_self_cluster_id: Option<&str>,
 ) -> Result<Vec<String>, Error> {
     docs.into_iter()
-        .map(|doc| inject_one(&doc, image_pull_secret_names, basis_self_cluster_id))
+        .map(|doc| inject_one(&doc, image_pull_secret_names))
         .collect()
 }
 
-fn inject_one(
-    doc: &str,
-    image_pull_secret_names: &[String],
-    basis_self_cluster_id: Option<&str>,
-) -> Result<String, Error> {
+fn inject_one(doc: &str, image_pull_secret_names: &[String]) -> Result<String, Error> {
     // Cheap pre-check: `split_yaml_documents` guarantees every doc contains
     // `kind:`, but only Deployments need rewriting.
     if !doc.contains("kind: Deployment") && !doc.contains("\"kind\": \"Deployment\"") {
@@ -988,10 +924,6 @@ fn inject_one(
 
     merge_control_plane_toleration(pod_spec);
     merge_image_pull_secrets(pod_spec, image_pull_secret_names);
-    if let Some(id) = basis_self_cluster_id.filter(|s| !s.is_empty()) {
-        set_basis_parent_cluster_id_env(pod_spec, id);
-    }
-
     serde_json::to_string(&value)
         .map_err(|e| Error::capi_installation(format!("failed to serialize Deployment: {e}")))
 }
@@ -1016,52 +948,6 @@ fn merge_control_plane_toleration(pod_spec: &mut serde_json::Map<String, serde_j
             "effect": "NoSchedule",
         }));
     }
-}
-
-/// Set `BASIS_PARENT_CLUSTER_ID=<id>` on the basis-capi-provider's `manager`
-/// container.
-///
-/// Name-based match on the container rather than "first container" because
-/// basis's bundle might one day grow a sidecar (e.g. kube-rbac-proxy under a
-/// future CAPI convention). If no `manager` container is present we no-op
-/// rather than fail — the caller already gated this to basis's Deployment via
-/// `is_basis_infra`, so missing `manager` signals a manifest shape change
-/// worth noticing in the next reconcile, not a reason to block the install.
-///
-/// Existing env entries with the same `name` get overwritten (last-write-wins
-/// semantics) so a stale pre-pivot `""` is replaced by the resolved id on the
-/// post-pivot re-apply.
-fn set_basis_parent_cluster_id_env(
-    pod_spec: &mut serde_json::Map<String, serde_json::Value>,
-    id: &str,
-) {
-    let Some(containers) = pod_spec
-        .get_mut("containers")
-        .and_then(|v| v.as_array_mut())
-    else {
-        return;
-    };
-    let Some(manager) = containers
-        .iter_mut()
-        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("manager"))
-    else {
-        warn!("basis-capi-provider Deployment has no 'manager' container; skipping env injection");
-        return;
-    };
-    let Some(obj) = manager.as_object_mut() else {
-        return;
-    };
-    let env = obj
-        .entry("env".to_string())
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    let Some(arr) = env.as_array_mut() else {
-        return;
-    };
-    arr.retain(|e| e.get("name").and_then(|n| n.as_str()) != Some("BASIS_PARENT_CLUSTER_ID"));
-    arr.push(serde_json::json!({
-        "name": "BASIS_PARENT_CLUSTER_ID",
-        "value": id,
-    }));
 }
 
 /// Append each pull secret name unless an entry with the same `name` already
@@ -1158,8 +1044,6 @@ impl CapiInstaller for NativeInstaller {
                     &[]
                 };
 
-            let basis_self_id = config.basis_self_cluster_id.as_deref();
-
             match action {
                 ProviderAction::Skip => continue,
                 ProviderAction::Install => {
@@ -1169,7 +1053,6 @@ impl CapiInstaller for NativeInstaller {
                         desired_provider,
                         &env_vars,
                         pull_secrets,
-                        basis_self_id,
                     )
                     .await?;
                 }
@@ -1187,7 +1070,6 @@ impl CapiInstaller for NativeInstaller {
                         desired_provider,
                         &env_vars,
                         pull_secrets,
-                        basis_self_id,
                     )
                     .await
                     {
@@ -1506,134 +1388,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    fn basis_deployment_yaml() -> &'static str {
-        // Slimmed mirror of test-providers/infrastructure-basis/v0.1.0
-        // infrastructure-components.yaml — only the shape relevant to
-        // `inject_one` (manager container, no env).
-        r#"apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: basis-capi-provider-controller-manager
-  namespace: capi-basis-system
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      control-plane: controller-manager
-  template:
-    metadata:
-      labels:
-        control-plane: controller-manager
-    spec:
-      containers:
-      - image: ghcr.io/example/basis-capi-provider:v0.1.0
-        name: manager
-"#
-    }
-
-    fn extract_manager_env(rewritten: &str) -> Vec<(String, String)> {
-        let v: serde_json::Value = serde_json::from_str(rewritten).expect("json");
-        v.pointer("/spec/template/spec/containers")
-            .and_then(|c| c.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|c| c.get("name").and_then(|n| n.as_str()) == Some("manager"))
-            })
-            .and_then(|c| c.get("env").and_then(|e| e.as_array()))
-            .map(|env| {
-                env.iter()
-                    .filter_map(|e| {
-                        let name = e.get("name")?.as_str()?.to_string();
-                        let value = e.get("value")?.as_str()?.to_string();
-                        Some((name, value))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    #[test]
-    fn inject_one_stamps_basis_parent_cluster_id_when_set() {
-        let rewritten = inject_one(basis_deployment_yaml(), &[], Some("abc-123"))
-            .expect("inject should succeed");
-        let env = extract_manager_env(&rewritten);
-        assert_eq!(
-            env,
-            vec![("BASIS_PARENT_CLUSTER_ID".to_string(), "abc-123".to_string())]
-        );
-    }
-
-    #[test]
-    fn inject_one_skips_env_when_id_missing_or_empty() {
-        // None → never stamps
-        let rewritten = inject_one(basis_deployment_yaml(), &[], None).expect("inject");
-        assert!(extract_manager_env(&rewritten).is_empty());
-
-        // Empty string → treated as "rootless"; no env written. Matches the
-        // pre-pivot bootstrap-kind path, where stamping `""` would be
-        // indistinguishable from stamping nothing but would churn the
-        // Deployment on later re-applies.
-        let rewritten = inject_one(basis_deployment_yaml(), &[], Some("")).expect("inject");
-        assert!(extract_manager_env(&rewritten).is_empty());
-    }
-
-    #[test]
-    fn inject_one_overwrites_existing_basis_parent_cluster_id() {
-        // Simulate the pre-pivot → post-pivot transition where the Deployment
-        // was previously stamped with a stale id and we re-apply with the
-        // correct one. `set_basis_parent_cluster_id_env` must not append a
-        // second env entry.
-        let with_stale = r#"apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: basis-capi-provider-controller-manager
-  namespace: capi-basis-system
-spec:
-  template:
-    spec:
-      containers:
-      - name: manager
-        env:
-        - name: BASIS_PARENT_CLUSTER_ID
-          value: stale
-        - name: OTHER
-          value: keep
-"#;
-        let rewritten = inject_one(with_stale, &[], Some("fresh")).expect("inject");
-        let env = extract_manager_env(&rewritten);
-        assert!(env.contains(&("OTHER".to_string(), "keep".to_string())));
-        let basis_entries: Vec<_> = env
-            .iter()
-            .filter(|(k, _)| k == "BASIS_PARENT_CLUSTER_ID")
-            .collect();
-        assert_eq!(
-            basis_entries.len(),
-            1,
-            "expected exactly one BASIS_PARENT_CLUSTER_ID entry"
-        );
-        assert_eq!(basis_entries[0].1, "fresh");
-    }
-
-    #[test]
-    fn inject_deployment_overrides_scopes_env_injection_to_basis() {
-        // Non-basis Deployments must pass through even when a basis id is
-        // plumbed — the gating lives in `apply_provider`, and this tests the
-        // invariant that `inject_one` with `None` leaves env untouched.
-        let proxmox_deploy = r#"apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: capmox-controller-manager
-  namespace: capmox-system
-spec:
-  template:
-    spec:
-      containers:
-      - name: manager
-"#;
-        let rewritten = inject_one(proxmox_deploy, &[], None).expect("inject");
-        assert!(extract_manager_env(&rewritten).is_empty());
-    }
-
     #[tokio::test]
     async fn mock_installer_propagates_errors() {
         let mut installer = MockCapiInstaller::new();
@@ -1679,7 +1433,6 @@ spec:
         let out = inject_deployment_overrides(
             vec![DEPLOYMENT_YAML.to_string()],
             &["default-credentials".to_string()],
-            None,
         )
         .expect("inject should succeed");
         assert_eq!(out.len(), 1);
@@ -1709,7 +1462,7 @@ spec:
 
     #[test]
     fn inject_skips_pull_secrets_when_none_requested() {
-        let out = inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &[], None)
+        let out = inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &[])
             .expect("inject should succeed");
         let spec = pod_spec(&out[0]);
         assert!(spec.get("imagePullSecrets").is_none());
@@ -1720,8 +1473,8 @@ spec:
     fn inject_is_idempotent() {
         let names = vec!["default-credentials".to_string()];
         let once =
-            inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &names, None).unwrap();
-        let twice = inject_deployment_overrides(once.clone(), &names, None).unwrap();
+            inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &names).unwrap();
+        let twice = inject_deployment_overrides(once.clone(), &names).unwrap();
 
         let spec = pod_spec(&twice[0]);
         assert_eq!(
@@ -1764,7 +1517,6 @@ spec:
         let out = inject_deployment_overrides(
             vec![yaml.to_string()],
             &["default-credentials".to_string()],
-            None,
         )
         .unwrap();
         let spec = pod_spec(&out[0]);
@@ -1805,7 +1557,6 @@ data:
         let out = inject_deployment_overrides(
             vec![configmap.to_string()],
             &["default-credentials".to_string()],
-            None,
         )
         .unwrap();
         assert_eq!(out, vec![configmap.to_string()]);

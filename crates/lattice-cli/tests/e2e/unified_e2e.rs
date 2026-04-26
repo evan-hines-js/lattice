@@ -492,9 +492,11 @@ async fn run_full_e2e() -> Result<(), String> {
     }
 
     // Storage: Rook-Ceph install, PVC provisioning, persistence-through-pod-restart.
-    // Only the Basis fixture declares `dataDiskGibs` on a worker pool;
-    // other providers don't surface raw block devices for Rook to claim.
-    if ctx.provider == InfraProvider::Basis {
+    // Opt-in via `LATTICE_E2E_STORAGE=1` because Rook needs raw block
+    // devices Ceph can claim — only fixtures that declare `dataDiskGibs`
+    // on a worker pool surface them (basis today; proxmox VMs only get
+    // a root disk, cloud providers rely on managed CSI).
+    if integration::storage::storage_tests_enabled() {
         let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((

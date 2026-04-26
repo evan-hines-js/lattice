@@ -49,6 +49,20 @@ const MARKER_PATH: &str = "/data/marker";
 /// HEALTH_OK. 20 minutes is generous but leaves slack for slow disks.
 const INSTALL_READY_TIMEOUT: Duration = Duration::from_secs(1200);
 
+/// Whether the storage e2e should run against the active fixture.
+///
+/// Rook needs at least one raw block device per worker that ceph-osd can
+/// claim — `dataDiskGibs` on a worker pool surfaces them. Only fixtures
+/// that wire that up should run this test (basis today; proxmox VMs come
+/// up with a single root disk, AWS/OpenStack rely on managed CSI). Gate
+/// via env var so the test runner opts in explicitly per fixture rather
+/// than entangling the test list with `InfraProvider` enum values.
+pub fn storage_tests_enabled() -> bool {
+    std::env::var("LATTICE_E2E_STORAGE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
 /// End-to-end storage test: Rook install → PVC → persistence-through-pod-restart.
 pub async fn run_storage_tests(kubeconfig: &str) -> Result<(), String> {
     info!("[Storage] Applying RookInstall (small-cluster config)...");

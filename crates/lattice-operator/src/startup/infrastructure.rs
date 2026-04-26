@@ -18,7 +18,7 @@ use lattice_common::SharedConfig;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_capi::installer::{ensure_capi_providers_for, CapiInstaller};
-use lattice_crd::crd::{InfraProvider, LatticeCluster, ProviderType};
+use lattice_crd::crd::{InfraProvider, LatticeCluster};
 use lattice_infra::bootstrap;
 
 use super::polling::{wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT};
@@ -73,25 +73,12 @@ pub async fn ensure_capi_infrastructure(
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-            // For basis, the post-pivot BasisCluster CR for THIS cluster has
-            // already been moved down (that's what pivot does). Its
-            // `status.basisClusterId` — populated by whichever upstream
-            // provider created this cluster — is this cluster's own id, and
-            // is what the in-cluster basis-capi-provider needs so every
-            // child it creates becomes a descendant in the same basis tree.
-            let basis_self_cluster_id = if provider_type == ProviderType::Basis {
-                read_self_basis_cluster_id(client, c).await?
-            } else {
-                None
-            };
-
             ensure_capi_providers_for(
                 client,
                 installer,
                 provider_type,
                 Some(&cp),
                 "lattice-operator",
-                basis_self_cluster_id,
             )
             .await
             .map_err(|e| anyhow::anyhow!("CAPI installation failed: {e}"))?;
@@ -99,41 +86,6 @@ pub async fn ensure_capi_infrastructure(
     }
 
     Ok(())
-}
-
-/// Read the local `BasisCluster.status.basisClusterId` for the given
-/// LatticeCluster (matched by name — the basis provider generates the
-/// `BasisCluster` with the LatticeCluster's name at provider/basis.rs:121).
-/// Missing CR / missing status returns `Ok(None)` so the provider boots
-/// rootless — caller decides whether that's acceptable.
-async fn read_self_basis_cluster_id(
-    client: &Client,
-    cluster: &LatticeCluster,
-) -> anyhow::Result<Option<String>> {
-    use kube::api::DynamicObject;
-    use kube::core::GroupVersionKind;
-    use kube::discovery::ApiResource;
-
-    let Some(name) = cluster.metadata.name.as_deref() else {
-        return Ok(None);
-    };
-    let ns = lattice_common::capi_namespace(name);
-    let ar = ApiResource::from_gvk_with_plural(
-        &GroupVersionKind::gvk("infrastructure.cluster.x-k8s.io", "v1beta1", "BasisCluster"),
-        "basisclusters",
-    );
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &ns, &ar);
-    match api.get(name).await {
-        Ok(obj) => Ok(obj
-            .data
-            .pointer("/status/basisClusterId")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-        Err(e) => Err(anyhow::anyhow!(
-            "failed to read BasisCluster '{name}' in '{ns}': {e}"
-        )),
-    }
 }
 
 /// Install general infrastructure (Istio, ESO, VictoriaMetrics, etc.) in the
@@ -289,16 +241,12 @@ async fn ensure_capi_on_bootstrap(
     .await
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Bootstrap kind has no parent — basis-capi-provider here is
-    // intentionally rootless so the management cluster it creates becomes
-    // the root of a fresh basis tree.
     ensure_capi_providers_for(
         client,
         installer,
         infrastructure,
         Some(&cp),
         "lattice-operator",
-        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("CAPI installation failed: {e}"))
