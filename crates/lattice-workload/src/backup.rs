@@ -95,23 +95,19 @@ fn compile_volume_annotations(
     volumes: &lattice_crd::crd::VolumeBackupSpec,
 ) {
     match volumes.default_policy {
-        VolumeBackupDefault::OptIn => {
-            // Opt-in: only listed volumes are backed up
-            if !volumes.include.is_empty() {
-                annotations.insert(
-                    "backup.velero.io/backup-volumes".to_string(),
-                    volumes.include.join(","),
-                );
-            }
+        // Opt-in: only listed volumes are backed up
+        VolumeBackupDefault::OptIn if !volumes.include.is_empty() => {
+            annotations.insert(
+                "backup.velero.io/backup-volumes".to_string(),
+                volumes.include.join(","),
+            );
         }
-        VolumeBackupDefault::OptOut => {
-            // Opt-out: all volumes backed up except excluded
-            if !volumes.exclude.is_empty() {
-                annotations.insert(
-                    "backup.velero.io/backup-volumes-excludes".to_string(),
-                    volumes.exclude.join(","),
-                );
-            }
+        // Opt-out: all volumes backed up except excluded
+        VolumeBackupDefault::OptOut if !volumes.exclude.is_empty() => {
+            annotations.insert(
+                "backup.velero.io/backup-volumes-excludes".to_string(),
+                volumes.exclude.join(","),
+            );
         }
         _ => {}
     }

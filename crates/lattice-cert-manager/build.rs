@@ -8,8 +8,8 @@ fn main() {
         .charts
         .get("cert-manager")
         .expect("versions.toml missing [charts.cert-manager]");
-    let chart_path = lattice_helm_build::ensure_chart("cert-manager", chart)
-        .expect("ensure cert-manager chart");
+    let chart_path =
+        lattice_helm_build::ensure_chart("cert-manager", chart).expect("ensure cert-manager chart");
 
     // CRDs rendered inline + control-plane tolerations across every cert-manager
     // workload so they can schedule on kubeadm-tainted CP nodes before workers exist.

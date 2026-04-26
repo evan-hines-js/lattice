@@ -57,12 +57,12 @@ impl ApiServerEndpoint {
 
     /// Parse `host:port` into a typed endpoint.
     fn parse_host_port(host_port: &str, source: &str) -> Result<Self, Error> {
-        let (host, port_str) = host_port.rsplit_once(':').ok_or_else(|| {
-            Error::internal(format!("{source} has no port: {host_port}"))
-        })?;
-        let port: u16 = port_str.parse().map_err(|e| {
-            Error::internal(format!("{source} port is not a u16: {port_str}: {e}"))
-        })?;
+        let (host, port_str) = host_port
+            .rsplit_once(':')
+            .ok_or_else(|| Error::internal(format!("{source} has no port: {host_port}")))?;
+        let port: u16 = port_str
+            .parse()
+            .map_err(|e| Error::internal(format!("{source} port is not a u16: {port_str}: {e}")))?;
         Ok(Self {
             host: host.to_string(),
             port,
@@ -85,10 +85,9 @@ impl ApiServerEndpoint {
         cluster_name: &str,
         capi_namespace: &str,
     ) -> Result<Option<Self>, Error> {
-        let api_resource =
-            build_api_resource_with_discovery(client, "cluster.x-k8s.io", "Cluster")
-                .await
-                .map_err(|e| Error::internal(format!("CAPI Cluster discovery failed: {e}")))?;
+        let api_resource = build_api_resource_with_discovery(client, "cluster.x-k8s.io", "Cluster")
+            .await
+            .map_err(|e| Error::internal(format!("CAPI Cluster discovery failed: {e}")))?;
 
         let api: Api<DynamicObject> =
             Api::namespaced_with(client.clone(), capi_namespace, &api_resource);
@@ -176,10 +175,8 @@ impl ApiServerEndpoint {
             }
         };
 
-        let Some(cluster_config_yaml) = cm
-            .data
-            .as_ref()
-            .and_then(|d| d.get("ClusterConfiguration"))
+        let Some(cluster_config_yaml) =
+            cm.data.as_ref().and_then(|d| d.get("ClusterConfiguration"))
         else {
             return Ok(None);
         };

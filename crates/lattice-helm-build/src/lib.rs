@@ -60,8 +60,8 @@ pub struct Resource {
 /// Workspace root computed from `$CARGO_MANIFEST_DIR` (two `.parent()` hops
 /// from `crates/<crate>/`).
 pub fn workspace_root() -> Result<PathBuf> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map_err(|e| format!("CARGO_MANIFEST_DIR: {e}"))?;
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").map_err(|e| format!("CARGO_MANIFEST_DIR: {e}"))?;
     let parent = Path::new(&manifest_dir)
         .parent()
         .ok_or_else(|| format!("CARGO_MANIFEST_DIR has no parent: {manifest_dir}"))?
@@ -80,8 +80,8 @@ pub fn charts_dir() -> Result<PathBuf> {
 pub fn read_versions() -> Result<Versions> {
     let path = workspace_root()?.join("versions.toml");
     println!("cargo:rerun-if-changed={}", path.display());
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     toml::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 

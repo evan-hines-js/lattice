@@ -65,7 +65,13 @@ impl ClusterFacts {
                 .values()
                 .any(|p| p.is_autoscaling_enabled()),
             lb_cidr,
-            pod_cidr: cluster.spec.provider.kubernetes.cluster_network.pod_cidr.clone(),
+            pod_cidr: cluster
+                .spec
+                .provider
+                .kubernetes
+                .cluster_network
+                .pod_cidr
+                .clone(),
             cluster_manifest,
         }
     }

@@ -491,8 +491,12 @@ impl KubeClient for KubeClientImpl {
         cluster_name: &str,
         capi_namespace: &str,
     ) -> Result<Option<String>, Error> {
-        self.get_basis_spec_field(cluster_name, capi_namespace, "/spec/controlPlaneEndpoint/host")
-            .await
+        self.get_basis_spec_field(
+            cluster_name,
+            capi_namespace,
+            "/spec/controlPlaneEndpoint/host",
+        )
+        .await
     }
 
     async fn cordon_node(&self, name: &str) -> Result<(), Error> {

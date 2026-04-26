@@ -41,9 +41,7 @@ const CSR_TOKEN_TTL: Duration = Duration::from_secs(600);
 /// indirection needed to keep `BootstrapState` testable without smuggling
 /// test-only branches into the production code path.
 pub type ApiServerEndpointResolver = Arc<
-    dyn Fn(String) -> BoxFuture<'static, Result<ApiServerEndpoint, BootstrapError>>
-        + Send
-        + Sync,
+    dyn Fn(String) -> BoxFuture<'static, Result<ApiServerEndpoint, BootstrapError>> + Send + Sync,
 >;
 
 /// Resolves the LB CIDR for a given child cluster id at bundle-render
@@ -55,11 +53,8 @@ pub type ApiServerEndpointResolver = Arc<
 ///
 /// Production injects a closure that dispatches by provider type
 /// (e.g. `Provider::lb_cidr`). Tests inject a no-op resolver.
-pub type LbCidrResolver = Arc<
-    dyn Fn(String) -> BoxFuture<'static, Result<Option<String>, BootstrapError>>
-        + Send
-        + Sync,
->;
+pub type LbCidrResolver =
+    Arc<dyn Fn(String) -> BoxFuture<'static, Result<Option<String>, BootstrapError>> + Send + Sync>;
 
 /// No-op resolver for tests + paths that don't render LB-IPAM resources
 /// (cloud providers using native LBs, install-time bundle generation
@@ -446,8 +441,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         // CIDR off `BasisCluster.spec.serviceBlockCidr`) can't answer
         // synchronously at registration time. By the time the agent
         // calls into bootstrap, the CR exists and the field is populated.
-        let lb_cidr =
-            (self.lb_cidr_resolver)(info.facts.cluster_name.clone()).await?;
+        let lb_cidr = (self.lb_cidr_resolver)(info.facts.cluster_name.clone()).await?;
         let mut facts = info.facts.clone();
         facts.lb_cidr = lb_cidr;
 

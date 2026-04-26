@@ -287,10 +287,7 @@ async fn refresh_status_endpoint(
     let resolved = ApiServerEndpoint::resolve_for_cluster(client, &name, is_self)
         .await?
         .map(|ep| ep.to_host_port());
-    let current = cluster
-        .status
-        .as_ref()
-        .and_then(|s| s.endpoint.clone());
+    let current = cluster.status.as_ref().and_then(|s| s.endpoint.clone());
     if current == resolved {
         return Ok(());
     }

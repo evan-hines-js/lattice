@@ -786,7 +786,13 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
         // LB CIDR is resolved via the provider trait at runtime; the
         // spec carries the static value for Docker/Proxmox.
         assert_eq!(
-            spec.provider.config.docker.as_ref().unwrap().lb_cidr.as_deref(),
+            spec.provider
+                .config
+                .docker
+                .as_ref()
+                .unwrap()
+                .lb_cidr
+                .as_deref(),
             Some("172.18.255.1/32")
         );
         assert_eq!(

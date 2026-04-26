@@ -12,7 +12,9 @@ use kube::runtime::controller::Action;
 use kube::Client;
 
 use lattice_common::install::{run_simple_install_reconcile, ReadinessCheck, SimpleInstallConfig};
-use lattice_common::{ApiServerEndpoint, ControllerContext, ReconcileError, REQUEUE_CRD_NOT_FOUND_SECS};
+use lattice_common::{
+    ApiServerEndpoint, ControllerContext, ReconcileError, REQUEUE_CRD_NOT_FOUND_SECS,
+};
 use lattice_crd::crd::{CiliumInstall, LatticeCluster};
 
 use super::manifests;
@@ -41,7 +43,9 @@ pub async fn reconcile(
         .as_ref()
         .and_then(|s| s.endpoint.as_deref())
     else {
-        return Ok(Action::requeue(Duration::from_secs(REQUEUE_CRD_NOT_FOUND_SECS)));
+        return Ok(Action::requeue(Duration::from_secs(
+            REQUEUE_CRD_NOT_FOUND_SECS,
+        )));
     };
     let endpoint = ApiServerEndpoint::parse(endpoint).map_err(|e| {
         ReconcileError::Validation(format!(

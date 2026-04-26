@@ -486,8 +486,8 @@ impl PolicyEngine {
         let mut loaded = 0;
         let mut skipped = 0;
 
-        inherited.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
-        local.sort_by(|a, b| b.spec.priority.cmp(&a.spec.priority));
+        inherited.sort_by_key(|p| std::cmp::Reverse(p.spec.priority));
+        local.sort_by_key(|p| std::cmp::Reverse(p.spec.priority));
 
         for policy_crd in inherited.iter().chain(local.iter()) {
             if !policy_crd.spec.enabled {

@@ -94,7 +94,9 @@ pub async fn run_storage_tests(kubeconfig: &str) -> Result<(), String> {
     // attach the RBD on a different host we exercise the cross-host read
     // path that replication=2/failure_domain=host is supposed to provide.
     let original_node = pod_node(kubeconfig).await?;
-    info!("[Storage] Cordoning writer node {original_node} to force reschedule onto replica host...");
+    info!(
+        "[Storage] Cordoning writer node {original_node} to force reschedule onto replica host..."
+    );
     cordon_node(kubeconfig, &original_node).await?;
 
     let persistence_result = run_persistence_check(kubeconfig, &original_node).await;

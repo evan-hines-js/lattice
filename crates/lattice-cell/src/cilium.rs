@@ -37,9 +37,9 @@ pub(crate) fn generate_l2_lb_resources(cidr: &str) -> Result<Vec<String>, Cilium
 /// upstream device will accept. `start`/`stop` lets us narrow to
 /// `[network+1, broadcast-1]`. /32 is a single host (start==stop).
 fn generate_ip_pool_l2(cidr: &str) -> Result<String, CiliumRenderError> {
-    let net: ipnet::Ipv4Net = cidr
-        .parse()
-        .map_err(|e: ipnet::AddrParseError| CiliumRenderError::InvalidCidr(cidr.into(), e.to_string()))?;
+    let net: ipnet::Ipv4Net = cidr.parse().map_err(|e: ipnet::AddrParseError| {
+        CiliumRenderError::InvalidCidr(cidr.into(), e.to_string())
+    })?;
     let (start, stop) = host_range(&net);
     let pool = CiliumLoadBalancerIPPool {
         api_version: "cilium.io/v2alpha1".to_string(),

@@ -563,11 +563,7 @@ async fn get_or_create_bootstrap_token(
     // manifests apply, so by the time the agent fetches its bundle the
     // CR exists and the provider can answer.
     let registration = lattice_cell::ClusterRegistration {
-        facts: lattice_cell::bootstrap::ClusterFacts::from_cluster(
-            cluster,
-            cluster_manifest,
-            None,
-        ),
+        facts: lattice_cell::bootstrap::ClusterFacts::from_cluster(cluster, cluster_manifest, None),
         cell_endpoint: cell_endpoint.to_string(),
         ca_certificate: ca_cert.to_string(),
     };
@@ -584,4 +580,3 @@ async fn get_or_create_bootstrap_token(
 
     Ok(token_str)
 }
-

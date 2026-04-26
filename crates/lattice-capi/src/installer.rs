@@ -1472,8 +1472,7 @@ spec:
     #[test]
     fn inject_is_idempotent() {
         let names = vec!["default-credentials".to_string()];
-        let once =
-            inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &names).unwrap();
+        let once = inject_deployment_overrides(vec![DEPLOYMENT_YAML.to_string()], &names).unwrap();
         let twice = inject_deployment_overrides(once.clone(), &names).unwrap();
 
         let spec = pod_spec(&twice[0]);

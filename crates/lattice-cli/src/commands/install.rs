@@ -712,16 +712,17 @@ impl Installer {
         // the one place we resolve the endpoint without a CAPI Cluster CR.
         // Anything else (host kubeconfig, Docker port-forward) is wrong
         // for Cilium agents running inside the cluster.
-        let api_server_endpoint = lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client)
-            .await
-            .map_err(|e| Error::command_failed(e.to_string()))?
-            .ok_or_else(|| {
-                Error::command_failed(
-                    "kube-system/kubeadm-config has no controlPlaneEndpoint — \
+        let api_server_endpoint =
+            lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client)
+                .await
+                .map_err(|e| Error::command_failed(e.to_string()))?
+                .ok_or_else(|| {
+                    Error::command_failed(
+                        "kube-system/kubeadm-config has no controlPlaneEndpoint — \
                      the management cluster must be kubeadm-bootstrapped (kind)"
-                        .to_string(),
-                )
-            })?;
+                            .to_string(),
+                    )
+                })?;
         let config = BootstrapBundleConfig {
             facts: &facts,
             image: &self.image,

@@ -226,8 +226,8 @@ impl BasisProvider {
             // BasisMachine's, so a direct serde round-trip is the
             // canonical mapping — no per-field copy that would drift
             // when basis adds an op-type or weight knob.
-            spec["placement"] = serde_json::to_value(p)
-                .expect("PlacementSpec serializes to JSON infallibly");
+            spec["placement"] =
+                serde_json::to_value(p).expect("PlacementSpec serializes to JSON infallibly");
         }
         CAPIManifest::new(
             BASIS_API_VERSION,
@@ -346,10 +346,8 @@ impl Provider for BasisProvider {
                 &suffix,
                 pool_spec.placement.as_ref(),
             ));
-            let mut wp_template = generate_bootstrap_config_template_for_pool(
-                &config,
-                &pool_config,
-            );
+            let mut wp_template =
+                generate_bootstrap_config_template_for_pool(&config, &pool_config);
             inject_debug_post_commands(&mut wp_template, &spec.provider.kubernetes.bootstrap);
             manifests.push(wp_template);
         }
@@ -546,10 +544,7 @@ mod tests {
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
             .expect("manifest generation should succeed");
-        let bc = manifests
-            .iter()
-            .find(|m| m.kind == "BasisCluster")
-            .unwrap();
+        let bc = manifests.iter().find(|m| m.kind == "BasisCluster").unwrap();
         let json = serde_json::to_string(&bc.spec).unwrap();
         assert!(json.contains(r#""externalIpPool":"cell-public""#));
         // externalServiceIps is omitted in the default case so basis
@@ -570,10 +565,7 @@ mod tests {
             .generate_capi_manifests(&cluster, &BootstrapInfo::default())
             .await
             .expect("manifest generation should succeed");
-        let bc = manifests
-            .iter()
-            .find(|m| m.kind == "BasisCluster")
-            .unwrap();
+        let bc = manifests.iter().find(|m| m.kind == "BasisCluster").unwrap();
         let json = serde_json::to_string(&bc.spec).unwrap();
         assert!(json.contains(r#""externalServiceIps":32"#));
     }

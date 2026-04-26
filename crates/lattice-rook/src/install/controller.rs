@@ -181,7 +181,10 @@ fn has_control_plane_taint(node: &Node) -> bool {
 /// `standard`) leaves the cluster in a "two defaults, ambiguous" state.
 async fn demote_other_default_storage_classes(client: &Client) -> Result<(), ReconcileError> {
     let api: Api<StorageClass> = Api::all(client.clone());
-    let list = api.list(&ListParams::default()).await.map_err(ReconcileError::Kube)?;
+    let list = api
+        .list(&ListParams::default())
+        .await
+        .map_err(ReconcileError::Kube)?;
 
     for sc in list.items {
         let name = sc.name_any();

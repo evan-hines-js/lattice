@@ -351,10 +351,7 @@ mod tests {
         assert!(done.completed_at.is_some());
         assert_eq!(done.from_version.as_deref(), Some("1.18.0"));
 
-        let failed = started.finished(
-            UpgradeOutcome::Failed,
-            Some("readiness gate failed".into()),
-        );
+        let failed = started.finished(UpgradeOutcome::Failed, Some("readiness gate failed".into()));
         assert_eq!(failed.outcome, Some(UpgradeOutcome::Failed));
         assert_eq!(
             failed.failure_reason.as_deref(),

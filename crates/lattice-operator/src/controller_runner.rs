@@ -530,11 +530,11 @@ where
     let watcher_config = || WatcherConfig::default().timeout(WATCH_TIMEOUT_SECS);
     macro_rules! watch_dep {
         ($kind:ty) => {
-            controller.watches(
-                Api::<$kind>::all(client.clone()),
-                watcher_config(),
-                |_| std::iter::once(ObjectRef::<K>::new(lattice_common::install::INSTALL_SINGLETON)),
-            )
+            controller.watches(Api::<$kind>::all(client.clone()), watcher_config(), |_| {
+                std::iter::once(ObjectRef::<K>::new(
+                    lattice_common::install::INSTALL_SINGLETON,
+                ))
+            })
         };
     }
     match dep {

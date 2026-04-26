@@ -311,11 +311,7 @@ impl ProviderConfig {
             ));
         }
         if let Some(ref basis) = self.basis {
-            if basis
-                .external_ip_pool
-                .as_deref()
-                .is_none_or(str::is_empty)
-            {
+            if basis.external_ip_pool.as_deref().is_none_or(str::is_empty) {
                 return Err(crate::ValidationError::new(
                     "basis.externalIpPool is required and must name a pool defined in the controller's network.pools",
                 ));

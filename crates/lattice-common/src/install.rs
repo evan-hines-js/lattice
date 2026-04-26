@@ -398,7 +398,9 @@ where
     } else {
         InstallPhase::Installing
     };
-    let prior_attempt = install.install_status().and_then(|s| s.last_upgrade.clone());
+    let prior_attempt = install
+        .install_status()
+        .and_then(|s| s.last_upgrade.clone());
     let started_attempt =
         UpgradeAttempt::started(prior_attempt.as_ref(), &version, prior_observed.as_deref());
 
@@ -414,12 +416,19 @@ where
     }
     .with_condition(requires_cond.clone())
     .with_last_upgrade(started_attempt.clone());
-    write_with_td(&ctx.client, install_ref, field_manager, in_progress_update, td).await?;
+    write_with_td(
+        &ctx.client,
+        install_ref,
+        field_manager,
+        in_progress_update,
+        td,
+    )
+    .await?;
 
     if let Err(e) = apply_manifests(&ctx.client, &manifests, &ApplyOptions::default()).await {
         warn!(install = %name, kind = %log_kind, error = %e, "install apply failed");
-        let failed = started_attempt
-            .finished(UpgradeOutcome::Failed, Some(format!("apply failed: {e}")));
+        let failed =
+            started_attempt.finished(UpgradeOutcome::Failed, Some(format!("apply failed: {e}")));
         write_with_td(
             &ctx.client,
             install_ref,
@@ -670,8 +679,8 @@ mod tests {
 
     #[test]
     fn blocked_when_observed_missing() {
-        let err = evaluate_dependency(&dep(Subsystem::Istio, ">=1.24"), None)
-            .expect_err("should block");
+        let err =
+            evaluate_dependency(&dep(Subsystem::Istio, ">=1.24"), None).expect_err("should block");
         assert!(err.contains("istio has no observed version"));
     }
 

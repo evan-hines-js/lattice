@@ -1924,7 +1924,11 @@ mod tests {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
+                vip: Some(VipConfig::arp(
+                    "10.0.0.100".to_string(),
+                    "eth0".to_string(),
+                    None,
+                )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
             };
@@ -2039,7 +2043,11 @@ mod tests {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
+                vip: Some(VipConfig::arp(
+                    "10.0.0.100".to_string(),
+                    "eth0".to_string(),
+                    None,
+                )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
             };
@@ -2198,7 +2206,11 @@ mod tests {
                 replicas: 1,
                 cert_sans: vec!["10.0.0.100".to_string()],
                 post_kubeadm_commands: vec![],
-                vip: Some(VipConfig::arp("10.0.0.100".to_string(), "eth0".to_string(), None)),
+                vip: Some(VipConfig::arp(
+                    "10.0.0.100".to_string(),
+                    "eth0".to_string(),
+                    None,
+                )),
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
                 registry_mirrors: vec![],
             };
