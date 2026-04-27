@@ -14,6 +14,7 @@ use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
 use lattice_common::kube_utils::HasApiResource;
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::status_check;
 use lattice_common::{
     ControllerContext, ReconcileError, LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME,
@@ -46,14 +47,35 @@ const REQUEUE_WAITING_SECS: u64 = 10;
 /// On first run, generates a random username and password, stores them in a
 /// K8s Secret in `lattice-system`. On subsequent runs, loads the existing
 /// credentials. Returns the credentials for the webhook server to use.
+///
+/// Runs at operator startup, when the in-cluster apiserver may briefly
+/// refuse connections (controller-manager / scheduler / apiserver still
+/// stabilising on a fresh control plane). A single `Connection refused`
+/// here used to crash the operator and trigger CrashLoopBackoff for
+/// minutes; both calls are now wrapped in bounded exponential retry.
 pub async fn ensure_webhook_credentials(
     client: &Client,
 ) -> Result<WebhookCredentials, ReconcileError> {
     let api: Api<k8s_openapi::api::core::v1::Secret> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
+    // ~2 minutes total at the default backoff schedule — long enough to ride
+    // out the apiserver coming up, short enough that a genuinely broken
+    // cluster surfaces as a real failure instead of an indefinite hang.
+    let retry = RetryConfig::with_max_attempts(8);
+
     // Try to load existing credentials
-    if let Ok(secret) = api.get(LOCAL_WEBHOOK_AUTH_SECRET).await {
+    let existing = retry_with_backoff(&retry, "get webhook auth secret", || async {
+        match api.get(LOCAL_WEBHOOK_AUTH_SECRET).await {
+            Ok(secret) => Ok(Some(secret)),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .await
+    .map_err(ReconcileError::from)?;
+
+    if let Some(secret) = existing {
         if let Some(data) = secret.data {
             let username = data
                 .get("username")
@@ -115,11 +137,15 @@ pub async fn ensure_webhook_credentials(
     });
 
     let params = PatchParams::apply(FIELD_MANAGER).force();
-    api.patch(
-        LOCAL_WEBHOOK_AUTH_SECRET,
-        &params,
-        &Patch::Apply(&secret_json),
-    )
+    retry_with_backoff(&retry, "apply webhook auth secret", || async {
+        api.patch(
+            LOCAL_WEBHOOK_AUTH_SECRET,
+            &params,
+            &Patch::Apply(&secret_json),
+        )
+        .await
+        .map(|_| ())
+    })
     .await?;
 
     info!("Generated new webhook auth credentials");

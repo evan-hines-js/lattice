@@ -144,8 +144,15 @@ const SECRET_SYNC_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 /// Agents disconnected longer than this are removed to prevent memory leaks.
 const DISCONNECTED_AGENT_TTL: Duration = Duration::from_secs(3600); // 1 hour
 
-/// Interval for periodic stale agent cleanup
-const AGENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+/// Interval for periodic stale agent cleanup.
+///
+/// Must be small relative to `HEARTBEAT_STALE_THRESHOLD` (90s): the
+/// staleness threshold defines *when* an agent counts as dead, but the
+/// cleanup tick is *when we notice*. With a 300s interval, kubectl
+/// requests routed through the K8s API proxy could sit in a multi-minute
+/// black hole after an agent crash before the cell fast-fails them.
+/// 15s caps detection latency at threshold + 15s.
+const AGENT_CLEANUP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Push distributable resources to all connected agents
 async fn push_resources_to_agents(

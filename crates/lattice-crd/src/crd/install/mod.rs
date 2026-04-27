@@ -153,6 +153,12 @@ pub struct InstallStatus {
     pub conditions: Vec<Condition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_upgrade: Option<UpgradeAttempt>,
+    /// SHA-256 (hex) of the rendered manifest bundle that produced the
+    /// current `Ready` state. The reconciler skips its server-side apply
+    /// loop when this matches the desired manifest hash, which is what
+    /// keeps steady-state CPU on the apiserver near zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_manifest_hash: Option<String>,
 }
 
 /// Lifecycle phase of a dependency Install CRD.
@@ -232,29 +238,32 @@ pub struct UpgradeAttempt {
 }
 
 impl UpgradeAttempt {
-    /// Open a fresh attempt or resume an in-flight one targeting the same
-    /// version.
+    /// Open a fresh attempt, resume an in-flight one, or return a completed
+    /// one verbatim when nothing has changed.
     ///
-    /// When `prior` records an open attempt (no `outcome`) for the same
-    /// `to_version`, `started_at` is preserved so duration metrics span the
-    /// whole apply/wait loop instead of restarting on every reconcile. A
-    /// retarget (different `to_version`) abandons the prior open attempt
-    /// and stamps a new `started_at`.
+    /// Idempotency rule: if `prior` describes the same `(from_version,
+    /// to_version)` transition, return it unchanged — whether it's still
+    /// in-flight or already terminal. This is what stops steady-state
+    /// reconciles from stamping a fresh `started_at` and mutating status,
+    /// which would fire the controller's own watch and create a hot loop.
+    /// Only a genuine retarget (different `to_version` / `from_version`)
+    /// stamps a new `started_at`.
     pub fn started(
         prior: Option<&Self>,
         target_version: impl Into<String>,
         from_version: Option<&str>,
     ) -> Self {
         let target_version = target_version.into();
-        let now = chrono::Utc::now().to_rfc3339();
-        let started_at = prior
-            .filter(|p| p.to_version == target_version && p.outcome.is_none())
-            .and_then(|p| p.started_at.clone())
-            .unwrap_or(now);
+        let from = from_version.map(str::to_string);
+        if let Some(p) = prior {
+            if p.to_version == target_version && p.from_version == from {
+                return p.clone();
+            }
+        }
         Self {
-            from_version: from_version.map(str::to_string),
+            from_version: from,
             to_version: target_version,
-            started_at: Some(started_at),
+            started_at: Some(chrono::Utc::now().to_rfc3339()),
             completed_at: None,
             outcome: None,
             failure_reason: None,
@@ -263,9 +272,15 @@ impl UpgradeAttempt {
 
     /// Stamp terminal fields onto an in-progress attempt.
     ///
-    /// `failure_reason` is only meaningful for `UpgradeOutcome::Failed` /
-    /// `RolledBack`; pass `None` for `Succeeded`.
+    /// Idempotency rule: if `self` already records the same `outcome` and
+    /// `failure_reason`, return it unchanged so steady-state reconciles
+    /// don't keep stamping fresh `completed_at` values. `failure_reason` is
+    /// only meaningful for `UpgradeOutcome::Failed` / `RolledBack`; pass
+    /// `None` for `Succeeded`.
     pub fn finished(&self, outcome: UpgradeOutcome, failure_reason: Option<String>) -> Self {
+        if self.outcome == Some(outcome) && self.failure_reason == failure_reason {
+            return self.clone();
+        }
         Self {
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
             outcome: Some(outcome),
@@ -334,6 +349,53 @@ mod tests {
         let a = UpgradeAttempt::started(Some(&prior), "1.19.2", Some("1.18.0"));
         assert_ne!(a.started_at.as_deref(), Some("2026-04-25T10:00:00Z"));
         assert_eq!(a.to_version, "1.19.2");
+    }
+
+    #[test]
+    fn started_returns_completed_attempt_verbatim() {
+        // Steady-state reconcile after success: must not stamp a new
+        // started_at, otherwise the status patch fires the self-watch.
+        let prior = UpgradeAttempt {
+            from_version: Some("1.18.0".into()),
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: Some("2026-04-25T10:01:00Z".into()),
+            outcome: Some(UpgradeOutcome::Succeeded),
+            failure_reason: None,
+        };
+        let a = UpgradeAttempt::started(Some(&prior), "1.19.1", Some("1.18.0"));
+        assert_eq!(a, prior);
+    }
+
+    #[test]
+    fn finished_returns_self_when_outcome_unchanged() {
+        // Steady-state reconcile must not restamp completed_at.
+        let done = UpgradeAttempt {
+            from_version: Some("1.18.0".into()),
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: Some("2026-04-25T10:01:00Z".into()),
+            outcome: Some(UpgradeOutcome::Succeeded),
+            failure_reason: None,
+        };
+        let again = done.finished(UpgradeOutcome::Succeeded, None);
+        assert_eq!(again, done);
+    }
+
+    #[test]
+    fn finished_restamps_when_outcome_changes() {
+        let started = UpgradeAttempt {
+            from_version: None,
+            to_version: "1.19.1".into(),
+            started_at: Some("2026-04-25T10:00:00Z".into()),
+            completed_at: Some("2026-04-25T10:00:30Z".into()),
+            outcome: Some(UpgradeOutcome::Failed),
+            failure_reason: Some("readiness gate failed".into()),
+        };
+        let recovered = started.finished(UpgradeOutcome::Succeeded, None);
+        assert_eq!(recovered.outcome, Some(UpgradeOutcome::Succeeded));
+        assert_eq!(recovered.failure_reason, None);
+        assert_ne!(recovered.completed_at, started.completed_at);
     }
 
     #[test]

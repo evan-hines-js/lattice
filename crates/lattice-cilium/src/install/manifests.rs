@@ -88,8 +88,8 @@ pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
     )
 }
 
-/// Allow ingress from the local node (`host`) and peer nodes
-/// (`remote-node`) to every pod, on any port.
+/// Allow ingress from the local node (`host`), peer nodes (`remote-node`),
+/// and the kube-apiserver to every pod, on any port.
 ///
 /// Required for kubelet liveness/readiness probes, kube-apiserver
 /// webhook callbacks, Service traffic SNATed to the node IP, and
@@ -99,6 +99,12 @@ pub fn generate_ztunnel_allowlist() -> CiliumClusterwideNetworkPolicy {
 /// arrive identified as `remote-node` (or `host` for the local
 /// kubelet) rather than as a known pod identity.
 ///
+/// `kube-apiserver` is listed alongside `host`/`remote-node` because Cilium
+/// tags apiserver IPs with the dedicated `reserved:kube-apiserver` identity,
+/// and policies that select only the node identities can miss webhook
+/// callbacks before per-pod LMM CNPs are reconciled (they fail closed at
+/// socketLB with `connect: operation not permitted`).
+///
 /// `enableDefaultDeny: { ingress: false }` is critical: this policy
 /// is purely additive and must not flip pods into default-deny ingress.
 pub fn generate_allow_node_ingress() -> CiliumClusterwideNetworkPolicy {
@@ -106,7 +112,7 @@ pub fn generate_allow_node_ingress() -> CiliumClusterwideNetworkPolicy {
         ClusterwideMetadata::new("allow-node-ingress"),
         CiliumClusterwideSpec {
             description: Some(
-                "Allow ingress from host + remote-node to all pods. Required for kubelet probes, webhooks, SNATed Service traffic, and cilium-health.".to_string(),
+                "Allow ingress from host + remote-node + kube-apiserver to all pods. Required for kubelet probes, admission webhooks, SNATed Service traffic, and cilium-health.".to_string(),
             ),
             enable_default_deny: Some(EnableDefaultDeny {
                 egress: false,
@@ -116,7 +122,11 @@ pub fn generate_allow_node_ingress() -> CiliumClusterwideNetworkPolicy {
             ingress: vec![ClusterwideIngressRule {
                 from_cidr: vec![],
                 from_endpoints: vec![],
-                from_entities: vec!["host".to_string(), "remote-node".to_string()],
+                from_entities: vec![
+                    "host".to_string(),
+                    "remote-node".to_string(),
+                    "kube-apiserver".to_string(),
+                ],
                 to_ports: vec![],
             }],
             egress: vec![],
@@ -415,6 +425,7 @@ mod tests {
         let rule = &p.spec.ingress[0];
         assert!(rule.from_entities.contains(&"host".to_string()));
         assert!(rule.from_entities.contains(&"remote-node".to_string()));
+        assert!(rule.from_entities.contains(&"kube-apiserver".to_string()));
         assert!(rule.to_ports.is_empty(), "no port restriction");
         assert!(p.spec.egress.is_empty());
     }

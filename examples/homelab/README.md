@@ -67,25 +67,21 @@ so backend services are only accessible through HAProxy.
 - A cert-manager `ClusterIssuer` named `homelab-selfsigned` on the backend
   cluster (or change the issuer name in the media YAMLs)
 
-## Step 1: Create the Basis InfraProvider
+## Step 1: Set Basis credentials
 
-The clusters need Basis controller credentials. Seed them on the bootstrap
-cluster from the four `BASIS_*` env vars (the installer expects these). Then
-apply the InfraProvider — the existing `edge-cluster.yaml` already includes a
-matching `InfraProvider` and `ImageProvider`, so this step only matters for
-the bootstrap cluster:
+`lattice install` seeds Basis credentials into the bootstrap cluster from
+these env vars (and the installed edge cluster pivots them along with the
+`InfraProvider` / `ImageProvider` defined in `edge-cluster.yaml`):
 
 ```bash
 export BASIS_CONTROLLER_URL=https://your-basis:7443
 export BASIS_CLIENT_CERT="$(cat client.crt)"
 export BASIS_CLIENT_KEY="$(cat client.key)"
 export BASIS_CA_CERT="$(cat ca.crt)"
-
-# (installer seeds the basis-credentials Secret in lattice-system from these)
 ```
 
 Then update `serverUrl` in `edge-cluster.yaml` to point at your Basis
-controller before applying.
+controller.
 
 ## Step 2: Build and push the route-adapter image
 
@@ -96,15 +92,21 @@ docker push ghcr.io/evan-hines-js/lattice-route-adapter:latest
 cd ..
 ```
 
-## Step 3: Create the edge cluster
+## Step 3: Install the edge cluster
+
+The edge is the root of the hierarchy, so it can't be `kubectl apply`-ed —
+there's no parent yet. `lattice install` spins up a temporary kind bootstrap
+cluster, provisions the edge from `edge-cluster.yaml`, pivots CAPI onto it,
+and tears the bootstrap down:
 
 ```bash
-kubectl apply -f edge-cluster.yaml
-kubectl wait --for=condition=Ready latticecluster/edge --timeout=20m
+lattice install -f edge-cluster.yaml
 ```
 
-This applies the LatticeCluster, the basis InfraProvider, and the default
-ImageProvider in one shot.
+The bundle includes the `LatticeCluster`, the basis `InfraProvider`, and the
+default `ImageProvider` — the installer applies all three. When it returns,
+`~/.lattice/kubeconfig.root` points at the edge cluster's apiserver and
+`~/.lattice/kubeconfig.proxy` points at the Cedar-authorized proxy.
 
 ## Step 4: Deploy HAProxy on the edge
 
@@ -116,14 +118,18 @@ kubectl wait --for=condition=Ready latticeservice/haproxy-fw -n edge --timeout=5
 
 ## Step 5: Create the backend cluster
 
-The edge cluster provisions the backend on `cell-internal`:
+The edge cluster provisions the backend on `cell-internal`. Because the
+backend's spec sets `storage: true`, the operator also creates a
+`RookInstall` sized for the worker pool (3 workers → mon.count=3,
+replication=3, host failure domain) as part of bootstrap — no manual
+`kubectl apply` needed.
 
 ```bash
 kubectl apply -f backend-cluster.yaml
 kubectl wait --for=condition=Ready latticecluster/backend --timeout=30m
 ```
 
-## Step 6: Get the backend kubeconfig
+## Step 6: Get the backend kubeconfig and verify storage
 
 ```bash
 # Extract from the proxy (recommended — preserves Cedar authorization)
@@ -131,30 +137,20 @@ BACKEND_KC=$(lattice kubeconfig backend)
 # Or extract directly from the secret
 BACKEND_KC=/tmp/backend-kubeconfig
 kubectl get secret backend-kubeconfig -o jsonpath='{.data.value}' | base64 -d > $BACKEND_KC
-```
 
-## Step 7: Install Rook-Ceph storage on the backend
-
-The backend cluster has 3 workers with a 250 GiB raw data disk each
-(`/dev/vdc`). Install Rook to claim them as OSDs:
-
-```bash
-kubectl --kubeconfig=$BACKEND_KC apply -f backend/storage/rook-install.yaml
+# Wait for Rook to reach HEALTH_OK (mons forming quorum + OSDs LUKS-format
+# their disks; usually under 10 minutes on real hardware).
 kubectl --kubeconfig=$BACKEND_KC wait --for=jsonpath='{.status.phase}'=Ready \
   rookinstall/default --timeout=20m
-```
 
-When the controller flips `rook-ceph-block` to default it also demotes any
-other default StorageClass (the bootstrap-installed `standard`) so the
-cluster ends up with exactly one default. Verify:
-
-```bash
+# `rook-ceph-block` should be the only default StorageClass — the
+# RookInstall controller demotes the bootstrap-installed `standard`.
 kubectl --kubeconfig=$BACKEND_KC get sc
 # rook-ceph-block (default)   rook-ceph.rbd.csi.ceph.com   ...
 # standard                    rancher.io/local-path        ...
 ```
 
-## Step 8: Deploy the media stack on the backend
+## Step 7: Deploy the media stack on the backend
 
 ```bash
 kubectl --kubeconfig=$BACKEND_KC apply -f backend/media/namespace.yaml
@@ -165,7 +161,7 @@ The volume resources in `backend/media/` don't pin a `storageClassName`, so
 they bind against the cluster default — `rook-ceph-block` — and survive node
 failures.
 
-## Step 9: Configure DNS
+## Step 8: Configure DNS
 
 Find the edge HAProxy LoadBalancer IP (allocated from `cell-public`):
 
@@ -182,7 +178,7 @@ Add to your router's DNS or `/etc/hosts`:
 <edge-lb-ip>  nzbget.home.arpa
 ```
 
-## Step 10: Verify
+## Step 9: Verify
 
 ```bash
 # Routes propagated from backend to edge
@@ -208,6 +204,7 @@ curl http://sonarr.home.arpa
 - **VM sizing**: Edit `instanceType` in cluster YAMLs
 - **Restrict access**: Change `allowedServices: ["*"]` to specific callers like
   `["edge/haproxy-fw"]`
-- **Smaller backend**: Drop to 2 workers if disk is scarce, then lower
-  `replication` and `monCount` in `rook-install.yaml` (mon=1 with
-  `allowMultipleMonsPerNode: true` works for single-node dev only)
+- **Smaller backend**: Drop to 2 workers if disk is scarce — the operator
+  auto-tunes `RookInstall` to mon=1, replication=2, host failure domain.
+  At 1 worker it falls back to osd failure domain with stacked mons (dev
+  only; node failure loses all replicas)

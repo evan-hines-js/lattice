@@ -11,6 +11,8 @@
 
 #![cfg(feature = "provider-e2e")]
 
+use std::time::Duration;
+
 use tracing::info;
 
 use super::super::helpers::{
@@ -22,6 +24,16 @@ use super::super::helpers::{
 const JOB_NAMESPACE: &str = "batch";
 const JOB_NAME: &str = "data-pipeline";
 const CRON_JOB_NAME: &str = "scheduled-pipeline";
+
+/// Volcano gang scheduling holds a `LatticeJob` in `Pending` until the
+/// full `minAvailable` count of pods can be scheduled simultaneously. On
+/// a busy e2e cluster (concurrent storage test eating mons + OSDs, mesh
+/// suite churning pods, autoscaling warm-up) the wait for that quorum
+/// regularly runs past `DEFAULT_TIMEOUT` (300s). Once the job *starts*,
+/// it sails through to Succeeded fast — `phase_reached` already accepts
+/// terminal phases as proof of Running, so this only needs to cover the
+/// scheduling delay.
+const JOB_GANG_SCHEDULE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Deploy a LatticeJob and verify the controller creates the expected resources
 async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
@@ -35,16 +47,17 @@ async fn test_job_deployment(kubeconfig: &str) -> Result<(), String> {
         serde_json::to_string(&job).map_err(|e| format!("Failed to serialize job fixture: {e}"))?;
     apply_yaml(kubeconfig, &yaml).await?;
 
-    // Wait for controller to pick up and start reconciling.
-    // Gang scheduling (minAvailable = sum of all replicas) can be slow
-    // under cluster resource pressure from concurrent tests.
+    // Wait for controller to pick up and start reconciling. Use the
+    // gang-schedule budget — Volcano holds the job Pending until all
+    // tasks can co-schedule, which under concurrent-test load runs
+    // longer than the generic 5-min default.
     wait_for_resource_phase(
         kubeconfig,
         "latticejob",
         JOB_NAMESPACE,
         JOB_NAME,
         "Running",
-        DEFAULT_TIMEOUT,
+        JOB_GANG_SCHEDULE_TIMEOUT,
     )
     .await?;
 

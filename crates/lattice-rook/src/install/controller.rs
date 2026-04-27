@@ -119,7 +119,7 @@ pub async fn reconcile(
             },
             name: manifests::CEPH_CLUSTER_NAME,
             namespace: Some(ROOK_CEPH_NAMESPACE),
-            description: "phase=Ready AND ceph.health=HEALTH_OK",
+            description: "phase=Ready (health HEALTH_OK or HEALTH_WARN)",
             ready_when: ceph_cluster_ready,
             timeout: READY_TIMEOUT,
         },
@@ -128,14 +128,15 @@ pub async fn reconcile(
     .await
 }
 
-/// Predicate matching a freshly-converged CephCluster: Rook has finished
-/// creating cluster resources (`status.phase == Ready`) and ceph itself
-/// is fully healthy (`status.ceph.health == HEALTH_OK`).
+/// Predicate matching a converged CephCluster.
 ///
-/// Accepting `HEALTH_WARN` here would let Ready trip during normal
-/// rebalancing — correct for steady-state but not for the install gate,
-/// where we want the stricter "everything green" signal before calling it
-/// done.
+/// `status.phase == Ready` is Ceph's own "cluster is created and serving
+/// I/O" contract — the right gate. We deliberately accept `HEALTH_WARN`:
+/// real clusters routinely sit there because of operationally-fine
+/// conditions (BLUESTORE_SLOW_OP on cheap virtualised disks, near-full
+/// alerts, transient rebalancing) that the install controller can't fix
+/// and shouldn't block on. `HEALTH_ERR` is the only state we still treat
+/// as not-ready, since that's "ceph is structurally broken".
 fn ceph_cluster_ready(obj: &serde_json::Value) -> bool {
     let phase = obj
         .pointer("/status/phase")
@@ -145,7 +146,7 @@ fn ceph_cluster_ready(obj: &serde_json::Value) -> bool {
         .pointer("/status/ceph/health")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    phase == "Ready" && health == "HEALTH_OK"
+    phase == "Ready" && health != "HEALTH_ERR"
 }
 
 /// Schedulable, non-control-plane nodes. An approximation of "how many
@@ -267,20 +268,22 @@ mod tests {
     }
 
     #[test]
-    fn ceph_ready_requires_phase_and_health() {
+    fn ceph_ready_accepts_phase_ready_with_ok_or_warn() {
         let ok = serde_json::json!({
             "status": { "phase": "Ready", "ceph": { "health": "HEALTH_OK" } }
         });
         assert!(ceph_cluster_ready(&ok));
 
+        // HEALTH_WARN is operationally fine — slow disks, near-full, etc.
+        // The install controller can't act on these and won't block on them.
         let warn = serde_json::json!({
             "status": { "phase": "Ready", "ceph": { "health": "HEALTH_WARN" } }
         });
-        assert!(
-            !ceph_cluster_ready(&warn),
-            "HEALTH_WARN is not accepted at install time"
-        );
+        assert!(ceph_cluster_ready(&warn));
+    }
 
+    #[test]
+    fn ceph_ready_rejects_pre_ready_phase() {
         let creating = serde_json::json!({
             "status": { "phase": "Progressing", "ceph": { "health": "HEALTH_OK" } }
         });
@@ -290,6 +293,17 @@ mod tests {
         assert!(
             !ceph_cluster_ready(&empty),
             "CR without status yet must not trip Ready"
+        );
+    }
+
+    #[test]
+    fn ceph_ready_rejects_health_err_even_when_phase_ready() {
+        let err = serde_json::json!({
+            "status": { "phase": "Ready", "ceph": { "health": "HEALTH_ERR" } }
+        });
+        assert!(
+            !ceph_cluster_ready(&err),
+            "HEALTH_ERR means ceph is structurally broken"
         );
     }
 }

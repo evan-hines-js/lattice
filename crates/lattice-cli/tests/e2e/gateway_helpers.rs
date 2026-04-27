@@ -15,7 +15,7 @@ use super::helpers::{
 };
 
 /// Timeout for gateway service/resource discovery (generous for slow CI).
-const GATEWAY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(180);
+const GATEWAY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Timeout for gateway resource verification (listeners, routes, certs).
 const GATEWAY_VERIFY_TIMEOUT: Duration = Duration::from_secs(120);

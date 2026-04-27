@@ -23,7 +23,8 @@ use tracing::{debug, error, info, warn};
 use lattice_common::watcher::resilient_watcher;
 
 use lattice_crd::crd::{
-    ClusterRoute, LatticeClusterRoutes, LatticeClusterRoutesSpec, LatticeService,
+    ClusterRoute, ClusterRoutesPhase, LatticeClusterRoutes, LatticeClusterRoutesSpec,
+    LatticeService,
 };
 
 /// A route update received from a child agent heartbeat
@@ -453,6 +454,20 @@ async fn write_cluster_routes(
         })?;
 
     let observed_generation = applied.metadata.generation;
+
+    // Skip the status patch when the observable fields already match — this
+    // is what stops `lastUpdated: now()` from churning resourceVersion on
+    // every reconcile. `last_updated` is preserved verbatim from the prior
+    // status, which makes it accurately reflect the wall-clock of the last
+    // *real* route-table change instead of the most recent reconcile.
+    let prior = applied.status.as_ref();
+    if prior.is_some_and(|s| {
+        s.phase == ClusterRoutesPhase::Ready
+            && s.route_count == route_count
+            && s.observed_generation == observed_generation
+    }) {
+        return Ok(());
+    }
 
     let status = serde_json::json!({
         "apiVersion": "lattice.dev/v1alpha1",

@@ -462,6 +462,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                storage: false,
                 network_topology: None,
                 registry_mirrors: None,
                 issuers: std::collections::BTreeMap::new(),

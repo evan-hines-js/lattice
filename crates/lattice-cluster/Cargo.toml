@@ -32,6 +32,7 @@ lattice-gpu-operator = { workspace = true }
 lattice-keda = { workspace = true }
 lattice-kthena = { workspace = true }
 lattice-metrics-server = { workspace = true }
+lattice-rook = { workspace = true }
 lattice-velero = { workspace = true }
 lattice-victoria-metrics = { workspace = true }
 

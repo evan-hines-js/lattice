@@ -3,11 +3,14 @@
 //! Each phase of the cluster lifecycle is handled by a dedicated module,
 //! making the reconciliation logic testable and maintainable.
 
+mod drift;
 pub mod external_dns;
 mod pending;
 mod pivoting;
 mod provisioning;
 mod ready;
+
+pub use drift::reconcile_capi_drift;
 
 pub use pending::handle_pending;
 pub use pivoting::handle_pivoting;
@@ -298,6 +301,12 @@ pub async fn reconcile_infrastructure(
             .map_err(|e| Error::internal(format!("failed to ensure GpuOperatorInstall: {}", e)))?;
     }
 
+    if cluster.spec.storage {
+        lattice_rook::install::ensure_install(client, cluster)
+            .await
+            .map_err(|e| Error::internal(format!("failed to ensure RookInstall: {}", e)))?;
+    }
+
     if let Some(ref topo) = cluster.spec.network_topology {
         if let Some(cm) = lattice_volcano::install::manifests::generate_topology_discovery_configmap(
             topo,
@@ -538,22 +547,21 @@ async fn get_or_create_bootstrap_token(
     cell_endpoint: &str,
     ca_cert: &str,
 ) -> Result<String, Error> {
-    // Get bootstrap token from LatticeCluster status (source of truth)
-    if let Some(token) = cluster
-        .status
-        .as_ref()
-        .and_then(|s| s.bootstrap_token.clone())
-    {
-        debug!(cluster = %cluster_name, "Using existing bootstrap token from LatticeCluster status");
-        return Ok(token);
-    }
-
-    // No existing token - generate new one and register cluster
+    // Always serialize the live LatticeCluster: register_cluster refreshes
+    // BootstrapState.facts on every call, so edits made between registration
+    // and the agent's bundle fetch reach the child. Skipping this on the
+    // existing-token path is what caused the cached `externalIpPool` to be
+    // applied to the child cluster.
     let cluster_manifest =
         serde_json::to_string(&cluster.for_export()).map_err(|e| Error::Serialization {
             message: format!("failed to serialize cluster: {}", e),
             kind: Some("LatticeCluster".to_string()),
         })?;
+
+    let existing_token = cluster
+        .status
+        .as_ref()
+        .and_then(|s| s.bootstrap_token.clone());
 
     // LB CIDR is resolved lazily at bundle-render time (see
     // `BootstrapState::generate_response`). Resolving it here would
@@ -567,16 +575,20 @@ async fn get_or_create_bootstrap_token(
         cell_endpoint: cell_endpoint.to_string(),
         ca_certificate: ca_cert.to_string(),
     };
-    let new_token = bootstrap_state
-        .register_cluster(registration, None, None)
+    let token = bootstrap_state
+        .register_cluster(registration, existing_token.as_deref(), None)
         .await;
-    let token_str = new_token.as_str().to_string();
+    let token_str = token.as_str().to_string();
 
-    // Persist the token to LatticeCluster status immediately
-    let mut status = cluster.status.clone().unwrap_or_default();
-    status.bootstrap_token = Some(token_str.clone());
-    ctx.kube.patch_status(cluster_name, &status).await?;
-    debug!(cluster = %cluster_name, "Persisted new bootstrap token to LatticeCluster status");
+    // First-time registration persists the token to LatticeCluster.status so
+    // it survives operator restart and pivot. On re-reconcile the token is
+    // already there, so registration only refreshes the in-memory facts.
+    if existing_token.is_none() {
+        let mut status = cluster.status.clone().unwrap_or_default();
+        status.bootstrap_token = Some(token_str.clone());
+        ctx.kube.patch_status(cluster_name, &status).await?;
+        debug!(cluster = %cluster_name, "Persisted new bootstrap token to LatticeCluster status");
+    }
 
     Ok(token_str)
 }

@@ -110,6 +110,13 @@ pub struct LatticeClusterSpec {
     #[serde(default)]
     pub backups: BackupsConfig,
 
+    /// Enable Rook-Ceph storage. The operator sizes the install (mon
+    /// quorum, replication, failure domain) from `nodes.workerPools`
+    /// using opinionated defaults; small clusters automatically drop
+    /// to single-mon / replication-2 / osd-failure-domain shapes.
+    #[serde(default)]
+    pub storage: bool,
+
     /// Network topology configuration for topology-aware scheduling.
     /// Enables Volcano HyperNode discovery for workload co-placement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,6 +509,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -528,6 +536,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -559,6 +568,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -587,6 +597,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -627,6 +638,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -655,6 +667,7 @@ mod tests {
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -852,6 +865,7 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
             gpu: false,
             monitoring: MonitoringConfig::default(),
             backups: BackupsConfig::default(),
+            storage: false,
             network_topology: None,
             registry_mirrors: None,
             issuers: std::collections::BTreeMap::new(),
@@ -1013,6 +1027,7 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                storage: false,
                 network_topology: None,
                 registry_mirrors: None,
                 issuers: std::collections::BTreeMap::new(),

@@ -41,9 +41,10 @@ use lattice_crd::crd::{ClusterPhase, LatticeCluster, LatticeClusterStatus};
 
 use lattice_common::events::{actions, reasons};
 use lattice_common::metrics::{self, ReconcileTimer};
-use lattice_common::{ApiServerEndpoint, Error, PARENT_CONFIG_SECRET};
+use lattice_common::{capi_namespace, ApiServerEndpoint, Error, PARENT_CONFIG_SECRET};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
+use crate::phases;
 use crate::phases::{
     handle_pending, handle_pivoting, handle_provisioning, handle_ready, update_status,
 };
@@ -214,6 +215,18 @@ pub async fn reconcile(cluster: Arc<LatticeCluster>, ctx: Arc<Context>) -> Resul
                     }
                 }
             }
+            // Self-managing cluster post-pivot owns its own CAPI resources, so
+            // it's responsible for propagating LatticeCluster spec edits
+            // (replica counts, basis externalIpPool) into them. Targeted patches
+            // only — see `reconcile_capi_drift` for the field whitelist.
+            // Parents skip this branch: after pivot they no longer own the
+            // child's CAPI CRs.
+            if is_self {
+                let capi_ns = capi_namespace(&name);
+                if let Err(e) = phases::reconcile_capi_drift(&cluster, &ctx, &capi_ns).await {
+                    warn!(error = %e, "Failed to reconcile self-cluster CAPI drift");
+                }
+            }
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         ClusterPhase::Ready => handle_ready(&cluster, &ctx).await,
@@ -376,6 +389,7 @@ mod tests {
             async fn is_cluster_stable(&self, cluster_name: &str, namespace: &str) -> Result<bool, Error>;
             async fn get_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider) -> Result<Option<String>, Error>;
             async fn update_cp_version(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider, version: &str) -> Result<(), Error>;
+            async fn update_cp_replicas(&self, cluster_name: &str, namespace: &str, bootstrap: BootstrapProvider, replicas: u32) -> Result<(), Error>;
             async fn get_all_pool_versions(&self, cluster_name: &str, namespace: &str) -> Result<std::collections::HashMap<String, String>, Error>;
             async fn update_pool_version(&self, cluster_name: &str, pool_id: &str, namespace: &str, version: &str) -> Result<(), Error>;
             fn kube_client(&self) -> Client;
@@ -420,6 +434,7 @@ mod tests {
                 gpu: false,
                 monitoring: MonitoringConfig::default(),
                 backups: BackupsConfig::default(),
+                storage: false,
                 network_topology: None,
                 registry_mirrors: None,
                 issuers: std::collections::BTreeMap::new(),
@@ -1271,6 +1286,7 @@ mod tests {
                     gpu: false,
                     monitoring: MonitoringConfig::default(),
                     backups: BackupsConfig::default(),
+                    storage: false,
                     network_topology: None,
                     registry_mirrors: None,
                     issuers: std::collections::BTreeMap::new(),

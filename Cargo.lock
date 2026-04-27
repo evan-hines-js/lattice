@@ -3453,6 +3453,7 @@ dependencies = [
  "lattice-metrics-server",
  "lattice-move",
  "lattice-proto",
+ "lattice-rook",
  "lattice-secret-provider",
  "lattice-tetragon",
  "lattice-velero",

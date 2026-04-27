@@ -259,6 +259,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                     info.token_hash = token.hash();
                     info.token_created = Instant::now();
                 }
+                // Always refresh facts so spec edits to the LatticeCluster
+                // (e.g. `externalIpPool`) propagate to the bundle the agent
+                // fetches. Without this, `cluster_manifest` stays frozen at
+                // first-registration value and the child applies a stale
+                // spec at bootstrap.
+                info.facts = registration.facts;
+                info.cell_endpoint = registration.cell_endpoint;
+                info.ca_certificate = registration.ca_certificate;
             }
             dashmap::Entry::Vacant(vacant) => {
                 // If recovering with a CSR hash, mark bootstrap token as already used

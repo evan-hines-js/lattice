@@ -680,6 +680,12 @@ pub async fn run_media_server_test(kubeconfig_path: &str) -> Result<(), String> 
     info!("Media Server E2E Test");
     info!("========================================\n");
 
+    // Media services bind PVCs (jellyfin-cache/-config, sonarr-config, etc.)
+    // against the cluster's default StorageClass. On Rook-backed fixtures
+    // those PVCs would race the CSI provisioner if created before
+    // `RookInstall` is Ready; on local-path fixtures this gate no-ops.
+    super::integration::storage::wait_for_storage_ready(kubeconfig_path).await?;
+
     deploy_media_services(kubeconfig_path).await?;
     wait_for_deployments(kubeconfig_path).await?;
     verify_gateway_routes(kubeconfig_path).await?;

@@ -12,6 +12,7 @@ spec:
     enabled: false
   backups:
     enabled: false
+  storage: true
   providerRef: basis
   provider:
     kubernetes:

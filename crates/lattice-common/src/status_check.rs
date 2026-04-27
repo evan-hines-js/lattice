@@ -4,13 +4,16 @@
 //! Each merge patch generates a watch event (especially because `Condition::new()`
 //! stamps a fresh `lastTransitionTime`), so controllers must skip no-op updates.
 
+// `InstallStatus` is intentionally not wired into this generic helper: it
+// has its own multi-field steady-state check (manifest hash, observed
+// version, requires condition) inside `crate::install::is_steady_state`.
 use lattice_crd::crd::{
     BackupStorePhase, BackupStoreStatus, CertIssuerPhase, CertIssuerStatus, ClusterBackupPhase,
     DNSProviderPhase, DNSProviderStatus, ImageProviderPhase, ImageProviderStatus,
-    InfraProviderPhase, InfraProviderStatus, InstallPhase, InstallStatus, JobPhase,
-    LatticeClusterBackupStatus, LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus,
-    LatticeRestoreStatus, LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase,
-    SecretProviderPhase, SecretProviderStatus, ServicePhase,
+    InfraProviderPhase, InfraProviderStatus, JobPhase, LatticeClusterBackupStatus,
+    LatticeJobStatus, LatticeMeshMemberStatus, LatticeModelStatus, LatticeRestoreStatus,
+    LatticeServiceStatus, MeshMemberPhase, ModelServingPhase, RestorePhase, SecretProviderPhase,
+    SecretProviderStatus, ServicePhase,
 };
 
 /// Trait for CRD status structs that carry phase, message, and observed generation.
@@ -80,7 +83,6 @@ impl_status_fields!(LatticeRestoreStatus, RestorePhase);
 impl_status_fields!(DNSProviderStatus, DNSProviderPhase);
 impl_status_fields!(ImageProviderStatus, ImageProviderPhase);
 impl_status_fields!(CertIssuerStatus, CertIssuerPhase);
-impl_status_fields!(InstallStatus, InstallPhase);
 
 #[cfg(test)]
 mod tests {

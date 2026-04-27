@@ -58,7 +58,6 @@ use super::helpers::{
     WORKLOAD2_CLUSTER_NAME, WORKLOAD_CLUSTER_NAME,
 };
 use super::integration::{self, setup};
-use super::providers::InfraProvider;
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -175,8 +174,8 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Mesh: media server test (Docker only)
-    if integration::mesh::mesh_tests_enabled() && ctx.provider == InfraProvider::Docker {
+    // Mesh: media server test
+    if integration::mesh::mesh_tests_enabled() {
         let kc = ctx.require_workload()?.to_string();
         let sem = pool.clone();
         handles.push((

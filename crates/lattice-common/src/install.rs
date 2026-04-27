@@ -22,14 +22,14 @@ use crate::kube_utils::{
     wait_for_deployment, wait_for_resource_status, GvkPlural,
 };
 use crate::{
-    apply_manifests, status_check, ApplyOptions, ControllerContext, ReconcileError,
-    REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS,
+    apply_manifests, ApplyOptions, ControllerContext, ReconcileError, REQUEUE_ERROR_SECS,
+    REQUEUE_SUCCESS_SECS,
 };
 use lattice_crd::crd::{
     CertManagerInstall, CiliumInstall, Condition, ConditionStatus, Dependency, ESOInstall,
-    GpuOperatorInstall, InstallPhase, InstallResource, IstioInstall, KedaInstall, KthenaInstall,
-    MetricsServerInstall, RookInstall, Subsystem, TetragonInstall, UpgradeAttempt, UpgradeOutcome,
-    VeleroInstall, VictoriaMetricsInstall, VolcanoInstall,
+    GpuOperatorInstall, InstallPhase, InstallResource, InstallStatus, IstioInstall, KedaInstall,
+    KthenaInstall, MetricsServerInstall, RookInstall, Subsystem, TetragonInstall, UpgradeAttempt,
+    UpgradeOutcome, VeleroInstall, VictoriaMetricsInstall, VolcanoInstall,
 };
 
 /// Server-side apply a cluster-scoped resource under the given field manager.
@@ -62,11 +62,10 @@ where
 
 /// One status write for an install CR: phase + optional fields.
 ///
-/// Built with the [`pending`](Self::pending) / [`installing`](Self::installing)
-/// / [`upgrading`](Self::upgrading) / [`ready`](Self::ready) /
-/// [`failed`](Self::failed) constructors so call sites read like the English
-/// description of the transition. Only Istio sets `trust_domain`; everyone
-/// else leaves the default.
+/// Built with the [`pending`](Self::pending) / [`in_progress`](Self::in_progress)
+/// / [`ready`](Self::ready) / [`failed`](Self::failed) constructors so call
+/// sites read like the English description of the transition. Only Istio
+/// sets `trust_domain`; everyone else leaves the default.
 #[derive(Default)]
 pub struct StatusUpdate<'a> {
     /// Target lifecycle phase.
@@ -86,6 +85,12 @@ pub struct StatusUpdate<'a> {
     /// Replace `status.lastUpgrade` with this attempt record. `None`
     /// preserves whatever record is already on the resource.
     pub last_upgrade: Option<UpgradeAttempt>,
+    /// Stamp `status.appliedManifestHash` with this value (typically only
+    /// set on the `Ready` write, so future reconciles can short-circuit
+    /// when the rendered bundle is unchanged). `None` preserves the prior
+    /// value, which keeps the short-circuit valid when callers
+    /// only meant to update other fields.
+    pub applied_manifest_hash: Option<&'a str>,
 }
 
 impl<'a> StatusUpdate<'a> {
@@ -98,19 +103,15 @@ impl<'a> StatusUpdate<'a> {
         }
     }
 
-    /// Initial install in progress (no prior `observed_version`).
-    pub fn installing() -> Self {
+    /// Active reconciliation in progress: `Installing` for first-time,
+    /// `Upgrading` when `observed_version` differs from the target.
+    pub fn in_progress(phase: InstallPhase) -> Self {
+        debug_assert!(matches!(
+            phase,
+            InstallPhase::Installing | InstallPhase::Upgrading | InstallPhase::RollingBack
+        ));
         Self {
-            phase: InstallPhase::Installing,
-            ..Self::default()
-        }
-    }
-
-    /// Version-to-version upgrade in progress (prior `observed_version`
-    /// differs from `spec.version`).
-    pub fn upgrading() -> Self {
-        Self {
-            phase: InstallPhase::Upgrading,
+            phase,
             ..Self::default()
         }
     }
@@ -151,6 +152,12 @@ impl<'a> StatusUpdate<'a> {
         self.last_upgrade = Some(attempt);
         self
     }
+
+    /// Stamp `status.appliedManifestHash` with `hash` on this write.
+    pub fn with_applied_manifest_hash(mut self, hash: &'a str) -> Self {
+        self.applied_manifest_hash = Some(hash);
+        self
+    }
 }
 
 /// Write one status transition for an install CR.
@@ -178,10 +185,40 @@ where
 {
     let generation = install.meta().generation;
     let target_version = install.spec_base().version.clone();
-    let mut status = install.install_status().cloned().unwrap_or_default();
+    let prev = install.install_status();
+    let status = next_install_status(prev, generation, target_version, update);
+    if prev == Some(&status) {
+        return Ok(());
+    }
+    patch_cluster_resource_status::<K>(client, &install.name_any(), &status, field_manager)
+        .await
+        .map_err(ReconcileError::Kube)
+}
+
+/// Pure status-merge: fold a `StatusUpdate` into the prior `InstallStatus`.
+///
+/// Extracted from [`write_install_status`] so the merge rules are testable
+/// without a kube client. The only field with non-trivial semantics is
+/// `observed_version` — see comment below.
+fn next_install_status(
+    prev: Option<&InstallStatus>,
+    generation: Option<i64>,
+    target_version: String,
+    update: StatusUpdate<'_>,
+) -> InstallStatus {
+    let mut status = prev.cloned().unwrap_or_default();
     status.phase = update.phase;
     status.observed_generation = generation;
-    status.observed_version = update.observed_version.map(str::to_string);
+    // `observed_version` is a cumulative fact: the last version this
+    // subsystem successfully converged to. Other Installs read it via
+    // `spec.requires` to gate their own reconciles, so clobbering it on
+    // every non-Ready write would falsely mark the subsystem as
+    // not-yet-installed and wedge dependents (rook → cilium being the
+    // case that surfaced this). Only overwrite when the caller actually
+    // has a new observed version to record (i.e. `StatusUpdate::ready`).
+    if let Some(v) = update.observed_version {
+        status.observed_version = Some(v.to_string());
+    }
     status.target_version = Some(target_version);
     status.message = update.message;
     if let Some(td) = update.trust_domain {
@@ -193,13 +230,10 @@ where
     if let Some(attempt) = update.last_upgrade {
         status.last_upgrade = Some(attempt);
     }
-
-    if install.install_status() == Some(&status) {
-        return Ok(());
+    if let Some(hash) = update.applied_manifest_hash {
+        status.applied_manifest_hash = Some(hash.to_string());
     }
-    patch_cluster_resource_status::<K>(client, &install.name_any(), &status, field_manager)
-        .await
-        .map_err(ReconcileError::Kube)
+    status
 }
 
 /// Readiness gate checked after manifests are applied.
@@ -317,10 +351,16 @@ pub struct SimpleInstallConfig<'a, K> {
 /// Drive an install CR through its lifecycle: apply manifests, wait on
 /// readiness, transition to `Ready` or `Failed`.
 ///
-/// If `status` already reports `Ready` at the current generation, no-ops and
-/// requeues at the drift-detection interval. Callers that need pre-flight
-/// gating (e.g. Istio waiting on `lattice-ca`) write a `Pending` status
-/// themselves with [`write_install_status`] and return before calling this.
+/// **Steady-state idempotency.** Once converged, this is a no-op: when
+/// `status` reports `Ready` at the current `(generation, target version,
+/// rendered manifest hash)` *and* `spec.requires` is still satisfied, the
+/// reconciler returns immediately without writing status or hitting the
+/// apiserver with server-side applies. That short-circuit is what stops
+/// the controller from hot-looping itself via its own status writes.
+///
+/// Callers that need pre-flight gating (e.g. Istio waiting on
+/// `lattice-ca`) write a `Pending` status themselves with
+/// [`write_install_status`] and return before calling this.
 pub async fn run_simple_install_reconcile<K>(
     config: SimpleInstallConfig<'_, K>,
 ) -> Result<Action, ReconcileError>
@@ -345,22 +385,12 @@ where
 
     let name = install.name_any();
     let version = install.spec_base().version.clone();
-    let generation = install.meta().generation;
-    if generation.is_none() {
+    let Some(generation) = install.meta().generation else {
         return Err(ReconcileError::Validation(format!(
             "{log_kind} missing metadata.generation"
         )));
-    }
-
-    if status_check::is_status_unchanged(
-        install.install_status(),
-        &InstallPhase::Ready,
-        None,
-        generation,
-    ) {
-        return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
-    }
-
+    };
+    let manifest_hash = manifest_bundle_hash(&manifests);
     let td = trust_domain.as_deref();
     let install_ref = install.as_ref();
 
@@ -369,7 +399,7 @@ where
     // Block the apply/wait loop when `spec.requires` is unsatisfied. The
     // `UpgradeBlocked` condition rides along on each phase write; the merge
     // semantics in `write_install_status` then preserve it across the
-    // installing → ready transition without each phase having to reassert.
+    // in-progress → ready transition without each phase having to reassert.
     let requires_status = check_requires(&ctx.client, &install.spec_base().requires).await?;
     let requires_cond = upgrade_blocked_condition(&requires_status);
     if let RequiresStatus::Blocked(reason) = &requires_status {
@@ -386,6 +416,26 @@ where
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
     }
 
+    // ── Steady-state short-circuit ──
+    //
+    // The reconciler is a pure function of `(generation, target version,
+    // manifest hash)`; when status already records that exact fingerprint
+    // at phase `Ready` and the `UpgradeBlocked=False` condition is present,
+    // there is nothing to do. Returning here avoids both the SSA storm on
+    // `apply_manifests` and the status write that would re-fire the
+    // controller's own watch.
+    if is_steady_state(
+        install.install_status(),
+        generation,
+        &version,
+        &manifest_hash,
+        &requires_cond,
+    ) {
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
+    }
+
+    // ── Active reconciliation ──
+    //
     // Distinguish initial install from version-to-version upgrade: the
     // phase + UpgradeAttempt audit record both depend on whether there's a
     // prior `observed_version` that differs from the new target.
@@ -410,30 +460,28 @@ where
         upgrade = is_upgrade,
         "Reconciling install",
     );
-    let in_progress_update = StatusUpdate {
-        phase: in_progress_phase,
-        ..Default::default()
-    }
-    .with_condition(requires_cond.clone())
-    .with_last_upgrade(started_attempt.clone());
     write_with_td(
         &ctx.client,
         install_ref,
         field_manager,
-        in_progress_update,
+        StatusUpdate::in_progress(in_progress_phase)
+            .with_condition(requires_cond.clone())
+            .with_last_upgrade(started_attempt.clone()),
         td,
     )
     .await?;
 
     if let Err(e) = apply_manifests(&ctx.client, &manifests, &ApplyOptions::default()).await {
         warn!(install = %name, kind = %log_kind, error = %e, "install apply failed");
-        let failed =
-            started_attempt.finished(UpgradeOutcome::Failed, Some(format!("apply failed: {e}")));
+        let msg = format!("apply failed: {e}");
+        let failed = started_attempt.finished(UpgradeOutcome::Failed, Some(msg.clone()));
         write_with_td(
             &ctx.client,
             install_ref,
             field_manager,
-            StatusUpdate::failed(format!("apply failed: {e}")).with_last_upgrade(failed),
+            StatusUpdate::failed(msg)
+                .with_condition(requires_cond)
+                .with_last_upgrade(failed),
             td,
         )
         .await?;
@@ -444,11 +492,16 @@ where
         Ok(()) => {
             info!(install = %name, kind = %log_kind, version = %version, "install Ready");
             let succeeded = started_attempt.finished(UpgradeOutcome::Succeeded, None);
+            // Persist the manifest hash on the Ready transition — this is
+            // what future reconciles compare against to short-circuit.
             write_with_td(
                 &ctx.client,
                 install_ref,
                 field_manager,
-                StatusUpdate::ready(&version).with_last_upgrade(succeeded),
+                StatusUpdate::ready(&version)
+                    .with_condition(requires_cond)
+                    .with_last_upgrade(succeeded)
+                    .with_applied_manifest_hash(&manifest_hash),
                 td,
             )
             .await?;
@@ -462,13 +515,63 @@ where
                 &ctx.client,
                 install_ref,
                 field_manager,
-                StatusUpdate::failed(msg).with_last_upgrade(failed),
+                StatusUpdate::failed(msg)
+                    .with_condition(requires_cond)
+                    .with_last_upgrade(failed),
                 td,
             )
             .await?;
             Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
         }
     }
+}
+
+/// True when `status` already records a successful apply of *exactly* the
+/// inputs the current reconcile would produce: same spec generation, same
+/// target version, same rendered manifest bundle, and the cross-subsystem
+/// `UpgradeBlocked=False` condition already published.
+///
+/// Pure function of its inputs — used both by the live reconciler and by
+/// the unit tests that pin the no-op behaviour.
+fn is_steady_state(
+    status: Option<&InstallStatus>,
+    generation: i64,
+    target_version: &str,
+    manifest_hash: &str,
+    requires_cond: &Condition,
+) -> bool {
+    let Some(status) = status else { return false };
+    status.phase == InstallPhase::Ready
+        && status.observed_generation == Some(generation)
+        && status.observed_version.as_deref() == Some(target_version)
+        && status.applied_manifest_hash.as_deref() == Some(manifest_hash)
+        && status.conditions.iter().any(|c| {
+            c.type_ == requires_cond.type_
+                && c.status == requires_cond.status
+                && c.reason == requires_cond.reason
+        })
+}
+
+/// SHA-256 of the rendered manifest bundle, hex-encoded.
+///
+/// Length-delimits each manifest with a `NUL` byte so concatenation
+/// changes (e.g. `["a", "bc"]` vs `["ab", "c"]`) produce different
+/// digests. The hash is the oracle for "have I already SSA'd exactly
+/// this set?" — see [`is_steady_state`].
+fn manifest_bundle_hash(manifests: &[String]) -> String {
+    let total: usize = manifests.iter().map(|m| m.len() + 1).sum();
+    let mut buf = Vec::with_capacity(total);
+    for m in manifests {
+        buf.extend_from_slice(m.as_bytes());
+        buf.push(0);
+    }
+    let digest = lattice_core::sha256(&buf);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in &digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    hex
 }
 
 /// Write a status, folding in the optional `trust_domain` carried by
@@ -696,6 +799,173 @@ mod tests {
         let err = evaluate_dependency(&dep(Subsystem::Cilium, ">=1.31"), Some("v1.31"))
             .expect_err("should block");
         assert!(err.contains("unparsable version"));
+    }
+
+    fn ready_status(
+        generation: i64,
+        version: &str,
+        manifest_hash: &str,
+        condition: Condition,
+    ) -> InstallStatus {
+        InstallStatus {
+            phase: InstallPhase::Ready,
+            observed_generation: Some(generation),
+            observed_version: Some(version.into()),
+            target_version: Some(version.into()),
+            applied_manifest_hash: Some(manifest_hash.into()),
+            conditions: vec![condition],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn steady_state_holds_when_everything_matches() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s = ready_status(7, "1.19.4", "abc123", cond.clone());
+        assert!(is_steady_state(Some(&s), 7, "1.19.4", "abc123", &cond));
+    }
+
+    #[test]
+    fn steady_state_breaks_on_generation_drift() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s = ready_status(7, "1.19.4", "abc123", cond.clone());
+        assert!(!is_steady_state(Some(&s), 8, "1.19.4", "abc123", &cond));
+    }
+
+    #[test]
+    fn steady_state_breaks_on_manifest_drift() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s = ready_status(7, "1.19.4", "abc123", cond.clone());
+        assert!(!is_steady_state(Some(&s), 7, "1.19.4", "deadbeef", &cond));
+    }
+
+    #[test]
+    fn steady_state_breaks_on_version_drift() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s = ready_status(7, "1.19.4", "abc123", cond.clone());
+        assert!(!is_steady_state(Some(&s), 7, "1.20.0", "abc123", &cond));
+    }
+
+    #[test]
+    fn steady_state_breaks_when_phase_not_ready() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let mut s = ready_status(7, "1.19.4", "abc123", cond.clone());
+        s.phase = InstallPhase::Installing;
+        assert!(!is_steady_state(Some(&s), 7, "1.19.4", "abc123", &cond));
+    }
+
+    #[test]
+    fn steady_state_breaks_when_requires_condition_missing() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s = InstallStatus {
+            phase: InstallPhase::Ready,
+            observed_generation: Some(7),
+            observed_version: Some("1.19.4".into()),
+            target_version: Some("1.19.4".into()),
+            applied_manifest_hash: Some("abc123".into()),
+            conditions: vec![],
+            ..Default::default()
+        };
+        assert!(!is_steady_state(Some(&s), 7, "1.19.4", "abc123", &cond));
+    }
+
+    #[test]
+    fn steady_state_false_for_no_status() {
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        assert!(!is_steady_state(None, 7, "1.19.4", "abc123", &cond));
+    }
+
+    #[test]
+    fn ready_write_records_observed_version() {
+        let next = next_install_status(
+            None,
+            Some(1),
+            "1.19.4".into(),
+            StatusUpdate::ready("1.19.4"),
+        );
+        assert_eq!(next.observed_version.as_deref(), Some("1.19.4"));
+        assert_eq!(next.phase, InstallPhase::Ready);
+    }
+
+    #[test]
+    fn non_ready_write_preserves_existing_observed_version() {
+        // Bug repro: a ready → in_progress write sequence used to wipe
+        // `observed_version`, falsely failing dependents' `spec.requires`
+        // gates (rook waiting on cilium) until the perturbed install
+        // reached Ready again. The cumulative-fact rule: only Ready
+        // writes set observed_version; everything else preserves it.
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let prev = ready_status(1, "1.19.4", "abc123", cond);
+
+        for update in [
+            StatusUpdate::pending("waiting on something"),
+            StatusUpdate::in_progress(InstallPhase::Installing),
+            StatusUpdate::failed("apply failed"),
+        ] {
+            let next = next_install_status(Some(&prev), Some(1), "1.19.4".into(), update);
+            assert_eq!(
+                next.observed_version.as_deref(),
+                Some("1.19.4"),
+                "observed_version must survive non-Ready status writes"
+            );
+        }
+    }
+
+    #[test]
+    fn ready_write_overwrites_stale_observed_version() {
+        // Successful upgrade replaces the prior observed_version with the
+        // newly converged one. The preservation rule applies only when
+        // the writer has nothing to record.
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let prev = ready_status(1, "1.19.4", "abc123", cond);
+
+        let next = next_install_status(
+            Some(&prev),
+            Some(2),
+            "1.20.0".into(),
+            StatusUpdate::ready("1.20.0"),
+        );
+        assert_eq!(next.observed_version.as_deref(), Some("1.20.0"));
+    }
+
+    #[test]
+    fn pending_in_progress_ready_round_trip_keeps_observed_version() {
+        // Full sequence the bug described: a previously-Ready install
+        // re-reconciles (in_progress) and lands on Ready again. Walking
+        // each step exercises the preservation invariant under realistic
+        // controller flow, not just one-shot writes.
+        let cond = upgrade_blocked_condition(&RequiresStatus::Satisfied);
+        let s0 = ready_status(1, "1.19.4", "abc123", cond);
+
+        let s1 = next_install_status(
+            Some(&s0),
+            Some(1),
+            "1.19.4".into(),
+            StatusUpdate::in_progress(InstallPhase::Installing),
+        );
+        assert_eq!(s1.observed_version.as_deref(), Some("1.19.4"));
+
+        let s2 = next_install_status(
+            Some(&s1),
+            Some(1),
+            "1.19.4".into(),
+            StatusUpdate::ready("1.19.4"),
+        );
+        assert_eq!(s2.observed_version.as_deref(), Some("1.19.4"));
+        assert_eq!(s2.phase, InstallPhase::Ready);
+    }
+
+    #[test]
+    fn manifest_hash_is_deterministic_and_distinguishes_concat() {
+        let a = manifest_bundle_hash(&["foo".into(), "bar".into()]);
+        let b = manifest_bundle_hash(&["foo".into(), "bar".into()]);
+        assert_eq!(a, b);
+
+        // Length-delimiting prevents `["a", "bc"]` from aliasing `["ab", "c"]`.
+        let split_one = manifest_bundle_hash(&["a".into(), "bc".into()]);
+        let split_two = manifest_bundle_hash(&["ab".into(), "c".into()]);
+        assert_ne!(split_one, split_two);
+        assert_eq!(a.len(), 64, "sha256 hex digest is 64 chars");
     }
 
     #[test]

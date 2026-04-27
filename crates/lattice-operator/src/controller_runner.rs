@@ -1339,12 +1339,28 @@ fn all_mesh_member_refs(graph: &ServiceGraph) -> Vec<ObjectRef<LatticeMeshMember
 }
 
 /// Creates a closure for logging reconciliation results.
-fn log_reconcile_result<T: std::fmt::Debug, E: std::fmt::Debug>(
+///
+/// `ObjectNotFound` from kube-rs is downgraded to debug — it fires whenever
+/// a watch trigger for a CR that doesn't exist makes it through the
+/// workqueue (e.g. an `*Install` controller's dep-watch enqueuing
+/// `ObjectRef::new("default")` for a kind whose singleton hasn't been
+/// created on this cluster). It's a no-op, not a failure, and emitting
+/// it as ERROR was both noisy and misleading.
+fn log_reconcile_result<T, E>(
     controller_name: &'static str,
-) -> impl Fn(Result<T, E>) -> std::future::Ready<()> {
+) -> impl Fn(
+    Result<T, kube::runtime::controller::Error<E, kube::runtime::watcher::Error>>,
+) -> std::future::Ready<()>
+where
+    T: std::fmt::Debug,
+    E: std::fmt::Debug,
+{
     move |result| {
         match result {
             Ok(action) => tracing::debug!(?action, "{} reconciliation completed", controller_name),
+            Err(kube::runtime::controller::Error::ObjectNotFound(obj)) => {
+                tracing::debug!(?obj, "{} skipped: object not found", controller_name)
+            }
             Err(e) => tracing::error!(error = ?e, "{} reconciliation error", controller_name),
         }
         std::future::ready(())

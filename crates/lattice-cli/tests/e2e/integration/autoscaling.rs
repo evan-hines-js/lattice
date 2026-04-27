@@ -47,7 +47,15 @@ const CUSTOM_METRIC_NAME: &str = "test_scale_metric";
 
 const SCALEDOBJECT_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const SCALEUP_TIMEOUT: Duration = DEFAULT_TIMEOUT;
-const PROM_SCALEUP_TIMEOUT: Duration = Duration::from_secs(420);
+/// Cold-start latency for the Prometheus pipeline on a fresh cluster
+/// stacks: VictoriaMetrics-operator polls VMServiceScrape changes, vmagent
+/// reloads its config, vmagent's first scrape interval fires, the data
+/// flows to VMSingle, KEDA's metrics-apiserver polls VMSingle, KEDA
+/// reports an Active trigger, then the HPA reconciles. Each step is
+/// 30–90s and they don't overlap. 15 minutes covers an unloaded run; on
+/// a heavily-loaded shared box I've seen this take longer.
+const PROM_METRIC_VISIBLE_TIMEOUT: Duration = Duration::from_secs(900);
+const PROM_SCALEUP_TIMEOUT: Duration = Duration::from_secs(300);
 const DEPLOY_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -210,6 +218,12 @@ fn build_metrics_server_service() -> lattice_crd::crd::LatticeService {
 ///
 /// Runs the CPU-based test and the Prometheus-based test sequentially.
 pub async fn run_autoscaling_tests(kubeconfig: &str) -> Result<(), String> {
+    // The Prometheus-based test queries VMSingle; on a Rook-backed fixture
+    // VMSingle's PVC stays Pending until `RookInstall` is Ready, so the
+    // metric scrape would race the storage backend coming up. No-op when
+    // storage isn't enabled (local-path is synchronous).
+    super::storage::wait_for_storage_ready(kubeconfig).await?;
+
     // CPU and Prometheus tests use different namespaces — run in parallel.
     let kc1 = kubeconfig.to_string();
     let kc2 = kubeconfig.to_string();
@@ -314,6 +328,19 @@ async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String>
 
     info!("[Integration/Autoscaling/Prom] Verifying VMServiceScrape exists...");
     verify_vm_service_scrape(kubeconfig).await?;
+
+    // Block on the scrape pipeline being warm so the scale-up timer below
+    // measures HPA-decision-to-pod-Ready, not vmagent-config-reload-plus-
+    // first-scrape-plus-KEDA-poll. Without this gate the scale-up timeout
+    // has to absorb the entire cold-start chain on every fresh cluster.
+    info!("[Integration/Autoscaling/Prom] Waiting for KEDA to see the metric...");
+    wait_for_metric_visible_to_keda(
+        kubeconfig,
+        PROM_NAMESPACE,
+        METRICS_SERVER_NAME,
+        PROM_METRIC_VISIBLE_TIMEOUT,
+    )
+    .await?;
 
     info!("[Integration/Autoscaling/Prom] Waiting for Prometheus-driven scale-up...");
     wait_for_scale_up(
@@ -509,6 +536,80 @@ async fn wait_for_scale_up(
                 }
                 Err(_) => Ok(false),
             }
+        }
+    })
+    .await
+}
+
+/// Block until KEDA confirms the metric pipeline is warm.
+///
+/// We accept either of two signals as proof:
+///   1. `ScaledObject.status.lastActiveTime` set — KEDA's own record of
+///      "I successfully polled the trigger and got a sample". Most direct.
+///   2. `HPA.status.currentMetrics[*].external.current.value` non-zero —
+///      the HPAv2 view of the same fact, populated after HPA reconciles
+///      KEDA's metrics-apiserver response.
+///
+/// Logging both each tick keeps the failure mode diagnosable: if neither
+/// fires within the timeout, the log shows whether KEDA never queried,
+/// or queried-but-saw-zero, or queried-positive-but-HPA-didn't-reconcile.
+async fn wait_for_metric_visible_to_keda(
+    kubeconfig: &str,
+    namespace: &str,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let kc = kubeconfig.to_string();
+    let ns = namespace.to_string();
+    let hpa_name = format!("keda-hpa-{name}");
+    let so_name = name.to_string();
+    let desc = format!("KEDA to surface a sample for {so_name}");
+
+    wait_for_condition(&desc, timeout, POLL_INTERVAL, || {
+        let kc = kc.clone();
+        let ns = ns.clone();
+        let hpa_name = hpa_name.clone();
+        let so_name = so_name.clone();
+        async move {
+            let so_active = run_kubectl(&[
+                "--kubeconfig",
+                &kc,
+                "get",
+                "scaledobject",
+                &so_name,
+                "-n",
+                &ns,
+                "-o",
+                "jsonpath={.status.lastActiveTime}",
+            ])
+            .await
+            .unwrap_or_default();
+
+            let hpa_values = run_kubectl(&[
+                "--kubeconfig",
+                &kc,
+                "get",
+                "hpa",
+                &hpa_name,
+                "-n",
+                &ns,
+                "-o",
+                "jsonpath={.status.currentMetrics[*].external.current.value}",
+            ])
+            .await
+            .unwrap_or_default();
+
+            let so_fired = !so_active.trim().is_empty();
+            let hpa_positive = hpa_values
+                .split_whitespace()
+                .any(|v| !v.is_empty() && v != "0" && v != "0m");
+            info!(
+                "[Integration/Autoscaling/Prom] ScaledObject lastActiveTime='{}' \
+                 HPA currentMetrics='{}' (so_fired={so_fired}, hpa_positive={hpa_positive})",
+                so_active.trim(),
+                hpa_values.trim()
+            );
+            Ok(so_fired || hpa_positive)
         }
     })
     .await

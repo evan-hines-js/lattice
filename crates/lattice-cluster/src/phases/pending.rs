@@ -86,6 +86,12 @@ async fn handle_self_cluster(
         return Ok(Action::requeue(Duration::from_secs(10)));
     }
 
+    // Push any spec edits made on the live `LatticeCluster` (replica counts,
+    // basis `externalIpPool`) into the underlying CAPI CRs. Targeted patches
+    // only — never re-renders KCP/KubeadmConfigTemplate, so the CP isn't
+    // rolled by overwriting bootstrap-coupled fields.
+    super::reconcile_capi_drift(cluster, ctx, &capi_namespace).await?;
+
     // CAPI resources exist - patch kubeconfig for self-management
     // CAPI needs to reach itself via kubernetes.default.svc, not external IP
     info!("CAPI resources found, patching kubeconfig for self-management");

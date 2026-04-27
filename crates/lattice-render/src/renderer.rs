@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use lattice_core::template_types::TemplateString;
 use lattice_crd::crd::{ContainerSpec, FileMount, VolumeMount, WorkloadSpec};
 use lattice_graph::ServiceGraph;
 
@@ -494,7 +495,7 @@ impl TemplateRenderer {
         // Render volumes
         let mut volumes = BTreeMap::new();
         for (path, vol) in &container.volumes {
-            let rendered = self.render_volume(vol, ctx)?;
+            let rendered = self.render_volume(vol)?;
             volumes.insert(path.clone(), rendered);
         }
 
@@ -617,19 +618,11 @@ impl TemplateRenderer {
         }
     }
 
-    /// Render a volume mount
-    fn render_volume(
-        &self,
-        vol: &VolumeMount,
-        ctx: &TemplateContext,
-    ) -> Result<RenderedVolume, TemplateError> {
-        let source = match &vol.source {
-            Some(s) => Some(render_template(s.as_str(), ctx)?),
-            None => None,
-        };
-
+    /// Volume `source` uses its own `${resources.NAME}` grammar, parsed downstream
+    /// by `VolumeCompiler::parse_volume_source` — don't run it through the template engine.
+    fn render_volume(&self, vol: &VolumeMount) -> Result<RenderedVolume, TemplateError> {
         Ok(RenderedVolume {
-            source,
+            source: vol.source.clone().map(TemplateString::into_inner),
             path: vol.path.clone(),
             read_only: vol.read_only,
             medium: vol.medium.clone(),
@@ -1483,18 +1476,27 @@ mod tests {
     }
 
     // =========================================================================
-    // Story: Volume rendering with templates
+    // Story: Volume sources pass through render_container unchanged
+    //
+    // Volume `source` has its own `${resources.NAME}` grammar that
+    // `VolumeCompiler::parse_volume_source` consumes downstream. The renderer
+    // must NOT pipe it through the generic template engine — the engine only
+    // knows `resources.NAME.FIELD` keys, so a bare `${resources.NAME}` would
+    // fail to resolve and a complex expression would produce a string the
+    // volume compiler can't parse. Both regressions caused real outages
+    // (homelab haproxy-fw, 2026-04), so these tests pin the contract.
     // =========================================================================
 
     #[test]
-    fn test_render_volume_with_template() {
+    fn test_render_volume_passes_resource_ref_through_verbatim() {
+        // The canonical case: `${resources.NAME}` reaches the volume compiler
+        // unchanged so `parse_volume_source` can pull out the resource name.
         let ctx = TemplateContext::builder()
             .metadata("api", std::collections::HashMap::new())
             .resource(
                 "storage",
                 crate::context::ResourceOutputs::builder()
-                    .output("name", "my-pvc")
-                    .output("path", "/data/app")
+                    .output("claim_name", "my-pvc")
                     .build(),
             )
             .build();
@@ -1503,7 +1505,7 @@ mod tests {
         volumes.insert(
             "/data".to_string(),
             VolumeMount {
-                source: Some(TemplateString::from("${resources.storage.name}")),
+                source: Some(TemplateString::from("${resources.storage}")),
                 path: Some("subdir".to_string()),
                 read_only: Some(true),
                 medium: None,
@@ -1522,26 +1524,29 @@ mod tests {
             .render_container("main", &container, &ctx)
             .expect("container rendering should succeed");
 
-        assert_eq!(rendered.volumes["/data"].source, Some("my-pvc".to_string()));
+        assert_eq!(
+            rendered.volumes["/data"].source,
+            Some("${resources.storage}".to_string())
+        );
         assert_eq!(rendered.volumes["/data"].path, Some("subdir".to_string()));
         assert_eq!(rendered.volumes["/data"].read_only, Some(true));
     }
 
     #[test]
-    fn test_render_volume_with_complex_template() {
+    fn test_render_volume_does_not_error_on_unresolvable_source() {
+        // Regression guard for the lattice-template switch (commit 13a6d700,
+        // 2026-04-08). Bare `${resources.NAME}` has no `.FIELD` and is not a
+        // key in the flat template context. The renderer must not hand it to
+        // the engine, so an unresolvable-looking source must NOT error here.
         let ctx = TemplateContext::builder()
             .metadata("api", std::collections::HashMap::new())
-            .config("storage_class", "fast-ssd")
-            .cluster("name", "prod-cluster")
             .build();
 
         let mut volumes = BTreeMap::new();
         volumes.insert(
-            "/cache".to_string(),
+            "/data".to_string(),
             VolumeMount {
-                source: Some(TemplateString::from(
-                    "${cluster.name}-${config.storage_class}-cache",
-                )),
+                source: Some(TemplateString::from("${resources.haproxy-config}")),
                 path: None,
                 read_only: None,
                 medium: None,
@@ -1558,11 +1563,11 @@ mod tests {
         let renderer = TemplateRenderer::new();
         let rendered = renderer
             .render_container("main", &container, &ctx)
-            .expect("container rendering should succeed");
+            .expect("volume sources must not be template-rendered");
 
         assert_eq!(
-            rendered.volumes["/cache"].source,
-            Some("prod-cluster-fast-ssd-cache".to_string())
+            rendered.volumes["/data"].source,
+            Some("${resources.haproxy-config}".to_string())
         );
     }
 
@@ -1599,36 +1604,6 @@ mod tests {
             rendered.volumes["/logs"].source,
             Some("shared-logs-pvc".to_string())
         );
-    }
-
-    #[test]
-    fn test_render_volume_undefined_variable_errors() {
-        let ctx = TemplateContext::builder()
-            .metadata("api", std::collections::HashMap::new())
-            .build();
-
-        let mut volumes = BTreeMap::new();
-        volumes.insert(
-            "/data".to_string(),
-            VolumeMount {
-                source: Some(TemplateString::from("${resources.missing.name}")),
-                path: None,
-                read_only: None,
-                medium: None,
-                size_limit: None,
-            },
-        );
-
-        let container = ContainerSpec {
-            image: "app:latest".to_string(),
-            volumes,
-            ..Default::default()
-        };
-
-        let renderer = TemplateRenderer::new();
-        let result = renderer.render_container("main", &container, &ctx);
-
-        assert!(result.is_err());
     }
 
     #[test]

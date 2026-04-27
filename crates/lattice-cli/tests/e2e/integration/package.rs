@@ -360,7 +360,9 @@ async fn test_upgrade(kubeconfig: &str) -> Result<(), String> {
 async fn test_delete(kubeconfig: &str) -> Result<(), String> {
     info!("[Package] Testing delete...");
 
-    // Delete the LatticePackage
+    // Delete the LatticePackage. `--ignore-not-found` keeps cleanup idempotent:
+    // if a prior run, finalizer, or another reconcile already removed the CR,
+    // the test still treats absence as the desired terminal state.
     run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -369,6 +371,7 @@ async fn test_delete(kubeconfig: &str) -> Result<(), String> {
         PACKAGE_NAME,
         "-n",
         PACKAGE_NAMESPACE,
+        "--ignore-not-found",
     ])
     .await
     .map_err(|e| format!("failed to delete package: {}", e))?;

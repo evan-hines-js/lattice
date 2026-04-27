@@ -96,6 +96,22 @@ pub trait CAPIClient: Send + Sync {
         version: &str,
     ) -> Result<(), Error>;
 
+    /// Patch `spec.replicas` on the control plane resource.
+    ///
+    /// Used for spec-drift propagation on self-managing clusters: when the
+    /// `LatticeCluster.spec.nodes.controlPlane.replicas` field is bumped,
+    /// this surgically updates the KCP / RKE2ControlPlane without touching
+    /// any other field. Patching only `spec.replicas` avoids the CP-roll
+    /// behaviour that a full re-render would trigger by overwriting fields
+    /// like `postKubeadmCommands`.
+    async fn update_cp_replicas(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+        replicas: u32,
+    ) -> Result<(), Error>;
+
     /// Get versions for all pool MachineDeployments in one list call.
     ///
     /// Returns a map of pool_id -> version. Pools whose MachineDeployment
@@ -600,6 +616,33 @@ impl CAPIClient for CAPIClientImpl {
             version = %version,
             kind = %cp_kind,
             "Patched control plane version"
+        );
+        Ok(())
+    }
+
+    async fn update_cp_replicas(
+        &self,
+        cluster_name: &str,
+        namespace: &str,
+        bootstrap: BootstrapProvider,
+        replicas: u32,
+    ) -> Result<(), Error> {
+        let cp_kind = control_plane_kind(bootstrap)?;
+        let api = self
+            .discovered_api(namespace, "controlplane.cluster.x-k8s.io", cp_kind)
+            .await?;
+
+        let cp_name = control_plane_name(cluster_name);
+        let patch = serde_json::json!({ "spec": { "replicas": replicas } });
+
+        api.patch(&cp_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+
+        info!(
+            cluster = %cluster_name,
+            replicas = replicas,
+            kind = %cp_kind,
+            "Patched control plane replicas"
         );
         Ok(())
     }
