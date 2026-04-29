@@ -59,16 +59,19 @@ pub trait KubeClient: Send + Sync {
         namespace: &str,
     ) -> Result<Option<k8s_openapi::api::core::v1::Secret>, Error>;
 
-    /// Ensure the cell LoadBalancer Service exists
+    /// Ensure both cell Services exist: the externally-typed one for
+    /// bootstrap/gRPC/auth-proxy and the in-cluster ClusterIP for the
+    /// CAPI proxy.
     ///
-    /// Creates a LoadBalancer Service in lattice-system namespace to expose
-    /// cell servers (bootstrap, gRPC, proxy, auth-proxy) for workload cluster provisioning.
-    /// The LB address is auto-discovered from Service status.
+    /// `service_type` mirrors `parent_config.service.type` from the
+    /// LatticeCluster — `"LoadBalancer"`, `"NodePort"`, or `"ClusterIP"`.
+    /// The internal proxy Service is always ClusterIP regardless.
     async fn ensure_cell_service(
         &self,
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
+        service_type: &str,
         provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error>;
 
@@ -295,26 +298,41 @@ impl KubeClient for KubeClientImpl {
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
+        service_type: &str,
         provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Service;
+        use lattice_common::CELL_INTERNAL_SERVICE_NAME;
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
         if self
             .cache
             .get_namespaced::<Service>(CELL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE)
             .is_some()
         {
-            debug!("cell service already exists");
+            debug!("{CELL_SERVICE_NAME} already exists");
         } else {
-            info!("creating cell LoadBalancer service");
-            let api: Api<Service> = Api::namespaced(self.client.clone(), LATTICE_SYSTEM_NAMESPACE);
+            info!("creating cell Service ({service_type})");
             let service = lattice_common::kube_utils::build_cell_service(
                 bootstrap_port,
                 grpc_port,
-                proxy_port,
+                service_type,
                 provider_type,
             );
             api.create(&PostParams::default(), &service).await?;
+        }
+
+        if self
+            .cache
+            .get_namespaced::<Service>(CELL_INTERNAL_SERVICE_NAME, LATTICE_SYSTEM_NAMESPACE)
+            .is_some()
+        {
+            debug!("{CELL_INTERNAL_SERVICE_NAME} already exists");
+        } else {
+            info!("creating {CELL_INTERNAL_SERVICE_NAME} (ClusterIP)");
+            let internal = lattice_common::kube_utils::build_cell_internal_service(proxy_port);
+            api.create(&PostParams::default(), &internal).await?;
         }
 
         Ok(())

@@ -395,11 +395,12 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
                 pc.bootstrap_port,
                 pc.grpc_port,
                 pc.proxy_port,
+                &pc.service.type_,
                 &provider_type,
             )
             .await
         {
-            warn!(error = %e, "failed to ensure cell LB service, will retry");
+            warn!(error = %e, "failed to ensure cell Services, will retry");
         }
     }
 

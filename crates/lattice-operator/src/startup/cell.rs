@@ -6,7 +6,8 @@ use k8s_openapi::api::core::v1::Service;
 use kube::api::{Api, PostParams};
 use kube::Client;
 
-use lattice_common::kube_utils::build_cell_service;
+use lattice_common::kube_utils::{build_cell_internal_service, build_cell_service};
+use lattice_common::{CELL_INTERNAL_SERVICE_NAME, CELL_SERVICE_NAME};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
 use lattice_crd::crd::{LatticeCluster, ProviderType};
@@ -15,33 +16,42 @@ use super::polling::{
     wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,
 };
 
-/// Ensure the cell LoadBalancer Service exists.
+/// Ensure both cell Services exist: the externally-typed one for
+/// bootstrap/gRPC/auth-proxy and the in-cluster ClusterIP for the
+/// CAPI proxy.
 ///
-/// Creates a LoadBalancer Service for cell servers. The LB address is
-/// auto-discovered from Service status (cloud assigns it, or Cilium L2 announces it).
+/// `service_type` is the user-configured `parent_config.service.type`
+/// from the LatticeCluster. The internal proxy Service is always
+/// ClusterIP regardless.
 pub async fn ensure_cell_service_exists(
     client: &Client,
     bootstrap_port: u16,
     grpc_port: u16,
     proxy_port: u16,
+    service_type: &str,
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    // Check if it already exists
-    if api.get("lattice-cell").await.is_ok() {
-        tracing::debug!("lattice-cell Service already exists");
-        return Ok(());
+    if api.get(CELL_SERVICE_NAME).await.is_err() {
+        let service = build_cell_service(bootstrap_port, grpc_port, service_type, &provider_type);
+        api.create(&PostParams::default(), &service).await?;
+        tracing::info!(
+            bootstrap_port,
+            grpc_port,
+            service_type,
+            "Created {CELL_SERVICE_NAME} Service"
+        );
     }
 
-    let service = build_cell_service(bootstrap_port, grpc_port, proxy_port, &provider_type);
-    api.create(&PostParams::default(), &service).await?;
-    tracing::info!(
-        bootstrap_port,
-        grpc_port,
-        proxy_port,
-        "Created lattice-cell LoadBalancer Service"
-    );
+    if api.get(CELL_INTERNAL_SERVICE_NAME).await.is_err() {
+        let internal = build_cell_internal_service(proxy_port);
+        api.create(&PostParams::default(), &internal).await?;
+        tracing::info!(
+            proxy_port,
+            "Created {CELL_INTERNAL_SERVICE_NAME} ClusterIP Service"
+        );
+    }
 
     Ok(())
 }
@@ -55,9 +65,9 @@ pub async fn ensure_cell_service_exists(
 pub async fn discover_cell_host(client: &Client) -> Result<Option<String>, String> {
     let services: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let svc = services
-        .get("lattice-cell")
+        .get(CELL_SERVICE_NAME)
         .await
-        .map_err(|e| format!("failed to get lattice-cell Service: {}", e))?;
+        .map_err(|e| format!("failed to get {CELL_SERVICE_NAME} Service: {e}"))?;
 
     let Some(status) = svc.status else {
         return Ok(None);
@@ -130,14 +140,15 @@ pub async fn get_cell_server_sans(
         return vec![];
     };
 
-    // Create the cell LoadBalancer Service
+    // Create the cell Services (external + internal proxy)
     let provider_type = cluster.spec.provider.provider_type();
-    tracing::info!(?provider_type, "Creating cell LoadBalancer Service...");
+    tracing::info!(?provider_type, "Creating cell Services...");
     if let Err(e) = ensure_cell_service_exists(
         client,
         parent_config.bootstrap_port,
         parent_config.grpc_port,
         parent_config.proxy_port,
+        &parent_config.service.type_,
         provider_type,
     )
     .await

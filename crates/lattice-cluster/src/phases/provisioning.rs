@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use lattice_cell::patch_kubeconfig_for_proxy;
 use lattice_common::events::{actions, reasons};
-use lattice_common::{capi_namespace, lattice_svc_dns, Error, CELL_SERVICE_NAME};
+use lattice_common::{capi_namespace, lattice_svc_dns, Error, CELL_INTERNAL_SERVICE_NAME};
 use lattice_core::DEFAULT_PROXY_PORT;
 use lattice_crd::crd::{ClusterPhase, LatticeCluster};
 
@@ -150,6 +150,11 @@ async fn patch_kubeconfig_for_proxy_access(
 }
 
 /// Build the proxy URL from cluster's parent config.
+///
+/// Uses the in-cluster-only `lattice-cell-internal` ClusterIP Service —
+/// the proxy is unauthenticated method-gated (read-only), so it must
+/// never be reached through the externally-typed `lattice-cell` Service
+/// when the user picks LoadBalancer/NodePort.
 fn build_proxy_url(cluster: &LatticeCluster) -> String {
     let proxy_port = cluster
         .spec
@@ -159,7 +164,7 @@ fn build_proxy_url(cluster: &LatticeCluster) -> String {
         .unwrap_or(DEFAULT_PROXY_PORT);
     format!(
         "https://{}:{}",
-        lattice_svc_dns(CELL_SERVICE_NAME),
+        lattice_svc_dns(CELL_INTERNAL_SERVICE_NAME),
         proxy_port
     )
 }

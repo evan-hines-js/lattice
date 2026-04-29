@@ -34,16 +34,17 @@ pub async fn handle_pending(
     // Create LoadBalancer Service if this cluster has a cell spec
     // This exposes cell servers for workload clusters to reach bootstrap + gRPC endpoints
     if let Some(ref cell_spec) = cluster.spec.parent_config {
-        info!("ensuring LoadBalancer Service for cell servers");
+        info!("ensuring cell Services");
         ctx.kube
             .ensure_cell_service(
                 cell_spec.bootstrap_port,
                 cell_spec.grpc_port,
                 cell_spec.proxy_port,
+                &cell_spec.service.type_,
                 &cluster.spec.provider.provider_type(),
             )
             .await?;
-        info!("cell LoadBalancer Service created/updated");
+        info!("cell Services created/updated");
     }
 
     // Self-cluster: we ARE this cluster, skip provisioning

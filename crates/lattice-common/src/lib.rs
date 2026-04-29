@@ -337,6 +337,14 @@ pub const KTHENA_CONTROLLER_MANAGER_SA: &str = "kthena-controller-manager";
 // Service and resource names
 /// Name of the Lattice cell service
 pub const CELL_SERVICE_NAME: &str = "lattice-cell";
+/// In-cluster-only Service exposing the read-only K8s API proxy that CAPI
+/// providers use to reach child clusters during pivot. Kept on its own
+/// ClusterIP Service so it never gets published on a LoadBalancer — the
+/// proxy itself does only method-based gating (read-only) and stamps the
+/// upstream identity from a hard-coded `system:capi-proxy` user, so any
+/// LB exposure would amount to anonymous read access to every child K8s
+/// API the cell knows about.
+pub const CELL_INTERNAL_SERVICE_NAME: &str = "lattice-cell-internal";
 /// Name of the Lattice operator deployment and service account
 pub const OPERATOR_NAME: &str = "lattice-operator";
 

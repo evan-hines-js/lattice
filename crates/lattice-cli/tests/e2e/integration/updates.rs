@@ -908,39 +908,34 @@ async fn wait_for_resource_exists(
     let ns = namespace.to_string();
     let rname = name.to_string();
 
-    wait_for_condition(
-        &desc,
-        DEFAULT_TIMEOUT,
-        Duration::from_secs(3),
-        || {
-            let kc = kc.clone();
-            let kind = kind.clone();
-            let ns = ns.clone();
-            let rname = rname.clone();
-            async move {
-                let result = run_kubectl(&[
-                    "--kubeconfig",
-                    &kc,
-                    "get",
-                    &kind,
-                    &rname,
-                    "-n",
-                    &ns,
-                    "-o",
-                    "name",
-                ])
-                .await;
+    wait_for_condition(&desc, DEFAULT_TIMEOUT, Duration::from_secs(3), || {
+        let kc = kc.clone();
+        let kind = kind.clone();
+        let ns = ns.clone();
+        let rname = rname.clone();
+        async move {
+            let result = run_kubectl(&[
+                "--kubeconfig",
+                &kc,
+                "get",
+                &kind,
+                &rname,
+                "-n",
+                &ns,
+                "-o",
+                "name",
+            ])
+            .await;
 
-                match result {
-                    Ok(_) => Ok(should_exist), // resource exists
-                    Err(e) if e.contains("NotFound") || e.contains("not found") => {
-                        Ok(!should_exist) // resource doesn't exist
-                    }
-                    Err(e) => Err(format!("error checking {kind} {ns}/{rname}: {e}")),
+            match result {
+                Ok(_) => Ok(should_exist), // resource exists
+                Err(e) if e.contains("NotFound") || e.contains("not found") => {
+                    Ok(!should_exist) // resource doesn't exist
                 }
+                Err(e) => Err(format!("error checking {kind} {ns}/{rname}: {e}")),
             }
-        },
-    )
+        }
+    })
     .await
 }
 

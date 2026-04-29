@@ -90,6 +90,30 @@ pub fn capi_cluster_endpoint_resolver(client: Client) -> ApiServerEndpointResolv
 /// A single cell managing 10k clusters would be extreme — this is a safety net.
 const MAX_CLUSTER_REGISTRATIONS: usize = 10_000;
 
+/// Lifecycle of a one-time bootstrap or CSR token.
+///
+/// `InFlight` is the lease state — a request has passed validation but
+/// hasn't yet finished its fallible follow-up work (rendering the
+/// bootstrap response, signing the CSR). On success the lease is
+/// committed (`Used`); on failure it's released (`Unused`) so the agent
+/// can retry. Without this lease, a transient resolver/CA/signing error
+/// would burn the one-time token and permanently wedge the cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenState {
+    Unused,
+    InFlight,
+    Used,
+}
+
+impl TokenState {
+    fn is_consumed_or_in_flight(self) -> bool {
+        !matches!(self, TokenState::Unused)
+    }
+    fn is_used(self) -> bool {
+        matches!(self, TokenState::Used)
+    }
+}
+
 /// Cluster info stored in bootstrap state.
 #[derive(Clone, Debug)]
 pub struct ClusterBootstrapInfo {
@@ -98,10 +122,10 @@ pub struct ClusterBootstrapInfo {
     pub ca_certificate: String,
     pub token_hash: String,
     pub token_created: Instant,
-    pub token_used: bool,
+    pub token_state: TokenState,
     pub csr_token_hash: Option<String>,
     pub csr_token_created: Option<Instant>,
-    pub csr_token_used: bool,
+    pub csr_token_state: TokenState,
     pub csr_token_raw: Option<zeroize::Zeroizing<String>>,
 }
 
@@ -215,7 +239,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
             let to_evict: Vec<String> = self
                 .clusters
                 .iter()
-                .filter(|e| e.token_used && e.csr_token_used)
+                .filter(|e| e.token_state.is_used() && e.csr_token_state.is_used())
                 .map(|e| e.key().clone())
                 .collect();
             for key in to_evict {
@@ -255,7 +279,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 // and operator restart recovery.
                 debug!(cluster = %cluster_id, "Cluster already registered (in memory), rotating token");
                 let info = existing.get_mut();
-                if !info.token_used {
+                if !info.token_state.is_consumed_or_in_flight() {
                     info.token_hash = token.hash();
                     info.token_created = Instant::now();
                 }
@@ -269,8 +293,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 info.ca_certificate = registration.ca_certificate;
             }
             dashmap::Entry::Vacant(vacant) => {
-                // If recovering with a CSR hash, mark bootstrap token as already used
-                let token_used = recovery_csr_hash.is_some();
+                // If recovering with a CSR hash, the bootstrap token has already
+                // been consumed in a prior operator generation.
+                let recovered = recovery_csr_hash.is_some();
+                let token_state = if recovered {
+                    TokenState::Used
+                } else {
+                    TokenState::Unused
+                };
 
                 let info = ClusterBootstrapInfo {
                     facts: registration.facts,
@@ -278,14 +308,14 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                     ca_certificate: registration.ca_certificate,
                     token_hash: token.hash(),
                     token_created: Instant::now(),
-                    token_used,
+                    token_state,
                     csr_token_hash: recovery_csr_hash,
-                    csr_token_created: if token_used {
+                    csr_token_created: if recovered {
                         Some(Instant::now())
                     } else {
                         None
                     },
-                    csr_token_used: false,
+                    csr_token_state: TokenState::Unused,
                     csr_token_raw: None,
                 };
 
@@ -303,86 +333,116 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         }
     }
 
-    /// Validate and consume a bootstrap token
+    /// Lease a bootstrap token: validate it, generate a CSR token, and mark
+    /// the bootstrap token `InFlight` so concurrent requests with the same
+    /// token are rejected. The lease is **not** persisted to the CRD —
+    /// callers must follow up with [`commit_bootstrap`] on success or
+    /// [`release_bootstrap`] on failure. If a caller returns early without
+    /// releasing, the in-memory token stays `InFlight` until the process
+    /// restarts.
     ///
-    /// Uses atomic check-and-mark via DashMap::get_mut to prevent TOCTOU races
-    /// where two concurrent requests could both pass validation before either
-    /// marks the token as consumed.
-    ///
-    /// This updates the CRD status to set bootstrap_complete=true after atomically
-    /// marking the token as used, ensuring the status is persisted even if the
-    /// operator restarts.
-    pub async fn validate_and_consume(
+    /// Atomic check-and-mark via `DashMap::get_mut` closes the TOCTOU
+    /// window between validation and lease acquisition.
+    pub async fn validate_and_lease(
         &self,
         cluster_id: &str,
         token: &str,
     ) -> Result<ClusterBootstrapInfo, BootstrapError> {
         use subtle::ConstantTimeEq;
 
-        // Atomically validate AND mark as used while holding the mutable reference.
-        // This eliminates the TOCTOU window between check and consumption.
-        let (info, csr_token_hash) = {
+        let mut entry = self
+            .clusters
+            .get_mut(cluster_id)
+            .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
+
+        let info = entry.value_mut();
+
+        if info.token_state.is_consumed_or_in_flight() {
+            return Err(BootstrapError::TokenAlreadyUsed);
+        }
+
+        if info.token_created.elapsed() > self.token_ttl {
+            return Err(BootstrapError::InvalidToken);
+        }
+
+        let provided_token =
+            BootstrapToken::from_string(token).map_err(|_| BootstrapError::InvalidToken)?;
+        let provided_hash = provided_token.hash();
+
+        // Constant-time hash comparison to prevent timing side-channel
+        // attacks. Hashes are SHA-256 → base64url-no-pad (always 43 bytes);
+        // assert length first so `ct_eq` can't short-circuit.
+        if provided_hash.len() != info.token_hash.len()
+            || provided_hash
+                .as_bytes()
+                .ct_eq(info.token_hash.as_bytes())
+                .unwrap_u8()
+                != 1
+        {
+            return Err(BootstrapError::InvalidToken);
+        }
+
+        // Lease — concurrent requests with the same token now get
+        // TokenAlreadyUsed. Will flip to Used on commit, or back to Unused
+        // on release.
+        info.token_state = TokenState::InFlight;
+
+        // Generate a one-time CSR token. We store the hash so subsequent
+        // CSR requests authenticate against it; raw token is held until
+        // the agent receives it in the bootstrap response.
+        let csr_token = BootstrapToken::generate();
+        info.csr_token_hash = Some(csr_token.hash());
+        info.csr_token_created = Some(Instant::now());
+        info.csr_token_raw = Some(zeroize::Zeroizing::new(csr_token.as_str().to_string()));
+
+        Ok(info.clone())
+    }
+
+    /// Commit a leased bootstrap token. Marks it `Used` in memory and
+    /// persists `bootstrap_complete=true` + the CSR token hash to the
+    /// LatticeCluster CRD. Call this only after the bootstrap response
+    /// has been rendered successfully — otherwise the agent never sees
+    /// the CSR token but the CRD records it as consumed.
+    pub async fn commit_bootstrap(&self, cluster_id: &str) -> Result<(), BootstrapError> {
+        let csr_hash = {
             let mut entry = self
                 .clusters
                 .get_mut(cluster_id)
                 .ok_or_else(|| BootstrapError::ClusterNotFound(cluster_id.to_string()))?;
-
             let info = entry.value_mut();
-
-            // Check if already used
-            if info.token_used {
-                return Err(BootstrapError::TokenAlreadyUsed);
+            if info.token_state != TokenState::InFlight {
+                return Err(BootstrapError::Internal(format!(
+                    "commit_bootstrap on non-leased token: {:?}",
+                    info.token_state
+                )));
             }
-
-            // Check TTL
-            if info.token_created.elapsed() > self.token_ttl {
-                return Err(BootstrapError::InvalidToken);
-            }
-
-            // Parse the provided token and compute its hash for comparison
-            let provided_token =
-                BootstrapToken::from_string(token).map_err(|_| BootstrapError::InvalidToken)?;
-            let provided_hash = provided_token.hash();
-
-            // Constant-time hash comparison to prevent timing side-channel attacks.
-            // We compare hashes (not raw tokens) because raw tokens are never stored.
-            // Both hashes are SHA-256 → base64url-no-pad (always 43 bytes). Assert
-            // equal length to guarantee ct_eq doesn't short-circuit on length mismatch.
-            if provided_hash.len() != info.token_hash.len()
-                || provided_hash
-                    .as_bytes()
-                    .ct_eq(info.token_hash.as_bytes())
-                    .unwrap_u8()
-                    != 1
-            {
-                return Err(BootstrapError::InvalidToken);
-            }
-
-            // Mark as used WHILE still holding the lock — prevents concurrent use
-            info.token_used = true;
-
-            // Generate a one-time CSR token for authenticating the subsequent CSR request.
-            // Store only the hash; the raw token is held temporarily for the response.
-            let csr_token = BootstrapToken::generate();
-            let csr_hash = csr_token.hash();
-            info.csr_token_hash = Some(csr_hash.clone());
-            info.csr_token_created = Some(Instant::now());
-            info.csr_token_raw = Some(zeroize::Zeroizing::new(csr_token.as_str().to_string()));
-
-            (info.clone(), csr_hash)
+            info.token_state = TokenState::Used;
+            info.csr_token_hash.clone().ok_or_else(|| {
+                BootstrapError::Internal("commit_bootstrap with no CSR hash".to_string())
+            })?
         };
 
-        // Persist bootstrap_complete AND csr_token_hash to CRD status.
-        // This ensures the CSR token survives operator restarts (H4) and
-        // makes consumption atomic with persistence (L1).
-        if let Err(e) = self
-            .persist_bootstrap_status(cluster_id, &csr_token_hash)
-            .await
-        {
+        if let Err(e) = self.persist_bootstrap_status(cluster_id, &csr_hash).await {
             warn!(cluster_id = %cluster_id, error = %e, "Failed to persist bootstrap status to CRD");
         }
+        Ok(())
+    }
 
-        Ok(info)
+    /// Release a leased bootstrap token: roll the in-memory state back to
+    /// `Unused` and discard the freshly-generated CSR token. Call this on
+    /// any failure path between [`validate_and_lease`] and
+    /// [`commit_bootstrap`] so the agent can retry. No-op if the token
+    /// isn't currently leased.
+    pub fn release_bootstrap(&self, cluster_id: &str) {
+        if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
+            let info = entry.value_mut();
+            if info.token_state == TokenState::InFlight {
+                info.token_state = TokenState::Unused;
+                info.csr_token_hash = None;
+                info.csr_token_created = None;
+                info.csr_token_raw = None;
+            }
+        }
     }
 
     /// Persist bootstrap_complete and csr_token_hash to the cluster's CRD status
@@ -509,10 +569,13 @@ impl<G: ManifestGenerator> BootstrapState<G> {
         })
     }
 
-    /// Sign a CSR for a cluster
+    /// Sign a CSR for a cluster.
     ///
-    /// Requires a valid one-time CSR token that was issued during bootstrap.
-    /// This ensures only the agent that consumed the bootstrap token can get a certificate.
+    /// Same lease pattern as bootstrap: lease the CSR token (`InFlight`),
+    /// sign, then commit (`Used`). If signing fails the lease is
+    /// released so the agent can retry — without that, a malformed CSR
+    /// or transient CA error would burn the CSR token and leave the
+    /// agent permanently unable to get a cert.
     pub async fn sign_csr(
         &self,
         cluster_id: &str,
@@ -521,7 +584,7 @@ impl<G: ManifestGenerator> BootstrapState<G> {
     ) -> Result<CsrResponse, BootstrapError> {
         use subtle::ConstantTimeEq;
 
-        // Atomically validate AND consume the CSR token
+        // Lease the CSR token under the DashMap write guard.
         {
             let mut entry = self
                 .clusters
@@ -530,37 +593,31 @@ impl<G: ManifestGenerator> BootstrapState<G> {
 
             let info = entry.value_mut();
 
-            // Must have completed bootstrap (token consumed)
-            if !info.token_used {
+            if !info.token_state.is_used() {
                 return Err(BootstrapError::ClusterNotBootstrapped(
                     cluster_id.to_string(),
                 ));
             }
 
-            // CSR token hash must exist (generated during validate_and_consume)
             let expected_hash = info
                 .csr_token_hash
                 .as_ref()
                 .ok_or(BootstrapError::InvalidCsrToken)?;
 
-            // CSR token must not already be used
-            if info.csr_token_used {
+            if info.csr_token_state.is_consumed_or_in_flight() {
                 return Err(BootstrapError::CsrTokenAlreadyUsed);
             }
 
-            // Check CSR token TTL
             if let Some(created) = info.csr_token_created {
                 if created.elapsed() > CSR_TOKEN_TTL {
                     return Err(BootstrapError::InvalidCsrToken);
                 }
             }
 
-            // Parse the provided CSR token and compute its hash
             let provided_token = BootstrapToken::from_string(csr_token)
                 .map_err(|_| BootstrapError::InvalidCsrToken)?;
             let provided_hash = provided_token.hash();
 
-            // Constant-time hash comparison with explicit length check
             if provided_hash.len() != expected_hash.len()
                 || provided_hash
                     .as_bytes()
@@ -571,18 +628,43 @@ impl<G: ManifestGenerator> BootstrapState<G> {
                 return Err(BootstrapError::InvalidCsrToken);
             }
 
-            // Mark as consumed
-            info.csr_token_used = true;
+            info.csr_token_state = TokenState::InFlight;
         }
 
-        // Sign the CSR with the active CA
+        // Sign — fallible. On error, release the lease so the agent can
+        // retry; otherwise commit.
         let bundle = self.ca_bundle.read().await;
-        let certificate_pem = bundle.sign_csr(csr_pem, cluster_id, self.cert_validity_hours)?;
+        let signed = bundle.sign_csr(csr_pem, cluster_id, self.cert_validity_hours);
+        let certificate_pem = match signed {
+            Ok(pem) => pem,
+            Err(e) => {
+                self.release_csr(cluster_id);
+                return Err(e.into());
+            }
+        };
+
+        // Commit the lease — no CRD write needed for CSR (the bootstrap
+        // commit already persisted the CSR hash).
+        if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
+            entry.value_mut().csr_token_state = TokenState::Used;
+        }
 
         Ok(CsrResponse {
             certificate_pem,
             ca_certificate_pem: bundle.trust_bundle_pem(),
         })
+    }
+
+    /// Release a leased CSR token back to `Unused`. No-op unless currently
+    /// `InFlight`. Called by `sign_csr` itself on signing failure; exposed
+    /// so external retry paths can release explicitly if needed.
+    pub fn release_csr(&self, cluster_id: &str) {
+        if let Some(mut entry) = self.clusters.get_mut(cluster_id) {
+            let info = entry.value_mut();
+            if info.csr_token_state == TokenState::InFlight {
+                info.csr_token_state = TokenState::Unused;
+            }
+        }
     }
 
     /// Check if a cluster is registered
@@ -627,7 +709,7 @@ mod tests {
         .await;
 
         let info = state
-            .validate_and_consume("test-cluster", token.as_str())
+            .validate_and_lease("test-cluster", token.as_str())
             .await
             .expect("token validation should succeed");
 
@@ -647,7 +729,7 @@ mod tests {
         .await;
 
         let result = state
-            .validate_and_consume("test-cluster", "wrong-token")
+            .validate_and_lease("test-cluster", "wrong-token")
             .await;
 
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
@@ -667,13 +749,13 @@ mod tests {
 
         // First use succeeds
         let _ = state
-            .validate_and_consume("test-cluster", token.as_str())
+            .validate_and_lease("test-cluster", token.as_str())
             .await
             .expect("first token use should succeed");
 
         // Second use fails
         let result = state
-            .validate_and_consume("test-cluster", token.as_str())
+            .validate_and_lease("test-cluster", token.as_str())
             .await;
         assert!(matches!(result, Err(BootstrapError::TokenAlreadyUsed)));
     }
@@ -691,7 +773,7 @@ mod tests {
         .await;
 
         let info = state
-            .validate_and_consume("test-cluster", token.as_str())
+            .validate_and_lease("test-cluster", token.as_str())
             .await
             .expect("token validation should succeed");
         let response = state
@@ -760,9 +842,13 @@ mod tests {
         )
         .await;
         let info = state
-            .validate_and_consume("csr-test", token.as_str())
+            .validate_and_lease("csr-test", token.as_str())
             .await
             .expect("token validation should succeed");
+        state
+            .commit_bootstrap("csr-test")
+            .await
+            .expect("commit should succeed");
         let csr_tok = csr_token_from_info(&info);
 
         // Now CSR signing should work
@@ -792,9 +878,13 @@ mod tests {
         )
         .await;
         let info = state
-            .validate_and_consume("cluster-xyz", token.as_str())
+            .validate_and_lease("cluster-xyz", token.as_str())
             .await
             .expect("token validation should succeed");
+        state
+            .commit_bootstrap("cluster-xyz")
+            .await
+            .expect("commit should succeed");
         let csr_tok = csr_token_from_info(&info);
 
         // Sign CSR
@@ -849,9 +939,13 @@ mod tests {
         // The bootstrap script calls: GET /api/clusters/prod-us-west-001/bootstrap
         // with Authorization: Bearer <token>
         let info = state
-            .validate_and_consume("prod-us-west-001", token.as_str())
+            .validate_and_lease("prod-us-west-001", token.as_str())
             .await
             .expect("token validation should succeed");
+        state
+            .commit_bootstrap("prod-us-west-001")
+            .await
+            .expect("commit should succeed");
         assert_eq!(info.cluster_id(), "prod-us-west-001");
         assert_eq!(info.cell_endpoint, "cell.lattice.example.com:8443:50051");
 
@@ -914,13 +1008,13 @@ mod tests {
 
         // Legitimate bootstrap succeeds
         let _ = state
-            .validate_and_consume("secure-cluster", token.as_str())
+            .validate_and_lease("secure-cluster", token.as_str())
             .await
             .expect("legitimate bootstrap should succeed");
 
         // Attacker captures the token and tries to replay it
         let replay_result = state
-            .validate_and_consume("secure-cluster", token.as_str())
+            .validate_and_lease("secure-cluster", token.as_str())
             .await;
 
         // Attack is blocked!
@@ -948,7 +1042,7 @@ mod tests {
 
         // Wrong token
         let result = state
-            .validate_and_consume("guarded-cluster", "totally-wrong-token")
+            .validate_and_lease("guarded-cluster", "totally-wrong-token")
             .await;
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
 
@@ -961,7 +1055,7 @@ mod tests {
         )
         .await;
         let cross_cluster_result = state
-            .validate_and_consume("guarded-cluster", other_token.as_str())
+            .validate_and_lease("guarded-cluster", other_token.as_str())
             .await;
         assert!(matches!(
             cross_cluster_result,
@@ -1010,7 +1104,7 @@ mod tests {
 
         // No clusters registered - attacker tries to bootstrap
         let result = state
-            .validate_and_consume("hacker-cluster", "fake-token")
+            .validate_and_lease("hacker-cluster", "fake-token")
             .await;
         assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
 
@@ -1041,7 +1135,7 @@ mod tests {
         )
         .await;
         state
-            .validate_and_consume("recyclable-cluster", token.as_str())
+            .validate_and_lease("recyclable-cluster", token.as_str())
             .await
             .expect("bootstrap should succeed");
 
@@ -1055,7 +1149,7 @@ mod tests {
         .await;
         assert!(matches!(
             state
-                .validate_and_consume("recyclable-cluster", token2.as_str())
+                .validate_and_lease("recyclable-cluster", token2.as_str())
                 .await,
             Err(BootstrapError::TokenAlreadyUsed)
         ));
@@ -1073,7 +1167,7 @@ mod tests {
         )
         .await;
         state
-            .validate_and_consume("recyclable-cluster", token3.as_str())
+            .validate_and_lease("recyclable-cluster", token3.as_str())
             .await
             .expect("fresh token after deregister should succeed");
     }
@@ -1100,7 +1194,7 @@ mod tests {
 
         // Token has expired
         let result = state
-            .validate_and_consume("slow-cluster", token.as_str())
+            .validate_and_lease("slow-cluster", token.as_str())
             .await;
         assert!(matches!(result, Err(BootstrapError::InvalidToken)));
     }
@@ -1122,9 +1216,13 @@ mod tests {
         )
         .await;
         let info = state
-            .validate_and_consume("malformed-csr-test", token.as_str())
+            .validate_and_lease("malformed-csr-test", token.as_str())
             .await
             .expect("token validation should succeed");
+        state
+            .commit_bootstrap("malformed-csr-test")
+            .await
+            .expect("commit should succeed");
         let csr_tok = csr_token_from_info(&info);
 
         // Try to sign a malformed CSR
@@ -1153,9 +1251,13 @@ mod tests {
         )
         .await;
         let info = state
-            .validate_and_consume("csr-replay", token.as_str())
+            .validate_and_lease("csr-replay", token.as_str())
             .await
             .expect("bootstrap should succeed");
+        state
+            .commit_bootstrap("csr-replay")
+            .await
+            .expect("commit should succeed");
         let csr_tok = csr_token_from_info(&info);
 
         // First CSR signing succeeds
@@ -1192,9 +1294,13 @@ mod tests {
         )
         .await;
         state
-            .validate_and_consume("wrong-csr-tok", token.as_str())
+            .validate_and_lease("wrong-csr-tok", token.as_str())
             .await
             .expect("bootstrap should succeed");
+        state
+            .commit_bootstrap("wrong-csr-tok")
+            .await
+            .expect("commit should succeed");
 
         let agent_req = AgentCertRequest::new("wrong-csr-tok")
             .expect("agent cert request creation should succeed");
@@ -1226,9 +1332,13 @@ mod tests {
         )
         .await;
         let info = state
-            .validate_and_consume("ca-test", token.as_str())
+            .validate_and_lease("ca-test", token.as_str())
             .await
-            .expect("validate_and_consume should succeed");
+            .expect("validate_and_lease should succeed");
+        state
+            .commit_bootstrap("ca-test")
+            .await
+            .expect("commit should succeed");
         let response = state
             .generate_response(&info)
             .await

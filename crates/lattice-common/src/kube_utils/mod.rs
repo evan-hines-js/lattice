@@ -60,7 +60,7 @@ pub use batch::ApplyBatch;
 pub use status::{patch_cluster_resource_status, patch_resource_status};
 
 // service.rs
-pub use service::{build_cell_service, compile_service_account};
+pub use service::{build_cell_internal_service, build_cell_service, compile_service_account};
 
 // dynamic.rs
 pub use dynamic::{

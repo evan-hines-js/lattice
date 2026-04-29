@@ -117,13 +117,25 @@ pub async fn bootstrap_manifests_handler<G: ManifestGenerator>(
     // Extract token
     let token = extract_bearer_token(&headers)?;
 
-    // Validate and consume the token (also sets bootstrap_complete in CRD)
-    let info = state.validate_and_consume(&cluster_id, &token).await?;
+    // Lease the token: validates, generates a CSR token, marks bootstrap
+    // InFlight. If anything below fails, `release_bootstrap` rolls the
+    // in-memory lease back so the agent can retry. The token only gets
+    // permanently consumed (CRD bootstrap_complete=true) after the
+    // bootstrap response has been fully rendered.
+    let info = state.validate_and_lease(&cluster_id, &token).await?;
 
-    info!(cluster_id = %cluster_id, "Bootstrap token validated, returning manifests");
+    info!(cluster_id = %cluster_id, "Bootstrap token validated, rendering response");
 
-    // Generate full bootstrap response (includes CNI, operator, LatticeCluster CRD, parent config)
-    let response = state.generate_response(&info).await?;
+    let response = match state.generate_response(&info).await {
+        Ok(r) => r,
+        Err(e) => {
+            state.release_bootstrap(&cluster_id);
+            warn!(cluster_id = %cluster_id, error = %e, "Bootstrap render failed; lease released");
+            return Err(e);
+        }
+    };
+
+    state.commit_bootstrap(&cluster_id).await?;
 
     // Collect all manifests
     let mut all_manifests = response.manifests;
@@ -396,9 +408,13 @@ mod tests {
         )
         .await;
         state
-            .validate_and_consume("csr-http-test", token.as_str())
+            .validate_and_lease("csr-http-test", token.as_str())
             .await
             .expect("token validation should succeed");
+        state
+            .commit_bootstrap("csr-http-test")
+            .await
+            .expect("commit should succeed");
 
         let csr_tok = get_csr_token(&state, "csr-http-test");
 

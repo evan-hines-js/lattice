@@ -105,10 +105,10 @@ pub fn test_bootstrap_info(cluster_id: &str, provider: ProviderType) -> ClusterB
         ca_certificate: "ca-cert".to_string(),
         token_hash: "test-token-hash".to_string(),
         token_created: Instant::now(),
-        token_used: true,
+        token_state: crate::bootstrap::state::TokenState::Used,
         csr_token_hash: None,
         csr_token_created: None,
-        csr_token_used: false,
+        csr_token_state: crate::bootstrap::state::TokenState::Unused,
         csr_token_raw: None,
     }
 }
