@@ -214,10 +214,6 @@ pub struct InfraProviderStatus {
     #[serde(default)]
     pub last_validated: Option<String>,
 
-    /// Number of clusters using this provider
-    #[serde(default)]
-    pub cluster_count: u32,
-
     /// Generation of the spec that was last reconciled
     #[serde(default)]
     pub observed_generation: Option<i64>,

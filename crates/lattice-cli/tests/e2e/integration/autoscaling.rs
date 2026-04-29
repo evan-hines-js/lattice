@@ -45,8 +45,6 @@ const CPU_BURNER_NAME: &str = "cpu-burner";
 const METRICS_SERVER_NAME: &str = "metrics-server";
 const CUSTOM_METRIC_NAME: &str = "test_scale_metric";
 
-const SCALEDOBJECT_TIMEOUT: Duration = DEFAULT_TIMEOUT;
-const SCALEUP_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// Cold-start latency for the Prometheus pipeline on a fresh cluster
 /// stacks: VictoriaMetrics-operator polls VMServiceScrape changes, vmagent
 /// reloads its config, vmagent's first scrape interval fires, the data
@@ -55,8 +53,6 @@ const SCALEUP_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 /// 30–90s and they don't overlap. 15 minutes covers an unloaded run; on
 /// a heavily-loaded shared box I've seen this take longer.
 const PROM_METRIC_VISIBLE_TIMEOUT: Duration = Duration::from_secs(900);
-const PROM_SCALEUP_TIMEOUT: Duration = Duration::from_secs(300);
-const DEPLOY_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // =============================================================================
@@ -263,7 +259,7 @@ async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
         service,
         "Ready",
         None,
-        DEPLOY_TIMEOUT,
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -283,7 +279,7 @@ async fn run_cpu_autoscaling_test(kubeconfig: &str) -> Result<(), String> {
         kubeconfig,
         AUTOSCALING_NAMESPACE,
         CPU_BURNER_NAME,
-        SCALEUP_TIMEOUT,
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -311,7 +307,7 @@ async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String>
         service,
         "Ready",
         None,
-        DEPLOY_TIMEOUT,
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -347,7 +343,7 @@ async fn run_prometheus_autoscaling_test(kubeconfig: &str) -> Result<(), String>
         kubeconfig,
         PROM_NAMESPACE,
         METRICS_SERVER_NAME,
-        PROM_SCALEUP_TIMEOUT,
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -380,7 +376,7 @@ async fn verify_scaled_object(
 
     wait_for_condition(
         &format!("ScaledObject to exist for {}", name),
-        SCALEDOBJECT_TIMEOUT,
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
@@ -448,7 +444,7 @@ async fn verify_vm_service_scrape(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_condition(
         &format!("VMServiceScrape {} to exist", scrape_name),
-        SCALEDOBJECT_TIMEOUT,
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();

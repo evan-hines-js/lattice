@@ -37,8 +37,6 @@ const OBSERVABILITY_NAMESPACE: &str = "observability-test";
 const METRICS_SVC_NAME: &str = "obs-metrics-svc";
 const TEST_METRIC_NAME: &str = "test_obs_gauge";
 
-const DEPLOY_TIMEOUT: Duration = DEFAULT_TIMEOUT;
-const SCRAPE_TIMEOUT: Duration = Duration::from_secs(300);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 // =============================================================================
@@ -165,7 +163,7 @@ pub async fn run_observability_tests(kubeconfig: &str) -> Result<(), String> {
             svc,
             "Ready",
             None,
-            DEPLOY_TIMEOUT,
+            DEFAULT_TIMEOUT,
         )
         .await?;
 
@@ -186,7 +184,7 @@ async fn verify_vm_service_scrape(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_condition(
         &format!("VMServiceScrape {scrape_name} to exist with port=metrics"),
-        DEPLOY_TIMEOUT,
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();
@@ -238,7 +236,7 @@ async fn verify_status_metrics(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_condition(
         "status.metrics.values to be populated",
-        SCRAPE_TIMEOUT,
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();

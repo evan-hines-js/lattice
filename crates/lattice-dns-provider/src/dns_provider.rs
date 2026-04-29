@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
-use tracing::{debug, info, warn};
+use kube::ResourceExt;
+use tracing::{info, warn};
 
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
@@ -46,40 +46,31 @@ pub async fn reconcile(
 
     info!(dns_provider = %name, provider_type = ?provider.spec.provider_type, "Reconciling DNSProvider");
 
-    match validate_provider(&provider) {
+    let (phase, message, requeue_secs) = match validate_provider(&provider) {
         Ok(()) => {
             info!(dns_provider = %name, "DNSProvider validated successfully");
-
-            update_status(
-                client,
-                &provider,
+            (
                 DNSProviderPhase::Ready,
-                Some("Validated successfully".to_string()),
-                Some(generation),
+                "Validated successfully".to_string(),
+                REQUEUE_SUCCESS_SECS,
             )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
         }
         Err(e) => {
-            warn!(
-                dns_provider = %name,
-                error = %e,
-                "DNSProvider validation failed"
-            );
-
-            update_status(
-                client,
-                &provider,
-                DNSProviderPhase::Failed,
-                Some(e.to_string()),
-                Some(generation),
-            )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
+            warn!(dns_provider = %name, error = %e, "DNSProvider validation failed");
+            (DNSProviderPhase::Failed, e.to_string(), REQUEUE_ERROR_SECS)
         }
-    }
+    };
+    status_check::patch_phase_status::<DNSProvider, DNSProviderStatus>(
+        client,
+        &provider,
+        provider.status.as_ref(),
+        phase,
+        Some(message),
+        Some(generation),
+        FIELD_MANAGER,
+    )
+    .await?;
+    Ok(Action::requeue(Duration::from_secs(requeue_secs)))
 }
 
 /// Validate a DNSProvider's spec and credentials.
@@ -105,48 +96,6 @@ fn validate_provider(provider: &DNSProvider) -> Result<(), ReconcileError> {
             provider.spec.provider_type
         )));
     }
-
-    Ok(())
-}
-
-/// Update DNSProvider status
-async fn update_status(
-    client: &Client,
-    provider: &DNSProvider,
-    phase: DNSProviderPhase,
-    message: Option<String>,
-    observed_generation: Option<i64>,
-) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        provider.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        observed_generation,
-    ) {
-        debug!(dns_provider = %provider.name_any(), "Status unchanged, skipping update");
-        return Ok(());
-    }
-
-    let name = provider.name_any();
-    let namespace = provider.namespace().ok_or_else(|| {
-        ReconcileError::Validation("DNSProvider missing metadata.namespace".into())
-    })?;
-
-    let status = DNSProviderStatus {
-        phase,
-        message,
-        cluster_count: 0,
-        observed_generation,
-    };
-
-    lattice_common::kube_utils::patch_resource_status::<DNSProvider>(
-        client,
-        &name,
-        &namespace,
-        &status,
-        FIELD_MANAGER,
-    )
-    .await?;
 
     Ok(())
 }
@@ -321,7 +270,6 @@ mod tests {
         provider.status = Some(DNSProviderStatus {
             phase: DNSProviderPhase::Ready,
             message: None,
-            cluster_count: 0,
             observed_generation: Some(1),
         });
 
@@ -350,13 +298,11 @@ mod tests {
         let status = DNSProviderStatus {
             phase: DNSProviderPhase::Failed,
             message: Some("credentials not found".to_string()),
-            cluster_count: 3,
             observed_generation: Some(2),
         };
 
         assert_eq!(status.phase, DNSProviderPhase::Failed);
         assert!(status.message.is_some());
-        assert_eq!(status.cluster_count, 3);
         assert_eq!(status.observed_generation, Some(2));
     }
 

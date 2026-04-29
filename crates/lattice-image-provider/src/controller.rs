@@ -55,12 +55,14 @@ pub async fn reconcile(
     if let Err(e) = ip.spec.validate() {
         let msg = e.to_string();
         warn!(image_provider = %name, error = %msg, "Validation failed");
-        update_status(
+        status_check::patch_phase_status::<ImageProvider, ImageProviderStatus>(
             client,
             &ip,
+            ip.status.as_ref(),
             ImageProviderPhase::Failed,
             Some(msg),
             Some(generation),
+            FIELD_MANAGER,
         )
         .await?;
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -98,12 +100,14 @@ pub async fn reconcile(
         {
             let msg = format!("Failed to create ExternalSecret: {e}");
             warn!(image_provider = %name, error = %msg);
-            update_status(
+            status_check::patch_phase_status::<ImageProvider, ImageProviderStatus>(
                 client,
                 &ip,
+                ip.status.as_ref(),
                 ImageProviderPhase::Failed,
                 Some(msg),
                 Some(generation),
+                FIELD_MANAGER,
             )
             .await?;
             return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -131,12 +135,14 @@ pub async fn reconcile(
                     authority.name
                 );
                 warn!(image_provider = %name, error = %msg);
-                update_status(
+                status_check::patch_phase_status::<ImageProvider, ImageProviderStatus>(
                     client,
                     &ip,
+                    ip.status.as_ref(),
                     ImageProviderPhase::Failed,
                     Some(msg),
                     Some(generation),
+                    FIELD_MANAGER,
                 )
                 .await?;
                 return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
@@ -157,12 +163,14 @@ pub async fn reconcile(
         "Ready (no credentials configured)"
     };
     info!(image_provider = %name, "{status_msg}");
-    update_status(
+    status_check::patch_phase_status::<ImageProvider, ImageProviderStatus>(
         client,
         &ip,
+        ip.status.as_ref(),
         ImageProviderPhase::Ready,
         Some(status_msg.to_string()),
         Some(generation),
+        FIELD_MANAGER,
     )
     .await?;
 
@@ -301,46 +309,6 @@ fn parse_registry_endpoint(registry: &str, insecure: bool) -> ParsedEndpoint {
         port: default_port,
         url: format!("{}://{}", protocol, registry),
     }
-}
-
-async fn update_status(
-    client: &Client,
-    ip: &ImageProvider,
-    phase: ImageProviderPhase,
-    message: Option<String>,
-    observed_generation: Option<i64>,
-) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        ip.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        observed_generation,
-    ) {
-        debug!(image_provider = %ip.name_any(), "Status unchanged, skipping update");
-        return Ok(());
-    }
-
-    let name = ip.name_any();
-    let namespace = ip.namespace().ok_or_else(|| {
-        ReconcileError::Validation("ImageProvider missing metadata.namespace".into())
-    })?;
-
-    let status = ImageProviderStatus {
-        phase,
-        message,
-        observed_generation,
-    };
-
-    lattice_common::kube_utils::patch_resource_status::<ImageProvider>(
-        client,
-        &name,
-        &namespace,
-        &status,
-        FIELD_MANAGER,
-    )
-    .await?;
-
-    Ok(())
 }
 
 #[cfg(test)]

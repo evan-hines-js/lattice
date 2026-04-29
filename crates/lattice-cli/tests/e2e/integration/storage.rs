@@ -27,7 +27,7 @@ use tracing::info;
 
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_namespace, list_with_retry,
-    run_kubectl, wait_for_condition, wait_for_pod_running, POLL_INTERVAL,
+    run_kubectl, wait_for_condition, wait_for_pod_running, DEFAULT_TIMEOUT, POLL_INTERVAL,
 };
 
 const NAMESPACE: &str = "storage-test";
@@ -158,129 +158,104 @@ pub async fn wait_for_storage_ready(kubeconfig: &str) -> Result<(), String> {
     .await?;
     info!("[Storage] RookInstall is Ready");
 
-    // Wake any PVCs created before the Ceph StorageClass existed: the CSI
-    // external-provisioner sidecar uses a multi-minute exponential backoff
-    // after a failed attempt, and bumping the PVC's resourceVersion does
-    // nothing because the backoff lives in the sidecar's process memory.
-    // Restart the controller-plugin Deployment instead — fresh process,
-    // fresh state, every stuck PVC retried at once.
+    // Wake any PVCs created before Rook had finished writing the
+    // `rook-ceph-csi-config` ConfigMap: the CSI external-provisioner
+    // sidecar caches the resulting "config.json: no such file" failure as
+    // an *infeasible* error and stops retrying. Restarting the ctrlplugin
+    // doesn't help (the cache key is per-PVC, the sidecar still sees the
+    // same PVC UID); only deleting the consumer pod re-triggers a
+    // provisioning attempt by giving the PVC a new `selected-node`.
     drain_pending_pvcs(kubeconfig).await?;
 
     Ok(())
 }
 
-/// Time to wait for every PVC in the cluster to leave the `Pending` phase
-/// after Rook is Ready. Each rollout-restart of the CSI controller takes
-/// ~15-20s for new pods to come up and re-evaluate every stuck PVC; budget
-/// covers several rounds plus tail latency.
-const PVC_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Long enough that a rollout has time to land before we issue another —
-/// restarting faster than the new ctrlplugin pod can become Ready just
-/// keeps the controller perpetually down.
-const DRAIN_POLL_INTERVAL: Duration = Duration::from_secs(20);
-
-const ROOK_CSI_NAMESPACE: &str = "rook-ceph";
-
-/// Rook-Ceph CSI controller-plugin Deployments. Names follow the CSI
-/// driver name (`<driver>-ctrlplugin`); CephFS is included even though
-/// our test only uses RBD because any PVC against `rook-cephfs` would
-/// hit the same stuck-cache pathology and we'd rather drain it too.
-const CSI_CTRLPLUGIN_DEPLOYMENTS: &[&str] = &[
-    "rook-ceph.rbd.csi.ceph.com-ctrlplugin",
-    "rook-ceph.cephfs.csi.ceph.com-ctrlplugin",
-];
-
-/// Drop the CSI external-provisioner sidecar's in-memory "infeasible"
-/// cache by rollout-restarting the Rook-Ceph ctrlplugin Deployment(s)
-/// while any PVC is still Pending. The sidecar accumulates that cache
-/// from CSI calls that failed before Ceph was HEALTH_OK and then sits in
-/// a multi-minute exponential backoff; bumping a PVC's resourceVersion
-/// doesn't dislodge it, but a fresh controller pod has no cache and
-/// retries every PVC immediately. One Deployment patch handles every
-/// stuck PVC at once. A PVC that can't bind after this is a real bug —
-/// fail the gate so it surfaces downstream instead of letting the test
-/// silently start with broken storage.
+/// Find every Pending PVC, then delete each PVC's consumer Pod(s).
+/// The owning controller (Deployment / StatefulSet / VMSingle / etc.)
+/// recreates the Pod, the new Pod gets re-scheduled, and re-scheduling
+/// stamps a fresh `volume.kubernetes.io/selected-node` on the PVC — which
+/// is what the external-provisioner uses as the cache key for its
+/// "infeasible" backoff. Without that nudge, a PVC that hit the
+/// `csi-config` race during Rook startup stays Pending forever no matter
+/// how many times the ctrlplugin Deployment is restarted.
 async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
     let pvc_api: Api<PersistentVolumeClaim> = Api::all(client.clone());
-    let dep_api: Api<Deployment> = Api::namespaced(client, ROOK_CSI_NAMESPACE);
-    let params = kube::api::PatchParams::default();
+
+    let pvcs = list_with_retry(&pvc_api, &ListParams::default()).await?;
+    let pending: Vec<(String, String)> = pvcs
+        .items
+        .into_iter()
+        .filter(|pvc| pvc.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending"))
+        .filter_map(|pvc| Some((pvc.metadata.namespace?, pvc.metadata.name?)))
+        .collect();
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    info!(
+        "[Storage] {} Pending PVC(s) after Rook is Ready; deleting their consumer pods to force fresh provisioning: {}",
+        pending.len(),
+        pending
+            .iter()
+            .map(|(ns, n)| format!("{ns}/{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    for (ns, pvc_name) in &pending {
+        let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
+        let pods = list_with_retry(&pod_api, &ListParams::default()).await?;
+        let consumers: Vec<String> = pods
+            .items
+            .iter()
+            .filter(|p| pod_mounts_pvc(p, pvc_name))
+            .filter_map(|p| p.metadata.name.clone())
+            .collect();
+        if consumers.is_empty() {
+            info!("[Storage] {ns}/{pvc_name} has no consumer pod yet, skipping");
+            continue;
+        }
+        for pod_name in &consumers {
+            match pod_api.delete(pod_name, &Default::default()).await {
+                Ok(_) => info!("[Storage] Deleted consumer pod {ns}/{pod_name} for PVC {pvc_name}"),
+                Err(kube::Error::Api(ref e)) if e.code == 404 => {}
+                Err(e) => info!("[Storage] Failed to delete {ns}/{pod_name}: {e}"),
+            }
+        }
+    }
 
     wait_for_condition(
-        "all PVCs to leave Pending after Rook is Ready",
-        PVC_DRAIN_TIMEOUT,
-        DRAIN_POLL_INTERVAL,
+        "all PVCs to leave Pending after consumer-pod nudge",
+        DEFAULT_TIMEOUT,
+        POLL_INTERVAL,
         || {
             let pvc_api = pvc_api.clone();
-            let dep_api = dep_api.clone();
-            let params = params.clone();
             async move {
-                let pvcs = list_with_retry(&pvc_api, &kube::api::ListParams::default()).await?;
-
-                let pending: Vec<(String, String)> = pvcs
-                    .items
-                    .into_iter()
-                    .filter(|pvc| {
-                        pvc.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending")
-                    })
-                    .filter_map(|pvc| {
-                        let ns = pvc.metadata.namespace?;
-                        let name = pvc.metadata.name?;
-                        Some((ns, name))
-                    })
-                    .collect();
-
-                if pending.is_empty() {
-                    return Ok(true);
-                }
-
-                let stamp = chrono::Utc::now().to_rfc3339();
-                let patch = serde_json::json!({
-                    "spec": {
-                        "template": {
-                            "metadata": {
-                                "annotations": {
-                                    "kubectl.kubernetes.io/restartedAt": stamp,
-                                }
-                            }
-                        }
-                    }
-                });
-
-                info!(
-                    "[Storage] Restarting CSI ctrlplugin to clear infeasible cache for {} Pending PVC(s): {}",
-                    pending.len(),
-                    pending
-                        .iter()
-                        .map(|(ns, n)| format!("{ns}/{n}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                for dep_name in CSI_CTRLPLUGIN_DEPLOYMENTS {
-                    match dep_api
-                        .patch(
-                            dep_name,
-                            &params,
-                            &kube::api::Patch::Merge(patch.clone()),
-                        )
-                        .await
-                    {
-                        Ok(_) => info!("[Storage] Rolled {dep_name}"),
-                        // CephFS plugin may not be installed on every fixture.
-                        Err(kube::Error::Api(ref e)) if e.code == 404 => {
-                            info!("[Storage] {dep_name} not present, skipping");
-                        }
-                        Err(e) => {
-                            info!("[Storage] Restart failed for {dep_name}: {e}");
-                        }
-                    }
-                }
-                Ok(false)
+                let pvcs = list_with_retry(&pvc_api, &ListParams::default()).await?;
+                Ok(pvcs.items.iter().all(|pvc| {
+                    pvc.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Pending")
+                }))
             }
         },
     )
     .await
+}
+
+fn pod_mounts_pvc(pod: &Pod, pvc_name: &str) -> bool {
+    pod.spec
+        .as_ref()
+        .and_then(|s| s.volumes.as_ref())
+        .map(|vols| {
+            vols.iter().any(|v| {
+                v.persistent_volume_claim
+                    .as_ref()
+                    .map(|c| c.claim_name == pvc_name)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 async fn create_pvc(client: &kube::Client) -> Result<(), String> {

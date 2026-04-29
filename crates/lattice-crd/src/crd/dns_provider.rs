@@ -208,10 +208,6 @@ pub struct DNSProviderStatus {
     #[serde(default)]
     pub message: Option<String>,
 
-    /// Number of clusters referencing this provider
-    #[serde(default)]
-    pub cluster_count: u32,
-
     /// Generation of the spec that was last reconciled
     #[serde(default)]
     pub observed_generation: Option<i64>,

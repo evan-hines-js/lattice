@@ -86,10 +86,14 @@ pub async fn resolve_istio_ca(client: &Client) -> IstioCaConfig {
 
 /// Trust domain as 27-byte SHA-256 prefix of the DER-encoded root CA,
 /// formatted as `lattice.{hex}`.
+///
+/// The root is selected by identity (the `issuer == subject` block in
+/// the PEM bundle), not by position. That makes the trust_domain
+/// invariant under PEM-block reordering and chain-vs-single shape —
+/// every cluster sharing the same root computes the same value
+/// regardless of how its `lattice-ca` Secret happens to be serialized.
 pub fn trust_domain_from_ca(ca_cert_pem: &str) -> Option<String> {
-    let der = lattice_infra::pki::parse_pem(ca_cert_pem)
-        .ok()
-        .filter(|d| !d.is_empty())?;
+    let der = lattice_infra::pki::root_ca_der(ca_cert_pem).ok()?;
     let hash = lattice_common::kube_utils::sha256(&der);
     let hex: String = hash.iter().take(27).map(|b| format!("{:02x}", b)).collect();
     Some(format!("lattice.{}", hex))
@@ -98,13 +102,50 @@ pub fn trust_domain_from_ca(ca_cert_pem: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_infra::pki::CertificateAuthority;
 
     #[test]
     fn trust_domain_fits_dns_label_limit() {
-        let fake_pem =
-            "-----BEGIN CERTIFICATE-----\nMIIBkTCB+wIJALRiMLAh0TTDMA==\n-----END CERTIFICATE-----\n";
-        let td = trust_domain_from_ca(fake_pem).expect("parse test PEM");
+        let ca = CertificateAuthority::new("Lattice Test CA").expect("CA");
+        let td = trust_domain_from_ca(ca.ca_cert_pem()).expect("derive trust domain");
         assert!(td.len() <= 63, "trust domain '{td}' is {} chars", td.len());
         assert!(td.starts_with("lattice."));
+    }
+
+    /// Identity-based selection: the trust_domain depends on the root,
+    /// not on which block sits first in the PEM. Concatenating an
+    /// unrelated leaf cert before the root must still resolve to the
+    /// root's hash, so any future code path that stuffs a chain into
+    /// `CA_CERT_KEY` can't silently flip the value across clusters.
+    #[test]
+    fn trust_domain_invariant_under_block_order() {
+        let root = CertificateAuthority::new("Lattice Test CA").expect("root CA");
+        let leaf_pem = root
+            .generate_server_cert(&["example.test"])
+            .expect("leaf cert")
+            .0;
+
+        let bundle_root_first = format!("{}{}", root.ca_cert_pem(), leaf_pem);
+        let bundle_leaf_first = format!("{}{}", leaf_pem, root.ca_cert_pem());
+
+        let td_a = trust_domain_from_ca(&bundle_root_first).expect("root-first");
+        let td_b = trust_domain_from_ca(&bundle_leaf_first).expect("leaf-first");
+        let td_alone = trust_domain_from_ca(root.ca_cert_pem()).expect("root alone");
+        assert_eq!(td_a, td_b);
+        assert_eq!(td_a, td_alone);
+    }
+
+    /// A bundle with no self-signed cert (e.g. an intermediate-only
+    /// chain) must not silently produce a trust_domain — the caller
+    /// has a broken `lattice-ca` and we'd rather skip Istio than wire
+    /// up the wrong trust root.
+    #[test]
+    fn trust_domain_none_when_no_root() {
+        let root = CertificateAuthority::new("Lattice Test CA").expect("root CA");
+        let leaf_pem = root
+            .generate_server_cert(&["example.test"])
+            .expect("leaf cert")
+            .0;
+        assert!(trust_domain_from_ca(&leaf_pem).is_none());
     }
 }

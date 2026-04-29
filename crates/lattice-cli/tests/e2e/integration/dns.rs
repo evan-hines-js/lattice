@@ -111,7 +111,7 @@ async fn test_external_dns_deployment(kubeconfig: &str) -> Result<(), String> {
     let kc = kubeconfig.to_string();
     wait_for_condition(
         &format!("external-dns-{PIHOLE_DNS_PROVIDER} deployment to be available"),
-        std::time::Duration::from_secs(600),
+        DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {
             let kc = kc.clone();

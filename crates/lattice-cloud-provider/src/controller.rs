@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use lattice_common::status_check;
@@ -47,55 +47,41 @@ pub async fn reconcile(
 
     info!(cloud_provider = %name, provider_type = ?cp.spec.provider_type, "Reconciling InfraProvider");
 
-    if let Err(e) = cp.spec.validate() {
+    let (phase, message, requeue_secs) = if let Err(e) = cp.spec.validate() {
         let msg = e.to_string();
         warn!(cloud_provider = %name, error = %msg, "Validation failed");
-        update_status(
-            client,
-            &cp,
-            InfraProviderPhase::Failed,
-            Some(msg),
-            Some(generation),
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)));
-    }
-
-    match validate_credentials(&cp) {
-        Ok(()) => {
-            info!(cloud_provider = %name, "Credentials validated successfully");
-
-            update_status(
-                client,
-                &cp,
-                InfraProviderPhase::Ready,
-                Some("Credentials reconciled successfully".to_string()),
-                Some(generation),
-            )
-            .await?;
-
-            // Requeue periodically to re-validate
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
+        (InfraProviderPhase::Failed, msg, REQUEUE_ERROR_SECS)
+    } else {
+        match validate_credentials(&cp) {
+            Ok(()) => {
+                info!(cloud_provider = %name, "Credentials validated successfully");
+                (
+                    InfraProviderPhase::Ready,
+                    "Credentials reconciled successfully".to_string(),
+                    REQUEUE_SUCCESS_SECS,
+                )
+            }
+            Err(e) => {
+                warn!(cloud_provider = %name, error = %e, "Credential reconciliation failed");
+                (
+                    InfraProviderPhase::Failed,
+                    e.to_string(),
+                    REQUEUE_ERROR_SECS,
+                )
+            }
         }
-        Err(e) => {
-            warn!(
-                cloud_provider = %name,
-                error = %e,
-                "Credential reconciliation failed"
-            );
-
-            update_status(
-                client,
-                &cp,
-                InfraProviderPhase::Failed,
-                Some(e.to_string()),
-                Some(generation),
-            )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
-        }
-    }
+    };
+    status_check::patch_phase_status::<InfraProvider, InfraProviderStatus>(
+        client,
+        &cp,
+        cp.status.as_ref(),
+        phase,
+        Some(message),
+        Some(generation),
+        FIELD_MANAGER,
+    )
+    .await?;
+    Ok(Action::requeue(Duration::from_secs(requeue_secs)))
 }
 
 /// Validate credentials for the cloud provider.
@@ -126,49 +112,6 @@ fn validate_credentials(cp: &InfraProvider) -> Result<(), ReconcileError> {
             }
         }
     }
-}
-
-/// Update InfraProvider status
-async fn update_status(
-    client: &Client,
-    cp: &InfraProvider,
-    phase: InfraProviderPhase,
-    message: Option<String>,
-    observed_generation: Option<i64>,
-) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        cp.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        observed_generation,
-    ) {
-        debug!(cloud_provider = %cp.name_any(), "Status unchanged, skipping update");
-        return Ok(());
-    }
-
-    let name = cp.name_any();
-    let namespace = cp.namespace().ok_or_else(|| {
-        ReconcileError::Validation("InfraProvider missing metadata.namespace".into())
-    })?;
-
-    let status = InfraProviderStatus {
-        phase,
-        message,
-        last_validated: Some(chrono::Utc::now().to_rfc3339()),
-        cluster_count: 0,
-        observed_generation,
-    };
-
-    lattice_common::kube_utils::patch_resource_status::<InfraProvider>(
-        client,
-        &name,
-        &namespace,
-        &status,
-        FIELD_MANAGER,
-    )
-    .await?;
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -369,7 +312,6 @@ mod tests {
             phase: InfraProviderPhase::Ready,
             message: None,
             last_validated: Some("2024-01-01T00:00:00Z".to_string()),
-            cluster_count: 0,
             observed_generation: Some(1),
         });
 

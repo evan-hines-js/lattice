@@ -54,40 +54,31 @@ pub async fn reconcile(
 
     info!(cert_issuer = %name, issuer_type = ?issuer.spec.type_, "Reconciling CertIssuer");
 
-    match validate_issuer(client, &issuer).await {
+    let (phase, message, requeue_secs) = match validate_issuer(client, &issuer).await {
         Ok(()) => {
             info!(cert_issuer = %name, "CertIssuer validated successfully");
-
-            update_status(
-                client,
-                &issuer,
+            (
                 CertIssuerPhase::Ready,
-                Some("Validated successfully".to_string()),
-                Some(generation),
+                "Validated successfully".to_string(),
+                REQUEUE_SUCCESS_SECS,
             )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)))
         }
         Err(e) => {
-            warn!(
-                cert_issuer = %name,
-                error = %e,
-                "CertIssuer validation failed"
-            );
-
-            update_status(
-                client,
-                &issuer,
-                CertIssuerPhase::Failed,
-                Some(e.to_string()),
-                Some(generation),
-            )
-            .await?;
-
-            Ok(Action::requeue(Duration::from_secs(REQUEUE_ERROR_SECS)))
+            warn!(cert_issuer = %name, error = %e, "CertIssuer validation failed");
+            (CertIssuerPhase::Failed, e.to_string(), REQUEUE_ERROR_SECS)
         }
-    }
+    };
+    status_check::patch_phase_status::<CertIssuer, CertIssuerStatus>(
+        client,
+        &issuer,
+        issuer.status.as_ref(),
+        phase,
+        Some(message),
+        Some(generation),
+        FIELD_MANAGER,
+    )
+    .await?;
+    Ok(Action::requeue(Duration::from_secs(requeue_secs)))
 }
 
 /// Validate a CertIssuer's spec and dependencies.
@@ -181,47 +172,6 @@ async fn validate_issuer(client: &Client, issuer: &CertIssuer) -> Result<(), Rec
             issuer.spec.type_
         ))),
     }
-}
-
-/// Update CertIssuer status
-async fn update_status(
-    client: &Client,
-    issuer: &CertIssuer,
-    phase: CertIssuerPhase,
-    message: Option<String>,
-    observed_generation: Option<i64>,
-) -> Result<(), ReconcileError> {
-    if status_check::is_status_unchanged(
-        issuer.status.as_ref(),
-        &phase,
-        message.as_deref(),
-        observed_generation,
-    ) {
-        debug!(cert_issuer = %issuer.name_any(), "Status unchanged, skipping update");
-        return Ok(());
-    }
-
-    let name = issuer.name_any();
-    let namespace = issuer.namespace().ok_or_else(|| {
-        ReconcileError::Validation("CertIssuer missing metadata.namespace".into())
-    })?;
-
-    let status = CertIssuerStatus {
-        phase,
-        message,
-        observed_generation,
-    };
-
-    lattice_common::kube_utils::patch_resource_status::<CertIssuer>(
-        client,
-        &name,
-        &namespace,
-        &status,
-        FIELD_MANAGER,
-    )
-    .await?;
-
-    Ok(())
 }
 
 #[cfg(test)]

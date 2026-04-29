@@ -181,13 +181,50 @@ pub fn parse_pem(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
 /// Parse all PEM blocks from a concatenated PEM string (e.g. a certificate chain).
 ///
 /// Returns DER-encoded bytes for each PEM block found.
-fn parse_pem_many(pem_data: &str) -> std::result::Result<Vec<Vec<u8>>, PkiError> {
+pub fn parse_pem_many(pem_data: &str) -> std::result::Result<Vec<Vec<u8>>, PkiError> {
     let pems = ::pem::parse_many(pem_data.as_bytes())
         .map_err(|e| PkiError::ParseError(format!("failed to parse PEM chain: {}", e)))?;
     if pems.is_empty() {
         return Err(PkiError::ParseError("no PEM blocks found".to_string()));
     }
     Ok(pems.into_iter().map(|p| p.contents().to_vec()).collect())
+}
+
+/// Extract the self-signed root certificate's DER from a PEM bundle.
+///
+/// Stable identity for `trust_domain` derivation: hashing the active CA's
+/// DER directly is order-sensitive (which block sits first decides the
+/// hash) and intermediate-sensitive (a cacerts chain or a mid-rotation
+/// bundle smuggled into `CA_CERT_KEY` would change the value). Picking
+/// by `issuer == subject` removes both axes — the root is what defines
+/// the trust hierarchy regardless of how the surrounding bytes are
+/// arranged.
+///
+/// Errors when:
+/// - the PEM contains no blocks (empty input)
+/// - no block parses as X509 with `issuer == subject` (no root present —
+///   caller passed a chain without its anchor)
+/// - more than one block is self-signed (ambiguous; the caller must
+///   resolve which root is authoritative before calling this)
+pub fn root_ca_der(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
+    let ders = parse_pem_many(pem_data)?;
+    let mut roots: Vec<Vec<u8>> = Vec::new();
+    for der in ders {
+        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&der)
+            .map_err(|e| PkiError::ParseError(format!("failed to parse certificate: {}", e)))?;
+        if cert.issuer().as_raw() == cert.subject().as_raw() {
+            roots.push(der);
+        }
+    }
+    match roots.len() {
+        0 => Err(PkiError::ParseError(
+            "no self-signed root certificate found in PEM bundle".to_string(),
+        )),
+        1 => Ok(roots.pop().unwrap()),
+        n => Err(PkiError::ParseError(format!(
+            "{n} self-signed roots in PEM bundle; ambiguous trust anchor"
+        ))),
+    }
 }
 
 /// Well-known OIDs for public key algorithms

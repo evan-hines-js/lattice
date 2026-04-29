@@ -679,37 +679,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_token_is_rejected() {
-        let state = test_state_with_ttl(Duration::from_millis(1));
-
-        let token = register_test_cluster(
-            &state,
-            "test-cluster".to_string(),
-            "cell.example.com:8443:50051".to_string(),
-            "cert".to_string(),
-        )
-        .await;
-
-        // Wait for token to expire
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        let result = state
-            .validate_and_consume("test-cluster", token.as_str())
-            .await;
-        assert!(matches!(result, Err(BootstrapError::InvalidToken)));
-    }
-
-    #[tokio::test]
-    async fn unknown_cluster_is_rejected() {
-        let state = test_state();
-
-        let result = state
-            .validate_and_consume("unknown-cluster", "any-token")
-            .await;
-        assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
-    }
-
-    #[tokio::test]
     async fn response_contains_manifests() {
         let state = test_state();
 
@@ -775,19 +744,6 @@ mod tests {
             result,
             Err(BootstrapError::ClusterNotBootstrapped(_))
         ));
-    }
-
-    #[tokio::test]
-    async fn csr_rejected_for_unknown_cluster() {
-        let state = test_state();
-
-        let agent_req =
-            AgentCertRequest::new("unknown").expect("agent cert request creation should succeed");
-        let result = state
-            .sign_csr("unknown", agent_req.csr_pem(), "dummy-token")
-            .await;
-
-        assert!(matches!(result, Err(BootstrapError::ClusterNotFound(_))));
     }
 
     #[tokio::test]

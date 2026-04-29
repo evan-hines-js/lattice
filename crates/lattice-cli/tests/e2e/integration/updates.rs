@@ -130,7 +130,7 @@ async fn test_ready_spec_update(kubeconfig: &str) -> Result<(), String> {
         "svc-update-test",
         "Ready",
         None,
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -406,7 +406,7 @@ async fn test_model_loading_detects_spec_change(
         namespace,
         "llm-serving",
         "Loading",
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -756,7 +756,7 @@ async fn test_service_pdb_orphan_cleanup(kubeconfig: &str) -> Result<(), String>
         "svc-pdb-test",
         "Ready",
         None,
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
@@ -910,7 +910,7 @@ async fn wait_for_resource_exists(
 
     wait_for_condition(
         &desc,
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(3),
         || {
             let kc = kc.clone();
@@ -1013,7 +1013,7 @@ async fn test_job_failed_sets_observed_generation(
         namespace,
         "job-stable-fail",
         "Failed",
-        Duration::from_secs(300),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 

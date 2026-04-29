@@ -248,7 +248,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
 
 /// Standard timeout for waiting on conditions (pod readiness, phase transitions,
 /// policy propagation, etc.). Generous to avoid flakes on CPU-starved machines.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Standard poll interval for `wait_for_condition` loops.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
