@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use tracing::{info, warn};
 
 use crate::kube_utils::{
-    patch_cluster_resource_status, wait_for_all_deployments, wait_for_daemonset,
+    endpoints_ready, patch_cluster_resource_status, wait_for_all_deployments, wait_for_daemonset,
     wait_for_deployment, wait_for_resource_status, GvkPlural,
 };
 use crate::{
@@ -346,6 +346,13 @@ pub struct SimpleInstallConfig<'a, K> {
     /// Stamp this value onto every status write (used by Istio for
     /// `trust_domain`). `None` for installs that don't surface extra fields.
     pub trust_domain: Option<String>,
+    /// Optional `(namespace, name)` of an admission-webhook Service this
+    /// install owns. When set, the reconciler short-circuits with a Pending
+    /// status + 15s requeue if the Service has no Ready Endpoints — apply
+    /// would otherwise push every CR through an admission webhook backed by
+    /// a not-yet-running pod, generating one 500 + retry per CR (e.g. ~50
+    /// failed VMRule applies on a fresh VM operator startup).
+    pub webhook_service: Option<(&'a str, &'a str)>,
 }
 
 /// Drive an install CR through its lifecycle: apply manifests, wait on
@@ -381,6 +388,7 @@ where
         manifests,
         readiness,
         trust_domain,
+        webhook_service,
     } = config;
 
     let name = install.name_any();
@@ -432,6 +440,34 @@ where
         &requires_cond,
     ) {
         return Ok(Action::requeue(Duration::from_secs(REQUEUE_SUCCESS_SECS)));
+    }
+
+    // ── Webhook-precondition gate ──
+    //
+    // If this install owns an admission webhook, refuse to apply CRs until
+    // the webhook Service has Ready Endpoints. Without this, the operator's
+    // own freshly-applied CRs each round-trip through an unreachable webhook
+    // and fail with `no endpoints available` 500s — dozens per reconcile.
+    if let Some((ns, svc)) = webhook_service {
+        let ready = endpoints_ready(&ctx.client, ns, svc)
+            .await
+            .map_err(|e| ReconcileError::Internal(e.to_string()))?;
+        if !ready {
+            info!(install = %name, kind = %log_kind, webhook = %format!("{ns}/{svc}"),
+                  "install gated on webhook Service Endpoints");
+            write_with_td(
+                &ctx.client,
+                install_ref,
+                field_manager,
+                StatusUpdate::pending(format!(
+                    "waiting for admission webhook {ns}/{svc} endpoints"
+                ))
+                .with_condition(requires_cond),
+                td,
+            )
+            .await?;
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
     }
 
     // ── Active reconciliation ──

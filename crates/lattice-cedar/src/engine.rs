@@ -23,7 +23,7 @@ use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, Response,
 };
 use kube::{Api, Client};
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
@@ -152,6 +152,13 @@ pub struct PolicyEngine {
     /// Used by the service controller to detect when cedar policies
     /// have actually been loaded (as opposed to just watched).
     reload_epoch: AtomicU64,
+    /// Coalesces concurrent `reload` calls. Bursty CedarPolicy applies (e.g.
+    /// the bootstrap pivot pushes ~12 policies in well under a second) would
+    /// otherwise trigger one full `list+parse` per policy. The gate caps
+    /// concurrent reloads at one in-flight + one queued; the queued reload
+    /// always re-fetches, so the trailing run sees every policy that arrived
+    /// during the in-flight one.
+    reload_gate: AsyncMutex<u8>,
 }
 
 impl PolicyEngine {
@@ -163,6 +170,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
+            reload_gate: AsyncMutex::new(0),
         }
     }
 
@@ -178,6 +186,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
+            reload_gate: AsyncMutex::new(0),
         })
     }
 
@@ -195,6 +204,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
+            reload_gate: AsyncMutex::new(0),
         })
     }
 
@@ -259,12 +269,39 @@ impl PolicyEngine {
     ///
     /// Bumps `reload_epoch` after loading so consumers can detect that the
     /// in-memory state has actually changed (vs. just being watched).
+    ///
+    /// Self-coalescing: if a reload is already in flight, this call folds
+    /// itself into a single follow-up reload that re-fetches CRDs after the
+    /// in-flight one finishes — guaranteeing the trailing reload sees every
+    /// policy that arrived during the burst, while bounding the total number
+    /// of reloads to *at most two* per burst no matter how many callers
+    /// fire.
     pub async fn reload(&self, client: &Client) -> Result<()> {
-        let new_policy_set = Self::load_policies_from_crds(client).await?;
-        let _ = self.policy_tx.send(Arc::new(new_policy_set));
-        self.reload_epoch.fetch_add(1, Ordering::Release);
-        info!("Reloaded Cedar policies");
-        Ok(())
+        // `reload_gate` carries: 0 = idle, 1 = running, 2 = running + queued.
+        // Bump-and-bail when someone else is already running; otherwise we
+        // own the loop until we drain the queued follow-up.
+        {
+            let mut gate = self.reload_gate.lock().await;
+            if *gate >= 1 {
+                *gate = 2;
+                return Ok(());
+            }
+            *gate = 1;
+        }
+        loop {
+            let new_policy_set = Self::load_policies_from_crds(client).await?;
+            let _ = self.policy_tx.send(Arc::new(new_policy_set));
+            self.reload_epoch.fetch_add(1, Ordering::Release);
+            info!("Reloaded Cedar policies");
+            let mut gate = self.reload_gate.lock().await;
+            if *gate == 1 {
+                *gate = 0;
+                return Ok(());
+            }
+            // Someone bumped us to 2 while we were running; do one more
+            // pass to absorb their request, then we're done.
+            *gate = 1;
+        }
     }
 
     /// Read the current reload epoch.

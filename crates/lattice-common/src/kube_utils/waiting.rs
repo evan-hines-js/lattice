@@ -4,7 +4,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
-use k8s_openapi::api::core::v1::{Node, Secret};
+use k8s_openapi::api::core::v1::{Endpoints, Node, Secret};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};
 use kube::discovery::ApiResource;
@@ -442,4 +442,31 @@ where
         },
     )
     .await
+}
+
+/// Non-blocking check: does this Service have at least one Ready Endpoint?
+///
+/// Returns `Ok(false)` when the Endpoints object is missing, has no subsets,
+/// or every subset has only `not_ready_addresses`. Used by install controllers
+/// to gate apply-of-CRs on the install's own admission webhook becoming
+/// reachable — without that gate, a freshly-applied install pushes ~50 CRs
+/// before its webhook pod is up, each one round-tripping through the
+/// apiserver only to fail with `no endpoints available for service`.
+///
+/// Caller pattern: when this returns `false`, write a `Pending` status and
+/// return `Action::requeue(short)` from the reconcile, instead of blocking.
+pub async fn endpoints_ready(client: &Client, namespace: &str, name: &str) -> Result<bool, Error> {
+    let api: Api<Endpoints> = Api::namespaced(client.clone(), namespace);
+    match api.get(name).await {
+        Ok(eps) => Ok(eps
+            .subsets
+            .as_deref()
+            .map(|subsets| subsets.iter().any(|s| s.addresses.is_some()))
+            .unwrap_or(false)),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
+        Err(e) => Err(Error::internal_with_context(
+            "endpoints_ready",
+            format!("Failed to get Endpoints {namespace}/{name}: {e}"),
+        )),
+    }
 }

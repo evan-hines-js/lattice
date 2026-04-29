@@ -93,6 +93,9 @@ pub async fn reconcile(
             timeout: READY_TIMEOUT,
         },
         trust_domain: Some(td),
+        // istiod's validating webhook (`istiod`) gates the Istio CRs we
+        // ship below. Apply must wait for istiod to have endpoints.
+        webhook_service: Some((ISTIO_NAMESPACE, "istiod")),
     })
     .await
 }

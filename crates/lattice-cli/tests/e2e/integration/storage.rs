@@ -170,14 +170,22 @@ pub async fn wait_for_storage_ready(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Find every Pending PVC, then delete each PVC's consumer Pod(s).
-/// The owning controller (Deployment / StatefulSet / VMSingle / etc.)
-/// recreates the Pod, the new Pod gets re-scheduled, and re-scheduling
-/// stamps a fresh `volume.kubernetes.io/selected-node` on the PVC — which
-/// is what the external-provisioner uses as the cache key for its
-/// "infeasible" backoff. Without that nudge, a PVC that hit the
-/// `csi-config` race during Rook startup stays Pending forever no matter
-/// how many times the ctrlplugin Deployment is restarted.
+/// Find every Pending PVC and nudge it two ways at once:
+///
+/// 1. Patch the PVC itself with a fresh `lattice.dev/storage-nudge`
+///    annotation. Bumping any PVC field changes its `resourceVersion`,
+///    which fires the external-provisioner's informer and bypasses the
+///    in-memory backoff for that PVC. A label edit is what unstuck this
+///    manually in practice.
+/// 2. Delete every consumer Pod that references the PVC. The owning
+///    controller (Deployment / StatefulSet / VMSingle / etc.) recreates
+///    the Pod, the new Pod gets re-scheduled, and re-scheduling stamps a
+///    fresh `volume.kubernetes.io/selected-node` on the PVC — a second
+///    independent provisioner trigger.
+///
+/// Either nudge alone has been observed to fail intermittently against
+/// the same PVC; firing both in the same pass makes the drain
+/// deterministic.
 async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
     let pvc_api: Api<PersistentVolumeClaim> = Api::all(client.clone());
@@ -195,7 +203,7 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     }
 
     info!(
-        "[Storage] {} Pending PVC(s) after Rook is Ready; deleting their consumer pods to force fresh provisioning: {}",
+        "[Storage] {} Pending PVC(s) after Rook is Ready; nudging via annotation patch + consumer-pod delete: {}",
         pending.len(),
         pending
             .iter()
@@ -204,7 +212,24 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
             .join(", ")
     );
 
+    let stamp = chrono::Utc::now().to_rfc3339();
+    let pvc_patch = serde_json::json!({
+        "metadata": {
+            "annotations": { "lattice.dev/storage-nudge": stamp }
+        }
+    });
+    let params = kube::api::PatchParams::default();
+
     for (ns, pvc_name) in &pending {
+        let scoped: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
+        match scoped
+            .patch(pvc_name, &params, &kube::api::Patch::Merge(&pvc_patch))
+            .await
+        {
+            Ok(_) => info!("[Storage] Annotated PVC {ns}/{pvc_name}"),
+            Err(e) => info!("[Storage] PVC annotation patch failed for {ns}/{pvc_name}: {e}"),
+        }
+
         let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
         let pods = list_with_retry(&pod_api, &ListParams::default()).await?;
         let consumers: Vec<String> = pods
@@ -214,7 +239,6 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
             .filter_map(|p| p.metadata.name.clone())
             .collect();
         if consumers.is_empty() {
-            info!("[Storage] {ns}/{pvc_name} has no consumer pod yet, skipping");
             continue;
         }
         for pod_name in &consumers {
@@ -227,7 +251,7 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     }
 
     wait_for_condition(
-        "all PVCs to leave Pending after consumer-pod nudge",
+        "all PVCs to leave Pending after nudge",
         DEFAULT_TIMEOUT,
         POLL_INTERVAL,
         || {

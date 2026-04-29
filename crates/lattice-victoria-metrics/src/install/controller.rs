@@ -47,6 +47,10 @@ pub async fn reconcile(
             timeout: READY_TIMEOUT,
         },
         trust_domain: None,
+        // VM operator owns vmrules / vmservicescrapes / vm{single,agent,…}
+        // admission webhooks. Apply must wait for the operator pod, or
+        // every CR push fails with `no endpoints available for service`.
+        webhook_service: Some((MONITORING_NAMESPACE, "vm-victoria-metrics-operator")),
     })
     .await
 }
