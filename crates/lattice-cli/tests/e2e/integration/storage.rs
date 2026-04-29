@@ -21,13 +21,13 @@
 use std::time::Duration;
 
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::PersistentVolumeClaim;
-use kube::api::Api;
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
+use kube::api::{Api, ListParams};
 use tracing::info;
 
 use super::super::helpers::{
-    client_from_kubeconfig, create_with_retry, ensure_namespace, run_kubectl, wait_for_condition,
-    wait_for_pod_running, POLL_INTERVAL,
+    client_from_kubeconfig, create_with_retry, delete_namespace, ensure_namespace, list_with_retry,
+    run_kubectl, wait_for_condition, wait_for_pod_running, POLL_INTERVAL,
 };
 
 const NAMESPACE: &str = "storage-test";
@@ -81,7 +81,7 @@ pub async fn run_storage_tests(kubeconfig: &str) -> Result<(), String> {
     // the replica on the other host is consistent. By forcing CSI to
     // attach the RBD on a different host we exercise the cross-host read
     // path that replication=2/failure_domain=host is supposed to provide.
-    let original_node = pod_node(kubeconfig).await?;
+    let original_node = writer_pod_node(kubeconfig).await?;
     info!(
         "[Storage] Cordoning writer node {original_node} to force reschedule onto replica host..."
     );
@@ -99,17 +99,7 @@ pub async fn run_storage_tests(kubeconfig: &str) -> Result<(), String> {
     // Leave the namespace behind if the whole test passed — the
     // unified_e2e teardown drops the cluster, and keeping it on failure
     // would require a DiagnosticContext wrapper; neither helps here.
-    run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "delete",
-        "namespace",
-        NAMESPACE,
-        "--ignore-not-found",
-        "--wait=false",
-    ])
-    .await
-    .ok();
+    delete_namespace(kubeconfig, NAMESPACE).await;
 
     info!("[Storage] All storage tests passed");
     Ok(())
@@ -157,7 +147,7 @@ pub async fn wait_for_storage_ready(kubeconfig: &str) -> Result<(), String> {
                     let phase = phase.trim();
                     info!("[Storage] RookInstall phase: {phase}");
                     if phase == "Failed" {
-                        return Err(format!("RookInstall entered Failed phase"));
+                        return Err("RookInstall entered Failed phase".to_string());
                     }
                     Ok(phase == "Ready")
                 }
@@ -170,41 +160,63 @@ pub async fn wait_for_storage_ready(kubeconfig: &str) -> Result<(), String> {
 
     // Wake any PVCs created before the Ceph StorageClass existed: the CSI
     // external-provisioner sidecar uses a multi-minute exponential backoff
-    // after a failed attempt, so without a kick they sit Pending long past
-    // Rook's actual readiness. Bump their `resourceVersion` until none are
-    // Pending — empirically a single round isn't always enough.
+    // after a failed attempt, and bumping the PVC's resourceVersion does
+    // nothing because the backoff lives in the sidecar's process memory.
+    // Restart the controller-plugin Deployment instead — fresh process,
+    // fresh state, every stuck PVC retried at once.
     drain_pending_pvcs(kubeconfig).await?;
 
     Ok(())
 }
 
 /// Time to wait for every PVC in the cluster to leave the `Pending` phase
-/// after Rook is Ready. CSI provisioning of an RBD-backed PVC is normally
-/// a few seconds; budget covers a couple of nudge rounds plus tail latency.
+/// after Rook is Ready. Each rollout-restart of the CSI controller takes
+/// ~15-20s for new pods to come up and re-evaluate every stuck PVC; budget
+/// covers several rounds plus tail latency.
 const PVC_DRAIN_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Annotate every Pending PVC each tick to force the CSI external-
-/// provisioner to re-evaluate, until no PVCs are Pending. A PVC that
-/// can't bind after this is a real bug — fail the gate so it surfaces
-/// downstream instead of letting the test silently start with broken
-/// storage.
+/// Long enough that a rollout has time to land before we issue another —
+/// restarting faster than the new ctrlplugin pod can become Ready just
+/// keeps the controller perpetually down.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_secs(20);
+
+const ROOK_CSI_NAMESPACE: &str = "rook-ceph";
+
+/// Rook-Ceph CSI controller-plugin Deployments. Names follow the CSI
+/// driver name (`<driver>-ctrlplugin`); CephFS is included even though
+/// our test only uses RBD because any PVC against `rook-cephfs` would
+/// hit the same stuck-cache pathology and we'd rather drain it too.
+const CSI_CTRLPLUGIN_DEPLOYMENTS: &[&str] = &[
+    "rook-ceph.rbd.csi.ceph.com-ctrlplugin",
+    "rook-ceph.cephfs.csi.ceph.com-ctrlplugin",
+];
+
+/// Drop the CSI external-provisioner sidecar's in-memory "infeasible"
+/// cache by rollout-restarting the Rook-Ceph ctrlplugin Deployment(s)
+/// while any PVC is still Pending. The sidecar accumulates that cache
+/// from CSI calls that failed before Ceph was HEALTH_OK and then sits in
+/// a multi-minute exponential backoff; bumping a PVC's resourceVersion
+/// doesn't dislodge it, but a fresh controller pod has no cache and
+/// retries every PVC immediately. One Deployment patch handles every
+/// stuck PVC at once. A PVC that can't bind after this is a real bug —
+/// fail the gate so it surfaces downstream instead of letting the test
+/// silently start with broken storage.
 async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
-    let api: Api<PersistentVolumeClaim> = Api::all(client);
+    let pvc_api: Api<PersistentVolumeClaim> = Api::all(client.clone());
+    let dep_api: Api<Deployment> = Api::namespaced(client, ROOK_CSI_NAMESPACE);
     let params = kube::api::PatchParams::default();
 
     wait_for_condition(
         "all PVCs to leave Pending after Rook is Ready",
         PVC_DRAIN_TIMEOUT,
-        POLL_INTERVAL,
+        DRAIN_POLL_INTERVAL,
         || {
-            let api = api.clone();
+            let pvc_api = pvc_api.clone();
+            let dep_api = dep_api.clone();
             let params = params.clone();
             async move {
-                let pvcs = api
-                    .list(&kube::api::ListParams::default())
-                    .await
-                    .map_err(|e| format!("list pvcs: {e}"))?;
+                let pvcs = list_with_retry(&pvc_api, &kube::api::ListParams::default()).await?;
 
                 let pending: Vec<(String, String)> = pvcs
                     .items
@@ -223,18 +235,21 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
                     return Ok(true);
                 }
 
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
+                let stamp = chrono::Utc::now().to_rfc3339();
                 let patch = serde_json::json!({
-                    "metadata": {
-                        "annotations": { "lattice.dev/storage-nudge": stamp.to_string() }
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "kubectl.kubernetes.io/restartedAt": stamp,
+                                }
+                            }
+                        }
                     }
                 });
 
                 info!(
-                    "[Storage] Nudging {} Pending PVC(s): {}",
+                    "[Storage] Restarting CSI ctrlplugin to clear infeasible cache for {} Pending PVC(s): {}",
                     pending.len(),
                     pending
                         .iter()
@@ -242,14 +257,23 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-                for (ns, name) in &pending {
-                    let scoped: Api<PersistentVolumeClaim> =
-                        Api::namespaced(api.clone().into(), ns);
-                    if let Err(e) = scoped
-                        .patch(name, &params, &kube::api::Patch::Merge(&patch))
+                for dep_name in CSI_CTRLPLUGIN_DEPLOYMENTS {
+                    match dep_api
+                        .patch(
+                            dep_name,
+                            &params,
+                            &kube::api::Patch::Merge(patch.clone()),
+                        )
                         .await
                     {
-                        info!("[Storage] Nudge failed for {ns}/{name}: {e}");
+                        Ok(_) => info!("[Storage] Rolled {dep_name}"),
+                        // CephFS plugin may not be installed on every fixture.
+                        Err(kube::Error::Api(ref e)) if e.code == 404 => {
+                            info!("[Storage] {dep_name} not present, skipping");
+                        }
+                        Err(e) => {
+                            info!("[Storage] Restart failed for {dep_name}: {e}");
+                        }
                     }
                 }
                 Ok(false)
@@ -313,22 +337,18 @@ async fn create_writer_deployment(client: &kube::Client) -> Result<(), String> {
     Ok(())
 }
 
-async fn first_pod_name(kubeconfig: &str) -> Result<String, String> {
-    // Pick a Running pod that is NOT being deleted. After we delete the
-    // writer pod and a replacement comes up, the old pod can linger as
-    // Terminating (Running phase + deletionTimestamp set) for a few
-    // seconds; selecting it would land a follow-up `kubectl exec` on a
-    // pod that vanishes mid-call (`pods "..." not found`). Filter in Rust
-    // — kubectl's jsonpath subset rejects `?(!@.foo)` (no `!` operator).
-    use k8s_openapi::api::core::v1::Pod;
-    use kube::api::ListParams;
-
+/// Pick the live writer Pod, returning whatever fields the caller needs.
+///
+/// "Live" excludes Pods being deleted: after we delete the writer and a
+/// replacement comes up, the old Pod can linger as Terminating (Running
+/// phase + `deletionTimestamp` set) for a few seconds; picking it would
+/// land a follow-up `kubectl exec` on a Pod that vanishes mid-call
+/// (`pods "..." not found`). We filter in Rust because kubectl's jsonpath
+/// subset rejects `?(!@.foo)` — no `!` operator.
+async fn live_writer_pod(kubeconfig: &str) -> Result<Pod, String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
     let api: Api<Pod> = Api::namespaced(client, NAMESPACE);
-    let pods = api
-        .list(&ListParams::default().labels(POD_LABEL_SELECTOR))
-        .await
-        .map_err(|e| format!("list pods: {e}"))?;
+    let pods = list_with_retry(&api, &ListParams::default().labels(POD_LABEL_SELECTOR)).await?;
 
     pods.items
         .into_iter()
@@ -336,12 +356,19 @@ async fn first_pod_name(kubeconfig: &str) -> Result<String, String> {
             pod.metadata.deletion_timestamp.is_none()
                 && pod.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
         })
-        .and_then(|pod| pod.metadata.name)
         .ok_or_else(|| "no Running writer pod (excluding terminating)".to_string())
 }
 
+async fn live_writer_pod_name(kubeconfig: &str) -> Result<String, String> {
+    live_writer_pod(kubeconfig)
+        .await?
+        .metadata
+        .name
+        .ok_or_else(|| "writer pod has no name".to_string())
+}
+
 async fn write_marker(kubeconfig: &str) -> Result<(), String> {
-    let pod = first_pod_name(kubeconfig).await?;
+    let pod = live_writer_pod_name(kubeconfig).await?;
     run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -359,7 +386,7 @@ async fn write_marker(kubeconfig: &str) -> Result<(), String> {
 }
 
 async fn delete_writer_pod(kubeconfig: &str) -> Result<(), String> {
-    let pod = first_pod_name(kubeconfig).await?;
+    let pod = live_writer_pod_name(kubeconfig).await?;
     run_kubectl(&[
         "--kubeconfig",
         kubeconfig,
@@ -374,25 +401,12 @@ async fn delete_writer_pod(kubeconfig: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn pod_node(kubeconfig: &str) -> Result<String, String> {
-    let out = run_kubectl(&[
-        "--kubeconfig",
-        kubeconfig,
-        "get",
-        "pods",
-        "-n",
-        NAMESPACE,
-        "-l",
-        POD_LABEL_SELECTOR,
-        "-o",
-        "jsonpath={.items[0].spec.nodeName}",
-    ])
-    .await?;
-    let name = out.trim();
-    if name.is_empty() {
-        return Err("writer pod has no spec.nodeName yet".to_string());
-    }
-    Ok(name.to_string())
+async fn writer_pod_node(kubeconfig: &str) -> Result<String, String> {
+    live_writer_pod(kubeconfig)
+        .await?
+        .spec
+        .and_then(|s| s.node_name)
+        .ok_or_else(|| "writer pod has no spec.nodeName yet".to_string())
 }
 
 async fn cordon_node(kubeconfig: &str, node: &str) -> Result<(), String> {
@@ -412,7 +426,7 @@ async fn run_persistence_check(kubeconfig: &str, original_node: &str) -> Result<
     delete_writer_pod(kubeconfig).await?;
     wait_for_pod_running(kubeconfig, NAMESPACE, POD_LABEL_SELECTOR).await?;
 
-    let new_node = pod_node(kubeconfig).await?;
+    let new_node = writer_pod_node(kubeconfig).await?;
     if new_node == original_node {
         return Err(format!(
             "replacement pod landed on the same node ({new_node}); cordon failed or fixture has only one schedulable worker — replication path was not exercised"
@@ -437,7 +451,7 @@ async fn verify_marker(kubeconfig: &str) -> Result<(), String> {
         Duration::from_secs(120),
         POLL_INTERVAL,
         || async {
-            let pod = match first_pod_name(kubeconfig).await {
+            let pod = match live_writer_pod_name(kubeconfig).await {
                 Ok(p) => p,
                 Err(_) => return Ok(None),
             };

@@ -574,539 +574,665 @@ async fn check_proxy_path(health: &ProxyHealthCheck, cluster_name: &str) -> Prox
 
 /// Process an inbound agent message. Returns `false` if the stream should be
 /// closed (e.g. the command channel is dead after a reconnect on a new stream).
+///
+/// Thin dispatcher: each `Payload` variant has its own `handle_*` helper so
+/// the per-variant logic is individually testable.
 async fn process_agent_message(
     ctx: &MessageContext,
     msg: &AgentMessage,
     peer_config: Option<&PeerRouteConfig>,
     peer_index: Option<&crate::peer_routes::PeerRouteIndex>,
 ) -> bool {
-    let registry = &ctx.registry;
-    let command_tx = &ctx.command_tx;
-    let kube_client = &ctx.kube_client;
-    let route_update_tx = &ctx.route_update_tx;
-    let connection_generation = &ctx.connection_generation;
     let cluster_name = &msg.cluster_name;
-
     match &msg.payload {
         Some(Payload::Ready(ready)) => {
-            info!(
-                cluster = %cluster_name,
-                agent_version = %ready.agent_version,
-                k8s_version = %ready.kubernetes_version,
-                protocol_version = ready.protocol_version,
-                state = ?ready.state(),
-                "Agent connected"
-            );
-
-            let mut conn = AgentConnection::new(
-                cluster_name.clone(),
-                ready.agent_version.clone(),
-                ready.kubernetes_version.clone(),
-                command_tx.clone(),
-            );
-            conn.cert_fingerprint = Some(ctx.cert_fingerprint.clone());
-            conn.cert_expires_at = Some(ctx.cert_expires_at);
-            let gen = registry.register(conn);
-            connection_generation.store(gen, std::sync::atomic::Ordering::Relaxed);
-            registry.update_state(cluster_name, ready.state());
-
-            // Mark cluster as connected in subtree registry (restores connectivity after disconnect)
-            registry.handle_agent_reconnect_routes(cluster_name).await;
-
-            // If agent reports Ready state, pivot must have completed
-            if ready.state() == AgentState::Ready {
-                registry.set_pivot_complete(cluster_name, true);
-            }
-
-            // NOTE: No ACK recovery needed for unpivot. Once the parent has imported
-            // and unpaused CAPI resources, it owns the child's infrastructure and will
-            // delete it via CAPI. The child cluster goes away at the infrastructure level,
-            // so the child's finalizer becomes irrelevant.
+            handle_ready(ctx, cluster_name, ready).await;
+            true
         }
         Some(Payload::BootstrapComplete(bc)) => {
-            info!(
-                cluster = %cluster_name,
-                capi_ready = bc.capi_ready,
-                installed_providers = ?bc.installed_providers,
-                "Bootstrap complete"
-            );
-            // Store CAPI ready status - pivot requires this to be true
-            registry.set_capi_ready(cluster_name, bc.capi_ready);
+            handle_bootstrap_complete(ctx, cluster_name, bc);
+            true
         }
         Some(Payload::Heartbeat(hb)) => {
-            debug!(
-                cluster = %cluster_name,
-                state = ?hb.state(),
-                uptime = hb.uptime_seconds,
-                "Heartbeat received"
-            );
-            registry.update_state(cluster_name, hb.state());
-            registry.update_lattice_image(cluster_name, hb.lattice_image.clone());
-            registry.update_kubernetes_version(cluster_name, hb.kubernetes_version.clone());
-            if let Some(ref health) = hb.health {
-                debug!(
-                    cluster = %cluster_name,
-                    ready_nodes = health.ready_nodes,
-                    total_nodes = health.total_nodes,
-                    "Health update from heartbeat"
-                );
-                registry.update_health(cluster_name, health.clone());
-            }
-            if let Some(age) = registry.heartbeat_age_seconds(cluster_name) {
-                lattice_common::metrics::set_agent_heartbeat_age(cluster_name, age);
-            }
-
-            // Check spec/status hashes for state sync
-            if registry.update_hashes(cluster_name, &hb.spec_hash, &hb.status_hash) {
-                debug!(cluster = %cluster_name, "Hash mismatch detected, requesting state sync");
-                let sync_cmd = CellCommand {
-                    command_id: format!("state-sync-{}", cluster_name),
-                    command: Some(lattice_proto::cell_command::Command::StateSyncRequest(
-                        lattice_proto::RequestStateSync {},
-                    )),
-                };
-                if let Err(e) = command_tx.send(sync_cmd).await {
-                    warn!(
-                        cluster = %cluster_name,
-                        error = %e,
-                        "Failed to send state sync request"
-                    );
-                }
-            }
-
-            // Check peer routes hash — if the child's hash doesn't match what
-            // we'd send it, push a full PeerRouteSync
-            if let (Some(pc), Some(index)) = (peer_config, peer_index) {
-                crate::peer_routes::check_and_sync_peer_routes(
-                    registry,
-                    cluster_name,
-                    &hb.peer_routes_hash,
-                    index,
-                    &pc.proxy_url,
-                    &pc.ca_cert_pem,
-                    kube_client,
-                )
-                .await;
-            }
-
-            // Validate the proxy path: can the auth proxy on THIS pod reach
-            // this agent's cluster? If not, the agent connected to the wrong pod.
-            if let Some(ref health) = ctx.proxy_health {
-                match check_proxy_path(health, cluster_name).await {
-                    ProxyCheckResult::Ok => {
-                        health
-                            .consecutive_failures
-                            .store(0, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    ProxyCheckResult::WrongPod => {
-                        warn!(cluster = %cluster_name, "Proxy returned 503 — agent on wrong pod, sending Reconnect");
-                        let reconnect = CellCommand {
-                            command_id: format!("reconnect-{}", cluster_name),
-                            command: Some(lattice_proto::cell_command::Command::Reconnect(
-                                lattice_proto::ReconnectCommand {
-                                    reason: "proxy returned 503: cluster not available on this pod"
-                                        .to_string(),
-                                },
-                            )),
-                        };
-                        let _ = command_tx.send(reconnect).await;
-                        return false;
-                    }
-                    ProxyCheckResult::Unreachable => {
-                        let failures = health
-                            .consecutive_failures
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1;
-                        if failures >= 2 {
-                            warn!(cluster = %cluster_name, failures, "Proxy unreachable for 2 heartbeats, sending Reconnect");
-                            let reconnect = CellCommand {
-                                command_id: format!("reconnect-{}", cluster_name),
-                                command: Some(lattice_proto::cell_command::Command::Reconnect(
-                                    lattice_proto::ReconnectCommand {
-                                        reason: format!(
-                                            "proxy unreachable for {} consecutive heartbeats",
-                                            failures
-                                        ),
-                                    },
-                                )),
-                            };
-                            let _ = command_tx.send(reconnect).await;
-                            return false;
-                        }
-                        debug!(cluster = %cluster_name, failures, "Proxy unreachable, waiting before reconnect");
-                    }
-                }
-            }
-
-            // Check if this stream is still the active connection, or if a newer
-            // stream superseded us (and possibly died, leaving a dead channel).
-            let my_gen = connection_generation.load(std::sync::atomic::Ordering::Relaxed);
-            match registry.check_connection_health(cluster_name, my_gen, command_tx) {
-                crate::connection::StreamAction::Continue => {}
-                crate::connection::StreamAction::Reclaimed(new_gen) => {
-                    connection_generation.store(new_gen, std::sync::atomic::Ordering::Relaxed);
-                }
-                crate::connection::StreamAction::Terminate => {
-                    warn!(
-                        cluster = %cluster_name,
-                        "Superseded by newer live connection, closing stream"
-                    );
-                    return false;
-                }
-            }
+            handle_heartbeat(ctx, cluster_name, hb, peer_config, peer_index).await
         }
         Some(Payload::ClusterHealth(health)) => {
-            // Legacy standalone health message — persist to registry
-            debug!(
-                cluster = %cluster_name,
-                ready_nodes = health.ready_nodes,
-                total_nodes = health.total_nodes,
-                "Health update (standalone)"
-            );
-            registry.update_health(cluster_name, health.clone());
+            handle_cluster_health(ctx, cluster_name, health);
+            true
         }
         Some(Payload::StatusResponse(sr)) => {
-            debug!(
-                cluster = %cluster_name,
-                request_id = %sr.request_id,
-                "Status response received"
-            );
+            handle_status_response(cluster_name, sr);
+            true
         }
         Some(Payload::ClusterDeleting(cd)) => {
-            // Guard against concurrent teardown spawns
-            if !registry.start_teardown(cluster_name) {
-                debug!(
-                    cluster = %cluster_name,
-                    "Teardown already in progress, ignoring duplicate ClusterDeleting"
-                );
-                return true;
-            }
-
-            // Block this agent's certificate to prevent reconnection after deletion.
-            // The fingerprint was stored during registration from the mTLS handshake.
-            if let Some(agent) = registry.get(cluster_name) {
-                if let Some(ref fp) = agent.cert_fingerprint {
-                    let expires_at = agent.cert_expires_at.unwrap_or(i64::MAX);
-                    ctx.blocklist.add(fp.clone(), expires_at);
-                    info!(
-                        cluster = %cluster_name,
-                        fingerprint = %fp,
-                        "Blocklisted agent certificate on cluster deletion"
-                    );
-                }
-            }
-
-            info!(
-                cluster = %cluster_name,
-                namespace = %cd.namespace,
-                object_count = cd.objects.len(),
-                "Cluster deletion requested"
-            );
-
-            let objects: Vec<lattice_move::MoveObjectOutput> =
-                cd.objects.iter().cloned().map(Into::into).collect();
-            let namespace = cd.namespace.clone();
-            let cluster = cluster_name.to_string();
-            let client = kube_client.clone();
-            let registry_clone = registry.clone();
-
-            tokio::spawn(handle_cluster_deletion(
-                cluster,
-                namespace,
-                objects,
-                client,
-                registry_clone,
-            ));
+            handle_cluster_deleting(ctx, cluster_name, cd);
+            true
         }
         Some(Payload::KubernetesResponse(resp)) => {
-            debug!(
-                cluster = %cluster_name,
-                request_id = %resp.request_id,
-                status_code = resp.status_code,
-                streaming = resp.streaming,
-                stream_end = resp.stream_end,
-                body_len = resp.body.len(),
-                "K8s API response received"
-            );
-
-            // Deliver response to waiting proxy handler
-            if resp.stream_end {
-                // Final message in stream - take the sender to remove it
-                if let Some(sender) = registry
-                    .take_pending_k8s_response(cluster_name, &resp.request_id)
-                    .await
-                {
-                    if let Err(e) = sender.try_send(resp.clone()) {
-                        warn!(
-                            cluster = %cluster_name,
-                            request_id = %resp.request_id,
-                            error = %e,
-                            "Failed to deliver final K8s API response"
-                        );
-                    }
-                } else {
-                    debug!(
-                        cluster = %cluster_name,
-                        request_id = %resp.request_id,
-                        "Received K8s API response for unknown request (may have timed out)"
-                    );
-                }
-            } else {
-                // Streaming response - get sender but keep it registered
-                if let Some(sender) = registry.get_pending_k8s_response(&resp.request_id).await {
-                    if let Err(e) = sender.try_send(resp.clone()) {
-                        warn!(
-                            cluster = %cluster_name,
-                            request_id = %resp.request_id,
-                            error = %e,
-                            "Failed to deliver streaming K8s API response"
-                        );
-                        // Channel is full or closed, clean up
-                        registry
-                            .take_pending_k8s_response(cluster_name, &resp.request_id)
-                            .await;
-                    }
-                } else {
-                    debug!(
-                        cluster = %cluster_name,
-                        request_id = %resp.request_id,
-                        "Received K8s API response for unknown request"
-                    );
-                }
-            }
+            handle_kubernetes_response(ctx, cluster_name, resp).await;
+            true
         }
         Some(Payload::MoveAck(ack)) => {
-            if let Some(sender) = registry.take_pending_batch_ack(&ack.request_id) {
-                let batch_ack = lattice_move::BatchAck {
-                    mappings: ack
-                        .mappings
-                        .iter()
-                        .map(|m| (m.source_uid.clone(), m.target_uid.clone()))
-                        .collect(),
-                    errors: ack
-                        .errors
-                        .iter()
-                        .map(|e| (e.source_uid.clone(), e.message.clone(), e.retryable))
-                        .collect(),
-                };
-                let _ = sender.send(batch_ack);
-                debug!(
-                    cluster = %cluster_name,
-                    request_id = %ack.request_id,
-                    mappings = ack.mappings.len(),
-                    "Delivered batch ack"
-                );
-            } else {
-                warn!(
-                    cluster = %cluster_name,
-                    request_id = %ack.request_id,
-                    "Received ack for unknown request"
-                );
-            }
+            handle_move_ack(ctx, cluster_name, ack);
+            true
         }
         Some(Payload::MoveCompleteAck(ack)) => {
-            if let Some(sender) = registry.take_pending_complete_ack(&ack.request_id) {
-                let complete_ack = lattice_move::CompleteAck {
-                    success: ack.success,
-                    error: ack.error.clone(),
-                    resources_created: ack.resources_created,
-                };
-                let _ = sender.send(complete_ack);
-                if ack.success {
-                    info!(
-                        cluster = %cluster_name,
-                        request_id = %ack.request_id,
-                        resources_created = ack.resources_created,
-                        "Move completed"
-                    );
-                } else {
-                    error!(
-                        cluster = %cluster_name,
-                        request_id = %ack.request_id,
-                        error = %ack.error,
-                        "Move failed"
-                    );
-                }
-            } else {
-                warn!(
-                    cluster = %cluster_name,
-                    request_id = %ack.request_id,
-                    "Received ack for unknown request"
-                );
-            }
+            handle_move_complete_ack(ctx, cluster_name, ack);
+            true
         }
-        Some(Payload::SubtreeState(state)) => {
-            debug!(
-                cluster = %cluster_name,
-                is_full_sync = state.is_full_sync,
-                cluster_count = state.clusters.len(),
-                service_count = state.services.len(),
-                "Subtree state received"
-            );
-
-            // Update cluster routing in the subtree registry
-            if state.is_full_sync {
-                match convert_subtree_to_cluster_infos(state) {
-                    Ok(clusters) => {
-                        info!(
-                            cluster = %cluster_name,
-                            subtree_clusters = clusters.len(),
-                            "Full sync: updating subtree registry"
-                        );
-                        registry.handle_full_sync(cluster_name, clusters).await;
-                    }
-                    Err(e) => {
-                        error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
-                        return true;
-                    }
-                }
-            } else {
-                match extract_delta_changes(state) {
-                    Ok((added, removed)) => {
-                        if !added.is_empty() || !removed.is_empty() {
-                            debug!(
-                                cluster = %cluster_name,
-                                added = added.len(),
-                                removed = removed.len(),
-                                "Delta: updating subtree registry"
-                            );
-                        }
-                        registry.handle_delta(cluster_name, added, removed).await;
-                    }
-                    Err(e) => {
-                        error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
-                        return true;
-                    }
-                }
-            }
-
-            // Send service routes to the reconciler, grouped by originating cluster.
-            // Each SubtreeService carries the cluster name of its origin so routes
-            // propagate up the hierarchy without losing provenance.
-            if !state.services.is_empty() || state.is_full_sync {
-                let grouped = match group_subtree_routes_by_cluster(state, cluster_name) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        error!(cluster = %cluster_name, error = %e, "rejecting oversized route state");
-                        return true;
-                    }
-                };
-                // Validate each origin cluster belongs to the sender's subtree.
-                // Without this, a compromised agent could inject routes for
-                // arbitrary clusters by setting the `cluster` field in SubtreeService.
-                let allowed_clusters = registry.clusters_via_agent(cluster_name).await;
-                for (origin, origin_routes) in grouped {
-                    if origin != *cluster_name && !allowed_clusters.contains(&origin) {
-                        warn!(
-                            sender = %cluster_name,
-                            origin = %origin,
-                            "rejecting routes for cluster not in sender's subtree"
-                        );
-                        continue;
-                    }
-                    let update = crate::route_reconciler::RouteUpdate {
-                        cluster_name: origin,
-                        routes: origin_routes,
-                    };
-                    if let Err(e) = route_update_tx.send(update).await {
-                        warn!(
-                            cluster = %cluster_name,
-                            error = %e,
-                            "failed to send route update to reconciler"
-                        );
-                    }
-                }
-            }
-        }
+        Some(Payload::SubtreeState(state)) => handle_subtree_state(ctx, cluster_name, state).await,
         Some(Payload::ExecData(data)) => {
-            debug!(
-                cluster = %cluster_name,
-                request_id = %data.request_id,
-                stream_id = data.stream_id,
-                data_len = data.data.len(),
-                stream_end = data.stream_end,
-                "Exec data received"
-            );
-
-            // Route exec data to the pending exec session handler.
-            // Spawn the send so we don't block the gRPC receive loop if
-            // the channel is full — this guarantees stream3 (exit status)
-            // is never silently dropped.
-            if let Some(sender) = registry.get_pending_exec_data(&data.request_id) {
-                let cluster = cluster_name.to_string();
-                let request_id = data.request_id.clone();
-                let data = data.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = sender.send(data).await {
-                        warn!(
-                            cluster = %cluster,
-                            request_id = %request_id,
-                            error = %e,
-                            "Failed to deliver exec data"
-                        );
-                    }
-                });
-            } else {
-                debug!(
-                    cluster = %cluster_name,
-                    request_id = %data.request_id,
-                    "Received exec data for unknown session"
-                );
-            }
+            handle_exec_data(ctx, cluster_name, data);
+            true
         }
         Some(Payload::Event(event)) => {
-            info!(
-                cluster = %cluster_name,
-                reason = %event.reason,
-                source = %event.source_cluster,
-                severity = %event.severity,
-                "Forwarded lifecycle event from child: {}",
-                event.message
-            );
-            // The event is logged and available through the registry.
-            // The cluster controller will see these events when it reconciles
-            // and can emit them as K8s Events on the parent's LatticeCluster CRD
-            // if needed in the future.
+            handle_event(cluster_name, event);
+            true
         }
         Some(Payload::StateSyncResponse(sync)) => {
-            debug!(
-                cluster = %cluster_name,
-                spec_len = sync.spec_json.len(),
-                status_len = sync.status_json.len(),
-                "Received state sync response"
-            );
-            state_sync::handle_state_sync_response(cluster_name, sync, kube_client).await;
+            handle_state_sync_response(ctx, cluster_name, sync).await;
+            true
         }
         Some(Payload::ServiceLookupRequest(req)) => {
-            debug!(
-                cluster = %cluster_name,
-                service = %req.service_name,
-                namespace = %req.service_namespace,
-                "Service lookup request"
-            );
-            let response = handle_service_lookup(kube_client, req, cluster_name).await;
-            let cmd = lattice_proto::CellCommand {
-                command_id: req.request_id.clone(),
-                command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(
-                    response,
-                )),
-            };
-            if let Err(e) = command_tx.send(cmd).await {
-                warn!(
-                    cluster = %cluster_name,
-                    error = %e,
-                    "Failed to send service lookup response"
-                );
-            }
+            handle_service_lookup_request(ctx, cluster_name, req).await;
+            true
         }
         Some(Payload::ServiceLookupResponse(_)) => {
-            // Forwarded from a child's parent — not used on the cell side
+            // Forwarded from a child's parent — not used on the cell side.
+            true
         }
         None => {
             warn!(cluster = %cluster_name, "Received message with no payload");
+            true
+        }
+    }
+}
+
+async fn handle_ready(ctx: &MessageContext, cluster_name: &str, ready: &lattice_proto::AgentReady) {
+    info!(
+        cluster = %cluster_name,
+        agent_version = %ready.agent_version,
+        k8s_version = %ready.kubernetes_version,
+        protocol_version = ready.protocol_version,
+        state = ?ready.state(),
+        "Agent connected"
+    );
+
+    let mut conn = AgentConnection::new(
+        cluster_name.to_string(),
+        ready.agent_version.clone(),
+        ready.kubernetes_version.clone(),
+        ctx.command_tx.clone(),
+    );
+    conn.cert_fingerprint = Some(ctx.cert_fingerprint.clone());
+    conn.cert_expires_at = Some(ctx.cert_expires_at);
+    let gen = ctx.registry.register(conn);
+    ctx.connection_generation
+        .store(gen, std::sync::atomic::Ordering::Relaxed);
+    ctx.registry.update_state(cluster_name, ready.state());
+
+    // Mark cluster as connected in subtree registry (restores connectivity after disconnect)
+    ctx.registry
+        .handle_agent_reconnect_routes(cluster_name)
+        .await;
+
+    // If agent reports Ready state, pivot must have completed
+    if ready.state() == AgentState::Ready {
+        ctx.registry.set_pivot_complete(cluster_name, true);
+    }
+
+    // NOTE: No ACK recovery needed for unpivot. Once the parent has imported
+    // and unpaused CAPI resources, it owns the child's infrastructure and will
+    // delete it via CAPI. The child cluster goes away at the infrastructure level,
+    // so the child's finalizer becomes irrelevant.
+}
+
+fn handle_bootstrap_complete(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    bc: &lattice_proto::BootstrapComplete,
+) {
+    info!(
+        cluster = %cluster_name,
+        capi_ready = bc.capi_ready,
+        installed_providers = ?bc.installed_providers,
+        "Bootstrap complete"
+    );
+    // Store CAPI ready status - pivot requires this to be true
+    ctx.registry.set_capi_ready(cluster_name, bc.capi_ready);
+}
+
+async fn handle_heartbeat(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    hb: &lattice_proto::Heartbeat,
+    peer_config: Option<&PeerRouteConfig>,
+    peer_index: Option<&crate::peer_routes::PeerRouteIndex>,
+) -> bool {
+    let registry = &ctx.registry;
+    let command_tx = &ctx.command_tx;
+    let kube_client = &ctx.kube_client;
+    let connection_generation = &ctx.connection_generation;
+
+    debug!(
+        cluster = %cluster_name,
+        state = ?hb.state(),
+        uptime = hb.uptime_seconds,
+        "Heartbeat received"
+    );
+    registry.update_state(cluster_name, hb.state());
+    registry.update_lattice_image(cluster_name, hb.lattice_image.clone());
+    registry.update_kubernetes_version(cluster_name, hb.kubernetes_version.clone());
+    if let Some(ref health) = hb.health {
+        debug!(
+            cluster = %cluster_name,
+            ready_nodes = health.ready_nodes,
+            total_nodes = health.total_nodes,
+            "Health update from heartbeat"
+        );
+        registry.update_health(cluster_name, health.clone());
+    }
+    if let Some(age) = registry.heartbeat_age_seconds(cluster_name) {
+        lattice_common::metrics::set_agent_heartbeat_age(cluster_name, age);
+    }
+
+    // Check spec/status hashes for state sync
+    if registry.update_hashes(cluster_name, &hb.spec_hash, &hb.status_hash) {
+        debug!(cluster = %cluster_name, "Hash mismatch detected, requesting state sync");
+        let sync_cmd = CellCommand {
+            command_id: format!("state-sync-{}", cluster_name),
+            command: Some(lattice_proto::cell_command::Command::StateSyncRequest(
+                lattice_proto::RequestStateSync {},
+            )),
+        };
+        if let Err(e) = command_tx.send(sync_cmd).await {
+            warn!(
+                cluster = %cluster_name,
+                error = %e,
+                "Failed to send state sync request"
+            );
+        }
+    }
+
+    // Check peer routes hash — if the child's hash doesn't match what
+    // we'd send it, push a full PeerRouteSync
+    if let (Some(pc), Some(index)) = (peer_config, peer_index) {
+        crate::peer_routes::check_and_sync_peer_routes(
+            registry,
+            cluster_name,
+            &hb.peer_routes_hash,
+            index,
+            &pc.proxy_url,
+            &pc.ca_cert_pem,
+            kube_client,
+        )
+        .await;
+    }
+
+    // Validate the proxy path
+    if let Some(ref health) = ctx.proxy_health {
+        if !validate_proxy_path(health, cluster_name, command_tx).await {
+            return false;
+        }
+    }
+
+    // Check if this stream is still the active connection
+    let my_gen = connection_generation.load(std::sync::atomic::Ordering::Relaxed);
+    match registry.check_connection_health(cluster_name, my_gen, command_tx) {
+        crate::connection::StreamAction::Continue => true,
+        crate::connection::StreamAction::Reclaimed(new_gen) => {
+            connection_generation.store(new_gen, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        crate::connection::StreamAction::Terminate => {
+            warn!(
+                cluster = %cluster_name,
+                "Superseded by newer live connection, closing stream"
+            );
+            false
+        }
+    }
+}
+
+/// Validate the auth proxy on this pod can reach the cluster behind this
+/// agent. Returns `false` when the stream must be closed (Reconnect sent).
+async fn validate_proxy_path(
+    health: &ProxyHealthCheck,
+    cluster_name: &str,
+    command_tx: &mpsc::Sender<CellCommand>,
+) -> bool {
+    match check_proxy_path(health, cluster_name).await {
+        ProxyCheckResult::Ok => {
+            health
+                .consecutive_failures
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            true
+        }
+        ProxyCheckResult::WrongPod => {
+            warn!(cluster = %cluster_name, "Proxy returned 503 — agent on wrong pod, sending Reconnect");
+            send_reconnect(
+                command_tx,
+                cluster_name,
+                "proxy returned 503: cluster not available on this pod".to_string(),
+            )
+            .await;
+            false
+        }
+        ProxyCheckResult::Unreachable => {
+            let failures = health
+                .consecutive_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            if failures >= 2 {
+                warn!(cluster = %cluster_name, failures, "Proxy unreachable for 2 heartbeats, sending Reconnect");
+                send_reconnect(
+                    command_tx,
+                    cluster_name,
+                    format!("proxy unreachable for {} consecutive heartbeats", failures),
+                )
+                .await;
+                return false;
+            }
+            debug!(cluster = %cluster_name, failures, "Proxy unreachable, waiting before reconnect");
+            true
+        }
+    }
+}
+
+async fn send_reconnect(
+    command_tx: &mpsc::Sender<CellCommand>,
+    cluster_name: &str,
+    reason: String,
+) {
+    let reconnect = CellCommand {
+        command_id: format!("reconnect-{}", cluster_name),
+        command: Some(lattice_proto::cell_command::Command::Reconnect(
+            lattice_proto::ReconnectCommand { reason },
+        )),
+    };
+    let _ = command_tx.send(reconnect).await;
+}
+
+fn handle_cluster_health(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    health: &lattice_proto::ClusterHealth,
+) {
+    // Legacy standalone health message — persist to registry
+    debug!(
+        cluster = %cluster_name,
+        ready_nodes = health.ready_nodes,
+        total_nodes = health.total_nodes,
+        "Health update (standalone)"
+    );
+    ctx.registry.update_health(cluster_name, health.clone());
+}
+
+fn handle_status_response(cluster_name: &str, sr: &lattice_proto::StatusResponse) {
+    debug!(
+        cluster = %cluster_name,
+        request_id = %sr.request_id,
+        "Status response received"
+    );
+}
+
+fn handle_cluster_deleting(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    cd: &lattice_proto::ClusterDeleting,
+) {
+    let registry = &ctx.registry;
+    // Guard against concurrent teardown spawns
+    if !registry.start_teardown(cluster_name) {
+        debug!(
+            cluster = %cluster_name,
+            "Teardown already in progress, ignoring duplicate ClusterDeleting"
+        );
+        return;
+    }
+
+    // Block this agent's certificate to prevent reconnection after deletion.
+    // The fingerprint was stored during registration from the mTLS handshake.
+    if let Some(agent) = registry.get(cluster_name) {
+        if let Some(ref fp) = agent.cert_fingerprint {
+            let expires_at = agent.cert_expires_at.unwrap_or(i64::MAX);
+            ctx.blocklist.add(fp.clone(), expires_at);
+            info!(
+                cluster = %cluster_name,
+                fingerprint = %fp,
+                "Blocklisted agent certificate on cluster deletion"
+            );
+        }
+    }
+
+    info!(
+        cluster = %cluster_name,
+        namespace = %cd.namespace,
+        object_count = cd.objects.len(),
+        "Cluster deletion requested"
+    );
+
+    let objects: Vec<lattice_move::MoveObjectOutput> =
+        cd.objects.iter().cloned().map(Into::into).collect();
+    let namespace = cd.namespace.clone();
+    let cluster = cluster_name.to_string();
+    let client = ctx.kube_client.clone();
+    let registry_clone = registry.clone();
+
+    tokio::spawn(handle_cluster_deletion(
+        cluster,
+        namespace,
+        objects,
+        client,
+        registry_clone,
+    ));
+}
+
+async fn handle_kubernetes_response(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    resp: &lattice_proto::KubernetesResponse,
+) {
+    let registry = &ctx.registry;
+    debug!(
+        cluster = %cluster_name,
+        request_id = %resp.request_id,
+        status_code = resp.status_code,
+        streaming = resp.streaming,
+        stream_end = resp.stream_end,
+        body_len = resp.body.len(),
+        "K8s API response received"
+    );
+
+    if resp.stream_end {
+        // Final message in stream - take the sender to remove it
+        if let Some(sender) = registry
+            .take_pending_k8s_response(cluster_name, &resp.request_id)
+            .await
+        {
+            if let Err(e) = sender.try_send(resp.clone()) {
+                warn!(
+                    cluster = %cluster_name,
+                    request_id = %resp.request_id,
+                    error = %e,
+                    "Failed to deliver final K8s API response"
+                );
+            }
+        } else {
+            debug!(
+                cluster = %cluster_name,
+                request_id = %resp.request_id,
+                "Received K8s API response for unknown request (may have timed out)"
+            );
+        }
+    } else if let Some(sender) = registry.get_pending_k8s_response(&resp.request_id).await {
+        if let Err(e) = sender.try_send(resp.clone()) {
+            warn!(
+                cluster = %cluster_name,
+                request_id = %resp.request_id,
+                error = %e,
+                "Failed to deliver streaming K8s API response"
+            );
+            // Channel is full or closed, clean up
+            registry
+                .take_pending_k8s_response(cluster_name, &resp.request_id)
+                .await;
+        }
+    } else {
+        debug!(
+            cluster = %cluster_name,
+            request_id = %resp.request_id,
+            "Received K8s API response for unknown request"
+        );
+    }
+}
+
+fn handle_move_ack(ctx: &MessageContext, cluster_name: &str, ack: &lattice_proto::MoveObjectAck) {
+    if let Some(sender) = ctx.registry.take_pending_batch_ack(&ack.request_id) {
+        let batch_ack = lattice_move::BatchAck {
+            mappings: ack
+                .mappings
+                .iter()
+                .map(|m| (m.source_uid.clone(), m.target_uid.clone()))
+                .collect(),
+            errors: ack
+                .errors
+                .iter()
+                .map(|e| (e.source_uid.clone(), e.message.clone(), e.retryable))
+                .collect(),
+        };
+        let _ = sender.send(batch_ack);
+        debug!(
+            cluster = %cluster_name,
+            request_id = %ack.request_id,
+            mappings = ack.mappings.len(),
+            "Delivered batch ack"
+        );
+    } else {
+        warn!(
+            cluster = %cluster_name,
+            request_id = %ack.request_id,
+            "Received ack for unknown request"
+        );
+    }
+}
+
+fn handle_move_complete_ack(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    ack: &lattice_proto::MoveCompleteAck,
+) {
+    if let Some(sender) = ctx.registry.take_pending_complete_ack(&ack.request_id) {
+        let complete_ack = lattice_move::CompleteAck {
+            success: ack.success,
+            error: ack.error.clone(),
+            resources_created: ack.resources_created,
+        };
+        let _ = sender.send(complete_ack);
+        if ack.success {
+            info!(
+                cluster = %cluster_name,
+                request_id = %ack.request_id,
+                resources_created = ack.resources_created,
+                "Move completed"
+            );
+        } else {
+            error!(
+                cluster = %cluster_name,
+                request_id = %ack.request_id,
+                error = %ack.error,
+                "Move failed"
+            );
+        }
+    } else {
+        warn!(
+            cluster = %cluster_name,
+            request_id = %ack.request_id,
+            "Received ack for unknown request"
+        );
+    }
+}
+
+async fn handle_subtree_state(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    state: &lattice_proto::SubtreeState,
+) -> bool {
+    let registry = &ctx.registry;
+    let route_update_tx = &ctx.route_update_tx;
+
+    debug!(
+        cluster = %cluster_name,
+        is_full_sync = state.is_full_sync,
+        cluster_count = state.clusters.len(),
+        service_count = state.services.len(),
+        "Subtree state received"
+    );
+
+    // Update cluster routing in the subtree registry
+    if state.is_full_sync {
+        match convert_subtree_to_cluster_infos(state) {
+            Ok(clusters) => {
+                info!(
+                    cluster = %cluster_name,
+                    subtree_clusters = clusters.len(),
+                    "Full sync: updating subtree registry"
+                );
+                registry.handle_full_sync(cluster_name, clusters).await;
+            }
+            Err(e) => {
+                error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
+                return true;
+            }
+        }
+    } else {
+        match extract_delta_changes(state) {
+            Ok((added, removed)) => {
+                if !added.is_empty() || !removed.is_empty() {
+                    debug!(
+                        cluster = %cluster_name,
+                        added = added.len(),
+                        removed = removed.len(),
+                        "Delta: updating subtree registry"
+                    );
+                }
+                registry.handle_delta(cluster_name, added, removed).await;
+            }
+            Err(e) => {
+                error!(cluster = %cluster_name, error = %e, "rejecting oversized subtree state");
+                return true;
+            }
+        }
+    }
+
+    // Send service routes to the reconciler, grouped by originating cluster.
+    if !state.services.is_empty() || state.is_full_sync {
+        let grouped = match group_subtree_routes_by_cluster(state, cluster_name) {
+            Ok(g) => g,
+            Err(e) => {
+                error!(cluster = %cluster_name, error = %e, "rejecting oversized route state");
+                return true;
+            }
+        };
+        // Validate each origin cluster belongs to the sender's subtree.
+        // Without this, a compromised agent could inject routes for
+        // arbitrary clusters by setting the `cluster` field in SubtreeService.
+        let allowed_clusters = registry.clusters_via_agent(cluster_name).await;
+        for (origin, origin_routes) in grouped {
+            if origin != cluster_name && !allowed_clusters.contains(&origin) {
+                warn!(
+                    sender = %cluster_name,
+                    origin = %origin,
+                    "rejecting routes for cluster not in sender's subtree"
+                );
+                continue;
+            }
+            let update = crate::route_reconciler::RouteUpdate {
+                cluster_name: origin,
+                routes: origin_routes,
+            };
+            if let Err(e) = route_update_tx.send(update).await {
+                warn!(
+                    cluster = %cluster_name,
+                    error = %e,
+                    "failed to send route update to reconciler"
+                );
+            }
         }
     }
     true
+}
+
+fn handle_exec_data(ctx: &MessageContext, cluster_name: &str, data: &lattice_proto::ExecData) {
+    debug!(
+        cluster = %cluster_name,
+        request_id = %data.request_id,
+        stream_id = data.stream_id,
+        data_len = data.data.len(),
+        stream_end = data.stream_end,
+        "Exec data received"
+    );
+
+    // Route exec data to the pending exec session handler. Spawn the send
+    // so we don't block the gRPC receive loop if the channel is full —
+    // this guarantees stream3 (exit status) is never silently dropped.
+    if let Some(sender) = ctx.registry.get_pending_exec_data(&data.request_id) {
+        let cluster = cluster_name.to_string();
+        let request_id = data.request_id.clone();
+        let data = data.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sender.send(data).await {
+                warn!(
+                    cluster = %cluster,
+                    request_id = %request_id,
+                    error = %e,
+                    "Failed to deliver exec data"
+                );
+            }
+        });
+    } else {
+        debug!(
+            cluster = %cluster_name,
+            request_id = %data.request_id,
+            "Received exec data for unknown session"
+        );
+    }
+}
+
+fn handle_event(cluster_name: &str, event: &lattice_proto::LatticeEvent) {
+    info!(
+        cluster = %cluster_name,
+        reason = %event.reason,
+        source = %event.source_cluster,
+        severity = %event.severity,
+        "Forwarded lifecycle event from child: {}",
+        event.message
+    );
+    // The event is logged and available through the registry.
+    // The cluster controller will see these events when it reconciles
+    // and can emit them as K8s Events on the parent's LatticeCluster CRD
+    // if needed in the future.
+}
+
+async fn handle_state_sync_response(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    sync: &lattice_proto::StateSyncResponse,
+) {
+    debug!(
+        cluster = %cluster_name,
+        spec_len = sync.spec_json.len(),
+        status_len = sync.status_json.len(),
+        "Received state sync response"
+    );
+    state_sync::handle_state_sync_response(cluster_name, sync, &ctx.kube_client).await;
+}
+
+async fn handle_service_lookup_request(
+    ctx: &MessageContext,
+    cluster_name: &str,
+    req: &lattice_proto::ServiceLookupRequest,
+) {
+    debug!(
+        cluster = %cluster_name,
+        service = %req.service_name,
+        namespace = %req.service_namespace,
+        "Service lookup request"
+    );
+    let response = handle_service_lookup(&ctx.kube_client, req, cluster_name).await;
+    let cmd = lattice_proto::CellCommand {
+        command_id: req.request_id.clone(),
+        command: Some(lattice_proto::cell_command::Command::ServiceLookupResponse(
+            response,
+        )),
+    };
+    if let Err(e) = ctx.command_tx.send(cmd).await {
+        warn!(
+            cluster = %cluster_name,
+            error = %e,
+            "Failed to send service lookup response"
+        );
+    }
 }
 
 impl AgentServer {

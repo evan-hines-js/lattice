@@ -34,53 +34,28 @@ use lattice_crd::crd::{
     ProviderType,
 };
 
-/// Hardcoded debug SSH key, appended to `ubuntu`'s `authorized_keys` on
-/// every basis-provisioned VM. Basis is private lab infra; this is for
-/// in-VM inspection (kube-vip state, kubelet logs, cilium pods), not a
-/// security boundary.
+/// Hardcoded debug SSH key appended to root's `authorized_keys` on
+/// every basis-provisioned VM. Basis is private lab infra; this is
+/// for in-VM inspection (kube-vip state, kubelet logs, cilium pods),
+/// not a security boundary.
 const DEBUG_SSH_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1f8eVKp5YCAtis77YO/oHhWvzAiimDzlDqhtD+85YR evan.hines.dev@gmail.com";
 
-/// Password set on the `ubuntu` user, paired with `PasswordAuthentication
-/// yes` in sshd. Lets us drop into a VM from a console session even when
-/// agent-side key forwarding isn't set up.
-const DEBUG_USER_PASSWORD: &str = "basis";
-
-/// Two shell snippets to run as root after the bootstrap unit finishes.
-/// Plain post-commands — not cloud-init's `users:` / `chpasswd:`
-/// modules — because Kubeadm/RKE2 already own the cloud-init document
-/// for these manifests; appending into the post-bootstrap command list
-/// is the lowest-blast-radius hook. Both snippets are idempotent so
-/// reapply / machine rollover is safe.
+/// Idempotent shell snippet that appends `DEBUG_SSH_KEY` to root's
+/// `authorized_keys` and tightens its perms. Worker pools wire this
+/// into their `postKubeadmCommands` / `postRKE2Commands` because
+/// their bootstrap-config-template generator doesn't yet expose an
+/// `ssh_authorized_keys` field. Control-plane manifests get the
+/// same key via the bootstrap provider's `users[name=root]` block,
+/// which `ControlPlaneConfig::ssh_authorized_keys` populates.
 fn debug_post_commands() -> Vec<String> {
-    vec![
-        format!(
-            "mkdir -p /home/ubuntu/.ssh && \
-             grep -qF '{key}' /home/ubuntu/.ssh/authorized_keys 2>/dev/null || \
-             echo '{key}' >> /home/ubuntu/.ssh/authorized_keys && \
-             chown -R ubuntu:ubuntu /home/ubuntu/.ssh && \
-             chmod 700 /home/ubuntu/.ssh && \
-             chmod 600 /home/ubuntu/.ssh/authorized_keys",
-            key = DEBUG_SSH_KEY,
-        ),
-        // sshd's `Include` reads sshd_config.d/*.conf alphabetically and
-        // first match wins — so cloud-init's 50-cloud-init.conf
-        // (`PasswordAuthentication no`) clobbers anything later. We
-        // both drop a `00-` snippet (first in alphabetical order, so
-        // sshd reads it before cloud-init's) AND patch
-        // 50-cloud-init.conf in place, so a future reload that re-reads
-        // both files still ends up with password auth on.
-        format!(
-            "echo 'ubuntu:{pw}' | chpasswd && \
-             printf 'PasswordAuthentication yes\\nKbdInteractiveAuthentication yes\\n' \
-                 > /etc/ssh/sshd_config.d/00-basis-debug.conf && \
-             if [ -f /etc/ssh/sshd_config.d/50-cloud-init.conf ]; then \
-                 sed -i 's/^[[:space:]]*PasswordAuthentication[[:space:]]\\+no/PasswordAuthentication yes/' \
-                     /etc/ssh/sshd_config.d/50-cloud-init.conf; \
-             fi && \
-             (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true)",
-            pw = DEBUG_USER_PASSWORD,
-        ),
-    ]
+    vec![format!(
+        "mkdir -p /root/.ssh && \
+         grep -qF '{key}' /root/.ssh/authorized_keys 2>/dev/null || \
+         echo '{key}' >> /root/.ssh/authorized_keys && \
+         chmod 700 /root/.ssh && \
+         chmod 600 /root/.ssh/authorized_keys",
+        key = DEBUG_SSH_KEY,
+    )]
 }
 
 /// Append the debug-access shell commands to a bootstrap-config-template
@@ -302,24 +277,20 @@ impl Provider for BasisProvider {
                 BASIS_VIP_INTERFACE.to_string(),
                 cfg.kube_vip_image.clone(),
             ));
-            let mut post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap)?;
-            // Append the debug-access shell snippets so CP nodes are
-            // ssh-able the same way workers are. Goes into
-            // postKubeadmCommands / postRKE2Commands inside the CP
-            // generator depending on bootstrap provider.
-            post_kubeadm_commands.extend(debug_post_commands());
+            let post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap)?;
 
             let cp_config = ControlPlaneConfig {
                 replicas: spec.nodes.control_plane.replicas,
                 cert_sans,
                 post_kubeadm_commands,
                 vip,
-                // Existing CP plumbing writes these to root's
-                // authorized_keys (kubeadm `users[name=root]` /
-                // RKE2 `/root/.ssh/authorized_keys`). Harmless — root
-                // login is locked on Ubuntu cloud images so this is
-                // belt-and-suspenders behind the ubuntu user that
-                // debug_post_commands actually wires up.
+                // Bootstrap provider writes this into root's
+                // authorized_keys via kubeadm's `users[name=root]`
+                // (or RKE2's `/root/.ssh/authorized_keys`). Worker
+                // pools get the same key via
+                // `inject_debug_post_commands` because their
+                // bootstrap-config-template generator doesn't yet
+                // expose an ssh-keys field.
                 ssh_authorized_keys: vec![DEBUG_SSH_KEY.to_string()],
                 registry_mirrors: bootstrap.registry_mirrors.clone(),
             };

@@ -322,17 +322,37 @@ fn resolve_model_image_providers(
     cache.resolve_image_providers(&names)
 }
 
-/// Reconcile a LatticeModel resource
+/// Per-reconcile snapshot — bundles every value derived once at the top of
+/// `reconcile` so the per-phase handlers don't grow long argument lists.
+struct ReconcileScope<'a> {
+    model: &'a Arc<LatticeModel>,
+    ctx: &'a ModelContext,
+    name: String,
+    namespace: &'a str,
+    generation: i64,
+    serving_name: String,
+    cost: Option<lattice_crd::crd::CostEstimate>,
+    quota_snapshots: Vec<lattice_quota::QuotaSnapshot>,
+    pre_applied_roles: std::collections::BTreeSet<String>,
+    compile_ctx: CompileContext<'a>,
+}
+
+/// Reconcile a LatticeModel resource.
+///
+/// Sets up a `ReconcileScope` (validation, cost, quota, compile context),
+/// then dispatches to the matching phase handler. The phase handlers own
+/// the imperative "apply / wait / status" sequencing; the dispatcher stays
+/// short and readable.
 pub async fn reconcile(
     model: Arc<LatticeModel>,
     ctx: Arc<ModelContext>,
 ) -> Result<Action, ModelError> {
-    let name = model.name_any();
     let namespace = model
         .metadata
         .namespace
         .as_deref()
         .ok_or(ModelError::MissingNamespace)?;
+    let name = model.name_any();
 
     // Validate the model spec (all roles)
     model.spec.validate()?;
@@ -409,322 +429,390 @@ pub async fn reconcile(
         image_providers,
     };
 
+    let scope = ReconcileScope {
+        model: &model,
+        ctx: &ctx,
+        name,
+        namespace,
+        generation,
+        serving_name,
+        cost,
+        quota_snapshots,
+        pre_applied_roles,
+        compile_ctx,
+    };
+
     match phase {
-        ModelServingPhase::Pending => {
-            let compiled = compile_model(&model, &compile_ctx).await;
-
-            let compiled = match compiled {
-                Ok(c) => c,
-                Err(e) => {
-                    if e.is_retryable() {
-                        let msg = format!("Compile failed (will retry): {}", e);
-                        let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
-                            .message(&msg)
-                            .apply(ctx.kube.as_ref(), &model, namespace)
-                            .await;
-                    } else {
-                        cleanup_graph(&model, &ctx.graph, namespace);
-                        let msg = format!("Failed to compile: {}", e);
-                        ctx.events
-                            .publish(
-                                &model.object_ref(&()),
-                                EventType::Warning,
-                                reasons::MODEL_FAILED,
-                                actions::COMPILE,
-                                Some(msg.clone()),
-                            )
-                            .await;
-                        let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
-                            .message(&msg)
-                            .observed_generation(generation)
-                            .apply(ctx.kube.as_ref(), &model, namespace)
-                            .await;
-                    }
-                    return Err(e);
-                }
-            };
-
-            register_graph(&model, &ctx.graph, namespace);
-
-            // Optimistic concurrency: verify quotas haven't changed since budget was resolved
-            if !quota_snapshots.is_empty() {
-                match ctx.kube.verify_quota_freshness(&quota_snapshots).await {
-                    Ok(false) => {
-                        tracing::info!("quota state changed during model compilation, requeueing");
-                        return Err(ModelError::Common(lattice_common::Error::internal(
-                            "quota state changed during compilation, requeue",
-                        )));
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to verify quota freshness for model, proceeding");
-                    }
-                    _ => {}
-                }
-            }
-
-            if let Err(e) = ctx
-                .kube
-                .apply_compiled_model(&name, namespace, &compiled)
-                .await
-            {
-                let msg = format!("Apply failed (will retry): {}", e);
-                // Stay in Pending — apply errors are transient (webhook not ready,
-                // API server hiccup). error_policy requeues after 30s.
-                // Don't cleanup the graph: the roles are valid (compilation succeeded),
-                // and register_graph will re-register them on the next reconcile anyway.
-                let _ = StatusUpdate::new(ModelServingPhase::Pending, &cost)
-                    .message(&msg)
-                    .apply(ctx.kube.as_ref(), &model, namespace)
-                    .await;
-                return Err(e);
-            }
-            ctx.events
-                .publish(
-                    &model.object_ref(&()),
-                    EventType::Normal,
-                    reasons::MODEL_LOADING,
-                    actions::RECONCILE,
-                    Some("Resources applied, waiting for model serving readiness".to_string()),
-                )
-                .await;
-            let role_keys: Vec<String> = spec_role_keys(&name, &model.spec.roles)
-                .into_iter()
-                .collect();
-            StatusUpdate::new(ModelServingPhase::Loading, &cost)
-                .message("Resources applied, waiting for model serving readiness")
-                .observed_generation(generation)
-                .auto_topology(compiled.auto_topology)
-                .applied_roles(role_keys)
-                .apply(ctx.kube.as_ref(), &model, namespace)
-                .await?;
-            Ok(Action::requeue(REQUEUE_LOADING))
-        }
-        ModelServingPhase::Loading => {
-            // Check if the spec changed since we compiled in Pending. If so,
-            // go back to Pending to recompile with the new spec. Without this
-            // check, Loading→Serving would stamp the new generation despite
-            // running resources compiled from the old spec.
-            if spec_changed_since_compilation(model.status.as_ref(), generation) {
-                info!(model = %name, "spec changed during Loading, recompiling");
-                StatusUpdate::new(ModelServingPhase::Pending, &cost)
-                    .message("Spec changed, recompiling")
-                    .apply(ctx.kube.as_ref(), &model, namespace)
-                    .await?;
-                return Ok(Action::requeue(REQUEUE_RETRY));
-            }
-
-            // No download job gating — init containers naturally block pod startup
-            // until model download completes.
-
-            let (state, conditions) = ctx
-                .kube
-                .check_model_serving_status(&serving_name, namespace)
-                .await;
-
-            match state {
-                ModelServingState::Available => {
-                    info!(model = %name, "model serving is available");
-                    ctx.events
-                        .publish(
-                            &model.object_ref(&()),
-                            EventType::Normal,
-                            reasons::MODEL_SERVING,
-                            actions::RECONCILE,
-                            Some("Model is serving inference requests".to_string()),
-                        )
-                        .await;
-                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
-                        .message("Model is serving inference requests")
-                        .observed_generation(generation);
-                    if let Some(c) = conditions {
-                        s = s.conditions(c);
-                    }
-                    s.apply(ctx.kube.as_ref(), &model, namespace).await?;
-                    Ok(Action::requeue(REQUEUE_SERVING))
-                }
-                ModelServingState::Failed => {
-                    error!(model = %name, "model serving failed");
-                    ctx.events
-                        .publish(
-                            &model.object_ref(&()),
-                            EventType::Warning,
-                            reasons::MODEL_FAILED,
-                            actions::RECONCILE,
-                            Some("ModelServing failed".to_string()),
-                        )
-                        .await;
-                    cleanup_graph(&model, &ctx.graph, namespace);
-                    let mut s = StatusUpdate::new(ModelServingPhase::Failed, &cost)
-                        .message("ModelServing failed")
-                        .observed_generation(generation);
-                    if let Some(c) = conditions {
-                        s = s.conditions(c);
-                    }
-                    s.apply(ctx.kube.as_ref(), &model, namespace).await?;
-                    // Always requeue as a safety net — watch events can be missed during pod restarts.
-                    Ok(Action::requeue(Duration::from_secs(
-                        lattice_common::REQUEUE_SUCCESS_SECS,
-                    )))
-                }
-                ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
-            }
-        }
-        ModelServingPhase::Serving => {
-            let observed = model.status.as_ref().and_then(|s| s.observed_generation);
-            if observed != Some(generation) {
-                // Spec changed — re-compile and re-apply
-                info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
-                ctx.events
-                    .publish(
-                        &model.object_ref(&()),
-                        EventType::Normal,
-                        reasons::MODEL_SPEC_CHANGED,
-                        actions::RECONCILE,
-                        Some("Spec changed, recompiling".to_string()),
-                    )
-                    .await;
-
-                let old_role_keys = pre_applied_roles.clone();
-                let new_role_keys = spec_role_keys(&name, &model.spec.roles);
-
-                let compiled = match compile_model(&model, &compile_ctx).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        if e.is_retryable() {
-                            // Transient — stay in Serving, let error_policy retry
-                            let msg = format!("Recompile failed (will retry): {}", e);
-                            let mut s =
-                                StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
-                            if let Some(gen) = observed {
-                                s = s.observed_generation(gen);
-                            }
-                            let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
-                        } else {
-                            // Permanent — go to Failed
-                            cleanup_graph(&model, &ctx.graph, namespace);
-                            let msg = format!("Failed to recompile after spec change: {}", e);
-                            let _ = StatusUpdate::new(ModelServingPhase::Failed, &cost)
-                                .message(&msg)
-                                .observed_generation(generation)
-                                .apply(ctx.kube.as_ref(), &model, namespace)
-                                .await;
-                        }
-                        return Err(e);
-                    }
-                };
-                register_graph(&model, &ctx.graph, namespace);
-
-                // Clean up K8s resources and graph nodes for removed roles
-                ctx.kube
-                    .cleanup_removed_roles(
-                        &name,
-                        namespace,
-                        &old_role_keys,
-                        &new_role_keys,
-                        &ctx.graph,
-                    )
-                    .await;
-
-                // When roles are added or removed, the gang policy's
-                // minRoleReplicas key set changes. Volcano marks that field
-                // immutable, so an SSA update would 422. Delete the old
-                // ModelServing and requeue — the old PodGroup and pods need
-                // time to be garbage-collected. Applying immediately would
-                // SSA-patch the Terminating resource or create a PodGroup
-                // name collision, leaving decode pods stuck in Pending.
-                //
-                // The status update below persists the new applied_roles so
-                // the next reconcile sees old == new, skips the delete, and
-                // falls through to apply_compiled_model for a clean recreate.
-                if old_role_keys != new_role_keys {
-                    ctx.kube.delete_model_serving(&name, namespace).await?;
-                    // Persist the new role keys so the next reconcile sees
-                    // old == new and falls through to apply. Keep the OLD
-                    // observed_generation so spec_changed_since_compilation
-                    // still triggers the recompile path.
-                    let role_keys: Vec<String> = new_role_keys.into_iter().collect();
-                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
-                        .applied_roles(role_keys);
-                    if let Some(gen) = observed {
-                        s = s.observed_generation(gen);
-                    }
-                    let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
-                    info!(model = %name, "deleted ModelServing for role change, requeuing for clean recreate");
-                    return Ok(Action::requeue(REQUEUE_LOADING));
-                }
-
-                if let Err(e) = ctx
-                    .kube
-                    .apply_compiled_model(&name, namespace, &compiled)
-                    .await
-                {
-                    // Apply errors are transient — stay in Serving, let
-                    // error_policy retry. Keep the old observed_generation so
-                    // the next reconcile re-enters this recompile path.
-                    let msg = format!("Apply failed after spec change (will retry): {}", e);
-                    let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost).message(&msg);
-                    if let Some(gen) = observed {
-                        s = s.observed_generation(gen);
-                    }
-                    let _ = s.apply(ctx.kube.as_ref(), &model, namespace).await;
-                    return Err(e);
-                }
-                // Transition to Loading so the next reconcile checks
-                // ModelServing readiness after the rolling update.
-                let role_keys: Vec<String> = new_role_keys.into_iter().collect();
-                StatusUpdate::new(ModelServingPhase::Loading, &cost)
-                    .message("Spec changed, reloading")
-                    .observed_generation(generation)
-                    .auto_topology(compiled.auto_topology)
-                    .applied_roles(role_keys)
-                    .apply(ctx.kube.as_ref(), &model, namespace)
-                    .await?;
-                return Ok(Action::requeue(REQUEUE_LOADING));
-            }
-
-            // No spec change — monitor health and scrape metrics
-            let message = "Model is serving inference requests";
-            let conditions = ctx
-                .kube
-                .read_model_serving_conditions(&serving_name, namespace)
-                .await;
-
-            let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.as_ref());
-            let metrics = lattice_crd::crd::scrape_metrics(
-                ctx.metrics_scraper.as_ref(),
-                model.spec.observability.as_ref(),
-                namespace,
-                &name,
-                existing_metrics,
-            )
-            .await;
-
-            let mut s = StatusUpdate::new(ModelServingPhase::Serving, &cost)
-                .message(message)
-                .observed_generation(generation)
-                .metrics(metrics);
-            if let Some(c) = conditions {
-                s = s.conditions(c);
-            }
-            s.apply(ctx.kube.as_ref(), &model, namespace).await?;
-            Ok(Action::requeue(REQUEUE_SERVING))
-        }
-        ModelServingPhase::Failed => {
-            // Always retry — transition back to Pending for full recompilation.
-            // Matches the service controller behavior where Failed services
-            // fall through to compile_and_apply on every reconcile.
-            info!(model = %name, "retrying Failed model");
-            StatusUpdate::new(ModelServingPhase::Pending, &cost)
-                .message("Retrying compilation")
-                .apply(ctx.kube.as_ref(), &model, namespace)
-                .await?;
-            Ok(Action::requeue(REQUEUE_RETRY))
-        }
-        // Safety net requeue for any unmatched phase — watch events can be missed during pod restarts.
+        ModelServingPhase::Pending => reconcile_pending(&scope).await,
+        ModelServingPhase::Loading => reconcile_loading(&scope).await,
+        ModelServingPhase::Serving => reconcile_serving(&scope).await,
+        ModelServingPhase::Failed => reconcile_failed(&scope).await,
+        // Safety net requeue for any unmatched phase — watch events can be
+        // missed during pod restarts.
         _ => Ok(Action::requeue(Duration::from_secs(
             lattice_common::REQUEUE_SUCCESS_SECS,
         ))),
     }
+}
+
+/// Pending → compile, verify quotas haven't drifted, apply, transition to Loading.
+async fn reconcile_pending(s: &ReconcileScope<'_>) -> Result<Action, ModelError> {
+    let ReconcileScope {
+        model,
+        ctx,
+        name,
+        namespace,
+        generation,
+        cost,
+        quota_snapshots,
+        compile_ctx,
+        ..
+    } = s;
+
+    let compiled = match compile_model(model, compile_ctx).await {
+        Ok(c) => c,
+        Err(e) => {
+            if e.is_retryable() {
+                let msg = format!("Compile failed (will retry): {}", e);
+                let _ = StatusUpdate::new(ModelServingPhase::Pending, cost)
+                    .message(&msg)
+                    .apply(ctx.kube.as_ref(), model, namespace)
+                    .await;
+            } else {
+                cleanup_graph(model, &ctx.graph, namespace);
+                let msg = format!("Failed to compile: {}", e);
+                ctx.events
+                    .publish(
+                        &model.object_ref(&()),
+                        EventType::Warning,
+                        reasons::MODEL_FAILED,
+                        actions::COMPILE,
+                        Some(msg.clone()),
+                    )
+                    .await;
+                let _ = StatusUpdate::new(ModelServingPhase::Failed, cost)
+                    .message(&msg)
+                    .observed_generation(*generation)
+                    .apply(ctx.kube.as_ref(), model, namespace)
+                    .await;
+            }
+            return Err(e);
+        }
+    };
+
+    register_graph(model, &ctx.graph, namespace);
+
+    // Optimistic concurrency: verify quotas haven't changed since budget was resolved
+    if !quota_snapshots.is_empty() {
+        match ctx.kube.verify_quota_freshness(quota_snapshots).await {
+            Ok(false) => {
+                tracing::info!("quota state changed during model compilation, requeueing");
+                return Err(ModelError::Common(lattice_common::Error::internal(
+                    "quota state changed during compilation, requeue",
+                )));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to verify quota freshness for model, proceeding");
+            }
+            _ => {}
+        }
+    }
+
+    if let Err(e) = ctx
+        .kube
+        .apply_compiled_model(name, namespace, &compiled)
+        .await
+    {
+        let msg = format!("Apply failed (will retry): {}", e);
+        // Stay in Pending — apply errors are transient. Don't cleanup the
+        // graph: roles are valid (compilation succeeded) and register_graph
+        // will re-register them on the next reconcile anyway.
+        let _ = StatusUpdate::new(ModelServingPhase::Pending, cost)
+            .message(&msg)
+            .apply(ctx.kube.as_ref(), model, namespace)
+            .await;
+        return Err(e);
+    }
+    ctx.events
+        .publish(
+            &model.object_ref(&()),
+            EventType::Normal,
+            reasons::MODEL_LOADING,
+            actions::RECONCILE,
+            Some("Resources applied, waiting for model serving readiness".to_string()),
+        )
+        .await;
+    let role_keys: Vec<String> = spec_role_keys(name, &model.spec.roles)
+        .into_iter()
+        .collect();
+    StatusUpdate::new(ModelServingPhase::Loading, cost)
+        .message("Resources applied, waiting for model serving readiness")
+        .observed_generation(*generation)
+        .auto_topology(compiled.auto_topology)
+        .applied_roles(role_keys)
+        .apply(ctx.kube.as_ref(), model, namespace)
+        .await?;
+    Ok(Action::requeue(REQUEUE_LOADING))
+}
+
+/// Loading → wait for ModelServing readiness, transition to Serving / Failed
+/// / stay-Loading. If spec changed mid-load, route back to Pending.
+async fn reconcile_loading(s: &ReconcileScope<'_>) -> Result<Action, ModelError> {
+    let ReconcileScope {
+        model,
+        ctx,
+        name,
+        namespace,
+        generation,
+        serving_name,
+        cost,
+        ..
+    } = s;
+
+    if spec_changed_since_compilation(model.status.as_ref(), *generation) {
+        info!(model = %name, "spec changed during Loading, recompiling");
+        StatusUpdate::new(ModelServingPhase::Pending, cost)
+            .message("Spec changed, recompiling")
+            .apply(ctx.kube.as_ref(), model, namespace)
+            .await?;
+        return Ok(Action::requeue(REQUEUE_RETRY));
+    }
+
+    // No download job gating — init containers naturally block pod startup
+    // until model download completes.
+
+    let (state, conditions) = ctx
+        .kube
+        .check_model_serving_status(serving_name, namespace)
+        .await;
+
+    match state {
+        ModelServingState::Available => {
+            info!(model = %name, "model serving is available");
+            ctx.events
+                .publish(
+                    &model.object_ref(&()),
+                    EventType::Normal,
+                    reasons::MODEL_SERVING,
+                    actions::RECONCILE,
+                    Some("Model is serving inference requests".to_string()),
+                )
+                .await;
+            let mut su = StatusUpdate::new(ModelServingPhase::Serving, cost)
+                .message("Model is serving inference requests")
+                .observed_generation(*generation);
+            if let Some(c) = conditions {
+                su = su.conditions(c);
+            }
+            su.apply(ctx.kube.as_ref(), model, namespace).await?;
+            Ok(Action::requeue(REQUEUE_SERVING))
+        }
+        ModelServingState::Failed => {
+            error!(model = %name, "model serving failed");
+            ctx.events
+                .publish(
+                    &model.object_ref(&()),
+                    EventType::Warning,
+                    reasons::MODEL_FAILED,
+                    actions::RECONCILE,
+                    Some("ModelServing failed".to_string()),
+                )
+                .await;
+            cleanup_graph(model, &ctx.graph, namespace);
+            let mut su = StatusUpdate::new(ModelServingPhase::Failed, cost)
+                .message("ModelServing failed")
+                .observed_generation(*generation);
+            if let Some(c) = conditions {
+                su = su.conditions(c);
+            }
+            su.apply(ctx.kube.as_ref(), model, namespace).await?;
+            // Always requeue as a safety net — watch events can be missed during pod restarts.
+            Ok(Action::requeue(Duration::from_secs(
+                lattice_common::REQUEUE_SUCCESS_SECS,
+            )))
+        }
+        ModelServingState::Progressing => Ok(Action::requeue(REQUEUE_LOADING)),
+    }
+}
+
+/// Serving → on spec change, recompile and re-apply (going back through
+/// Loading). On steady-state, scrape metrics and refresh status.
+async fn reconcile_serving(s: &ReconcileScope<'_>) -> Result<Action, ModelError> {
+    let ReconcileScope {
+        model,
+        ctx,
+        name,
+        namespace,
+        generation,
+        serving_name,
+        cost,
+        pre_applied_roles,
+        compile_ctx,
+        ..
+    } = s;
+
+    let observed = model.status.as_ref().and_then(|s| s.observed_generation);
+    if observed != Some(*generation) {
+        return reconcile_serving_spec_change(s, observed).await;
+    }
+
+    // No spec change — monitor health and scrape metrics
+    let message = "Model is serving inference requests";
+    let conditions = ctx
+        .kube
+        .read_model_serving_conditions(serving_name, namespace)
+        .await;
+
+    let existing_metrics = model.status.as_ref().and_then(|s| s.metrics.as_ref());
+    let metrics = lattice_crd::crd::scrape_metrics(
+        ctx.metrics_scraper.as_ref(),
+        model.spec.observability.as_ref(),
+        namespace,
+        name,
+        existing_metrics,
+    )
+    .await;
+
+    let mut su = StatusUpdate::new(ModelServingPhase::Serving, cost)
+        .message(message)
+        .observed_generation(*generation)
+        .metrics(metrics);
+    if let Some(c) = conditions {
+        su = su.conditions(c);
+    }
+    su.apply(ctx.kube.as_ref(), model, namespace).await?;
+    let _ = (pre_applied_roles, compile_ctx); // bound by destructure for sibling helper
+    Ok(Action::requeue(REQUEUE_SERVING))
+}
+
+/// Serving + spec change branch: recompile, handle role-key churn (which
+/// forces a delete/recreate because Volcano marks min-role-replicas
+/// immutable), then transition back to Loading.
+async fn reconcile_serving_spec_change(
+    s: &ReconcileScope<'_>,
+    observed: Option<i64>,
+) -> Result<Action, ModelError> {
+    let ReconcileScope {
+        model,
+        ctx,
+        name,
+        namespace,
+        generation,
+        cost,
+        pre_applied_roles,
+        compile_ctx,
+        ..
+    } = s;
+
+    info!(model = %name, observed = ?observed, current = generation, "spec changed, re-applying");
+    ctx.events
+        .publish(
+            &model.object_ref(&()),
+            EventType::Normal,
+            reasons::MODEL_SPEC_CHANGED,
+            actions::RECONCILE,
+            Some("Spec changed, recompiling".to_string()),
+        )
+        .await;
+
+    let old_role_keys = pre_applied_roles.clone();
+    let new_role_keys = spec_role_keys(name, &model.spec.roles);
+
+    let compiled = match compile_model(model, compile_ctx).await {
+        Ok(c) => c,
+        Err(e) => {
+            if e.is_retryable() {
+                // Transient — stay in Serving, let error_policy retry
+                let msg = format!("Recompile failed (will retry): {}", e);
+                let mut su = StatusUpdate::new(ModelServingPhase::Serving, cost).message(&msg);
+                if let Some(gen) = observed {
+                    su = su.observed_generation(gen);
+                }
+                let _ = su.apply(ctx.kube.as_ref(), model, namespace).await;
+            } else {
+                // Permanent — go to Failed
+                cleanup_graph(model, &ctx.graph, namespace);
+                let msg = format!("Failed to recompile after spec change: {}", e);
+                let _ = StatusUpdate::new(ModelServingPhase::Failed, cost)
+                    .message(&msg)
+                    .observed_generation(*generation)
+                    .apply(ctx.kube.as_ref(), model, namespace)
+                    .await;
+            }
+            return Err(e);
+        }
+    };
+    register_graph(model, &ctx.graph, namespace);
+
+    // Clean up K8s resources and graph nodes for removed roles
+    ctx.kube
+        .cleanup_removed_roles(name, namespace, &old_role_keys, &new_role_keys, &ctx.graph)
+        .await;
+
+    // When roles are added or removed, the gang policy's minRoleReplicas key
+    // set changes. Volcano marks that field immutable, so an SSA update
+    // would 422. Delete the old ModelServing and requeue — the old PodGroup
+    // and pods need time to be garbage-collected. Applying immediately
+    // would SSA-patch the Terminating resource or create a PodGroup name
+    // collision, leaving decode pods stuck in Pending.
+    //
+    // The status update below persists the new applied_roles so the next
+    // reconcile sees old == new, skips the delete, and falls through to
+    // apply_compiled_model for a clean recreate.
+    if old_role_keys != new_role_keys {
+        ctx.kube.delete_model_serving(name, namespace).await?;
+        // Persist the new role keys so the next reconcile sees old == new
+        // and falls through to apply. Keep the OLD observed_generation so
+        // spec_changed_since_compilation still triggers the recompile path.
+        let role_keys: Vec<String> = new_role_keys.into_iter().collect();
+        let mut su = StatusUpdate::new(ModelServingPhase::Serving, cost).applied_roles(role_keys);
+        if let Some(gen) = observed {
+            su = su.observed_generation(gen);
+        }
+        let _ = su.apply(ctx.kube.as_ref(), model, namespace).await;
+        info!(model = %name, "deleted ModelServing for role change, requeuing for clean recreate");
+        return Ok(Action::requeue(REQUEUE_LOADING));
+    }
+
+    if let Err(e) = ctx
+        .kube
+        .apply_compiled_model(name, namespace, &compiled)
+        .await
+    {
+        // Apply errors are transient — stay in Serving, let error_policy
+        // retry. Keep the old observed_generation so the next reconcile
+        // re-enters this recompile path.
+        let msg = format!("Apply failed after spec change (will retry): {}", e);
+        let mut su = StatusUpdate::new(ModelServingPhase::Serving, cost).message(&msg);
+        if let Some(gen) = observed {
+            su = su.observed_generation(gen);
+        }
+        let _ = su.apply(ctx.kube.as_ref(), model, namespace).await;
+        return Err(e);
+    }
+    // Transition to Loading so the next reconcile checks ModelServing
+    // readiness after the rolling update.
+    let role_keys: Vec<String> = new_role_keys.into_iter().collect();
+    StatusUpdate::new(ModelServingPhase::Loading, cost)
+        .message("Spec changed, reloading")
+        .observed_generation(*generation)
+        .auto_topology(compiled.auto_topology)
+        .applied_roles(role_keys)
+        .apply(ctx.kube.as_ref(), model, namespace)
+        .await?;
+    Ok(Action::requeue(REQUEUE_LOADING))
+}
+
+/// Failed → always retry (transition back to Pending for full
+/// recompilation). Mirrors the service controller behavior where Failed
+/// services fall through to compile_and_apply on every reconcile.
+async fn reconcile_failed(s: &ReconcileScope<'_>) -> Result<Action, ModelError> {
+    info!(model = %s.name, "retrying Failed model");
+    StatusUpdate::new(ModelServingPhase::Pending, &s.cost)
+        .message("Retrying compilation")
+        .apply(s.ctx.kube.as_ref(), s.model, s.namespace)
+        .await?;
+    Ok(Action::requeue(REQUEUE_RETRY))
 }
 
 /// Register all model roles in the service graph for bilateral agreements

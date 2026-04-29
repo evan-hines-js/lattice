@@ -59,10 +59,11 @@ pub async fn ensure_webhook_credentials(
     let api: Api<k8s_openapi::api::core::v1::Secret> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
 
-    // ~2 minutes total at the default backoff schedule — long enough to ride
-    // out the apiserver coming up, short enough that a genuinely broken
-    // cluster surfaces as a real failure instead of an indefinite hang.
-    let retry = RetryConfig::with_max_attempts(8);
+    // Retry indefinitely. A bounded budget here turns transient apiserver
+    // outages (rolls, kube-vip failover, etcd compaction) into operator
+    // CrashLoopBackoff, which compounds the outage. The health server is
+    // already up; the pod will stay alive while we wait.
+    let retry = RetryConfig::install();
 
     // Try to load existing credentials
     let existing = retry_with_backoff(&retry, "get webhook auth secret", || async {

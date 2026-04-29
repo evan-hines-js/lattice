@@ -387,6 +387,7 @@ pub const LATTICE_MANAGED_BY_VALUE: &str = "lattice-operator";
 /// Check if a Kubernetes resource is inherited from a parent cluster.
 ///
 /// Resources with the label `lattice.dev/inherited: true` are considered inherited.
+/// Local resources are simply `!is_inherited_resource(...)`.
 pub fn is_inherited_resource(metadata: &kube::api::ObjectMeta) -> bool {
     metadata
         .labels
@@ -394,12 +395,4 @@ pub fn is_inherited_resource(metadata: &kube::api::ObjectMeta) -> bool {
         .and_then(|l| l.get(INHERITED_LABEL))
         .map(|v| v == "true")
         .unwrap_or(false)
-}
-
-/// Check if a Kubernetes resource is a local resource (not inherited).
-///
-/// Resources without the `lattice.dev/inherited` label or with it set to a value
-/// other than "true" are considered local.
-pub fn is_local_resource(metadata: &kube::api::ObjectMeta) -> bool {
-    !is_inherited_resource(metadata)
 }

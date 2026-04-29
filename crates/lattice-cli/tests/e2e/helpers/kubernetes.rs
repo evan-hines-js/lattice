@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use kube::{
-    api::{Api, PostParams},
+    api::{Api, ListParams, ObjectList, PostParams},
     config::{KubeConfigOptions, Kubeconfig},
     Client,
 };
@@ -85,6 +85,33 @@ where
             api.patch(&name, &params, &patch)
                 .await
                 .map_err(|e| format!("Failed to patch {}: {}", name, e))
+        }
+    })
+    .await
+}
+
+/// List Kubernetes resources with retry on transient errors.
+///
+/// `api.list()` over a long-lived port-forward (or a flapping apiserver
+/// proxy) periodically surfaces `ServiceError: client error (Connect)`
+/// after the kube client times out a stale connection. These are
+/// transient — the next attempt re-resolves the endpoint and succeeds.
+/// Without this wrapper a single connect failure in the middle of a
+/// 10-minute storage test panics the whole phase.
+pub async fn list_with_retry<K>(api: &Api<K>, params: &ListParams) -> Result<ObjectList<K>, String>
+where
+    K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    <K as kube::Resource>::DynamicType: Default,
+{
+    let api = api.clone();
+    let params = params.clone();
+    retry_with_backoff(&RetryConfig::with_max_attempts(60), "list", || {
+        let api = api.clone();
+        let params = params.clone();
+        async move {
+            api.list(&params)
+                .await
+                .map_err(|e| format!("list {}: {}", std::any::type_name::<K>(), e))
         }
     })
     .await

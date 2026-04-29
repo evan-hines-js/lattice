@@ -524,7 +524,26 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         },
     ));
 
-    // Simple provider controllers (all use ControllerContext)
+    spawn_provider_controllers(&ctx);
+    spawn_install_controllers(&ctx);
+
+    wait_for_shutdown_signal().await;
+
+    // Cancel all controllers — each leader_controller loop will release its lease
+    tracing::info!("Cancelling all controllers...");
+    cancel.cancel();
+
+    // Give controllers a moment to release leases gracefully
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    health_handle.abort();
+    tracing::info!("Shutdown complete");
+    Ok(())
+}
+
+/// Spawn every provider-style controller (one Lease each) on the
+/// shared `SpawnContext`.
+fn spawn_provider_controllers(ctx: &controller_runner::SpawnContext) {
     ctx.spawn_provider("dns", lattice_dns_provider::reconcile, "DNSProvider");
     ctx.spawn_provider("cert", lattice_cert_issuer::reconcile, "CertIssuer");
     ctx.spawn_provider("cloud", lattice_cloud_provider::reconcile, "InfraProvider");
@@ -559,6 +578,14 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         lattice_backup::service_backup_controller::reconcile,
         "ServiceBackup",
     );
+}
+
+/// Spawn every `*Install` controller (one Lease each).
+///
+/// All managed-infra installs follow the same `(crate::install::reconcile,
+/// kind label, install_requires())` shape; they're listed here in the
+/// dependency-graph order they're typically declared in.
+fn spawn_install_controllers(ctx: &controller_runner::SpawnContext) {
     ctx.spawn_install(
         "tetragon-install",
         lattice_tetragon::install::reconcile,
@@ -637,34 +664,20 @@ async fn run(prom_registry: Option<prometheus::Registry>) -> anyhow::Result<()> 
         "RookInstall",
         lattice_rook::install::install_requires(),
     );
+}
 
-    // ── Wait for shutdown signal ──
-
-    let shutdown_signal = async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to listen for SIGTERM");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received SIGINT, shutting down");
-            }
-            _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM, shutting down");
-            }
+/// Block until SIGINT/SIGTERM, logging which signal woke us.
+async fn wait_for_shutdown_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to listen for SIGTERM");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received SIGINT, shutting down");
         }
-    };
-
-    shutdown_signal.await;
-
-    // Cancel all controllers — each leader_controller loop will release its lease
-    tracing::info!("Cancelling all controllers...");
-    cancel.cancel();
-
-    // Give controllers a moment to release leases gracefully
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    health_handle.abort();
-    tracing::info!("Shutdown complete");
-    Ok(())
+        _ = sigterm.recv() => {
+            tracing::info!("Received SIGTERM, shutting down");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

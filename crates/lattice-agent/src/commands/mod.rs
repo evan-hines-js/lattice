@@ -76,37 +76,6 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
-    /// Create a new command context with all dependencies.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        cluster_name: String,
-        message_tx: mpsc::Sender<AgentMessage>,
-        agent_state: Arc<RwLock<AgentState>>,
-        watch_registry: Arc<WatchRegistry>,
-        exec_registry: Arc<ExecRegistry>,
-        forwarder: Option<SharedK8sForwarder>,
-        exec_forwarder: Option<SharedExecForwarder>,
-        forwarded_exec_sessions: Arc<Cache<String, StoredExecSession>>,
-        kube_provider: Arc<dyn KubeClientProvider>,
-        peer_routes_hash_tx: PeerRoutesHashSender,
-    ) -> Self {
-        Self {
-            cluster_name,
-            message_tx,
-            agent_state,
-            watch_registry,
-            exec_registry,
-            forwarder,
-            exec_forwarder,
-            forwarded_exec_sessions,
-            kube_provider,
-            pending_lookups: DashMap::new(),
-            peer_routes_hash_tx,
-        }
-    }
-}
-
-impl CommandContext {
     /// Send a service lookup request to the parent and wait for the response.
     ///
     /// Returns `None` if the parent doesn't know about the service or the

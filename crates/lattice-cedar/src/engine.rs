@@ -27,7 +27,7 @@ use tokio::sync::watch;
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
-use lattice_common::is_local_resource;
+use lattice_common::is_inherited_resource;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::CedarPolicy;
 
@@ -480,7 +480,7 @@ impl PolicyEngine {
         let (mut inherited, mut local): (Vec<_>, Vec<_>) = all
             .items
             .into_iter()
-            .partition(|p| !is_local_resource(&p.metadata));
+            .partition(|p| is_inherited_resource(&p.metadata));
 
         let mut policy_set = PolicySet::new();
         let mut loaded = 0;

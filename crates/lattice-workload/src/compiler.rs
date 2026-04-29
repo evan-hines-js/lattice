@@ -26,6 +26,21 @@ use crate::pipeline::eso_templated::compile_eso_templated_env_vars;
 use crate::pipeline::volumes::VolumeCompiler;
 use crate::pipeline::{env, files, pod_template::PodTemplateCompiler, secrets::SecretsCompiler};
 
+/// Per-container file-compilation outputs accumulated across the workload.
+///
+/// `collect_compiled_files` folds outputs from every container + sidecar
+/// into one of these. Owned by the caller of `collect_compiled_files`
+/// so that `compile()` can finally hand the contents off to
+/// `CompiledConfig` / `PodTemplateCompiler`.
+#[derive(Default)]
+struct FileAccumulators {
+    config_maps: Vec<crate::k8s::ConfigMap>,
+    secrets: Vec<crate::k8s::Secret>,
+    external_secrets: Vec<lattice_secret_provider::eso::ExternalSecret>,
+    per_container_volumes: BTreeMap<String, Vec<crate::k8s::Volume>>,
+    per_container_mounts: BTreeMap<String, Vec<crate::k8s::VolumeMount>>,
+}
+
 /// Orchestrates compilation of a `WorkloadSpec` into Kubernetes resources.
 ///
 /// Uses a builder pattern for optional features:
@@ -353,19 +368,14 @@ impl<'a> WorkloadCompiler<'a> {
         Ok(())
     }
 
-    /// Compile files for a container/sidecar and collect outputs into the accumulator vecs.
-    #[allow(clippy::too_many_arguments)]
+    /// Compile files for a container/sidecar and collect outputs into `files`.
     fn collect_compiled_files(
         service_name: &str,
         container_name: &str,
         namespace: &str,
         rendered_files: &BTreeMap<String, lattice_render::RenderedFile>,
         secret_refs: &BTreeMap<String, crate::pipeline::secrets::SecretRef>,
-        files_config_maps: &mut Vec<crate::k8s::ConfigMap>,
-        files_secrets: &mut Vec<crate::k8s::Secret>,
-        file_external_secrets: &mut Vec<lattice_secret_provider::eso::ExternalSecret>,
-        per_container_file_volumes: &mut BTreeMap<String, Vec<crate::k8s::Volume>>,
-        per_container_file_mounts: &mut BTreeMap<String, Vec<crate::k8s::VolumeMount>>,
+        files: &mut FileAccumulators,
     ) -> Result<(), CompilationError> {
         let compiled = files::compile(
             service_name,
@@ -376,14 +386,20 @@ impl<'a> WorkloadCompiler<'a> {
         )?;
 
         if let Some(cm) = compiled.config_map {
-            files_config_maps.push(cm);
+            files.config_maps.push(cm);
         }
         if let Some(secret) = compiled.secret {
-            files_secrets.push(secret);
+            files.secrets.push(secret);
         }
-        file_external_secrets.extend(compiled.file_external_secrets);
-        per_container_file_volumes.insert(container_name.to_string(), compiled.volumes);
-        per_container_file_mounts.insert(container_name.to_string(), compiled.volume_mounts);
+        files
+            .external_secrets
+            .extend(compiled.file_external_secrets);
+        files
+            .per_container_volumes
+            .insert(container_name.to_string(), compiled.volumes);
+        files
+            .per_container_mounts
+            .insert(container_name.to_string(), compiled.volume_mounts);
         Ok(())
     }
 
@@ -499,12 +515,8 @@ impl<'a> WorkloadCompiler<'a> {
         // Compile env vars and files per container
         let mut env_config_maps = Vec::new();
         let mut env_secrets = Vec::new();
-        let mut files_config_maps = Vec::new();
-        let mut files_secrets = Vec::new();
-        let mut file_external_secrets = Vec::new();
         let mut per_container_env_from = BTreeMap::new();
-        let mut per_container_file_volumes = BTreeMap::new();
-        let mut per_container_file_mounts = BTreeMap::new();
+        let mut files = FileAccumulators::default();
 
         for (container_name, rendered) in &rendered_containers {
             // Compile non-secret env vars
@@ -531,7 +543,7 @@ impl<'a> WorkloadCompiler<'a> {
                     &rendered.eso_templated_variables,
                     &compiled_secrets.secret_refs,
                 )?;
-                file_external_secrets.extend(eso_secrets);
+                files.external_secrets.extend(eso_secrets);
                 container_env_from.extend(eso_env_from);
             }
 
@@ -566,11 +578,7 @@ impl<'a> WorkloadCompiler<'a> {
                 self.namespace,
                 &rendered.files,
                 &compiled_secrets.secret_refs,
-                &mut files_config_maps,
-                &mut files_secrets,
-                &mut file_external_secrets,
-                &mut per_container_file_volumes,
-                &mut per_container_file_mounts,
+                &mut files,
             )?;
         }
 
@@ -592,11 +600,7 @@ impl<'a> WorkloadCompiler<'a> {
                 self.namespace,
                 &rendered_files,
                 &compiled_secrets.secret_refs,
-                &mut files_config_maps,
-                &mut files_secrets,
-                &mut file_external_secrets,
-                &mut per_container_file_volumes,
-                &mut per_container_file_mounts,
+                &mut files,
             )?;
         }
 
@@ -634,8 +638,8 @@ impl<'a> WorkloadCompiler<'a> {
             secret_refs: &compiled_secrets.secret_refs,
             rendered_containers: &rendered_containers,
             per_container_env_from: &per_container_env_from,
-            per_container_file_volumes: &per_container_file_volumes,
-            per_container_file_mounts: &per_container_file_mounts,
+            per_container_file_volumes: &files.per_container_volumes,
+            per_container_file_mounts: &files.per_container_mounts,
         };
 
         let mut pod_template = PodTemplateCompiler::compile(
@@ -682,7 +686,7 @@ impl<'a> WorkloadCompiler<'a> {
 
         // Assemble config and compute hash
         let mut all_external_secrets = compiled_secrets.external_secrets;
-        all_external_secrets.extend(file_external_secrets);
+        all_external_secrets.extend(files.external_secrets);
 
         // Inject ImageProvider credentials for imagePullSecrets (runs after
         // Cedar authorization — these are platform-level, not user secrets).
@@ -741,8 +745,8 @@ impl<'a> WorkloadCompiler<'a> {
         let config = CompiledConfig {
             env_config_maps,
             env_secrets,
-            files_config_maps,
-            files_secrets,
+            files_config_maps: files.config_maps,
+            files_secrets: files.secrets,
             pvcs: compiled_volumes.pvcs,
             external_secrets: all_external_secrets,
             secret_refs: compiled_secrets.secret_refs,

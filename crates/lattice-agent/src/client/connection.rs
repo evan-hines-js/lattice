@@ -357,20 +357,22 @@ impl AgentClient {
         let watch_registry = self.watch_registry.clone();
         let exec_registry = self.exec_registry.clone();
 
-        let command_ctx = CommandContext::new(
-            self.config.cluster_name.clone(),
-            self.message_tx
+        let command_ctx = CommandContext {
+            cluster_name: self.config.cluster_name.clone(),
+            message_tx: self
+                .message_tx
                 .clone()
                 .expect("message_tx set before spawn"),
-            agent_state.clone(),
-            watch_registry.clone(),
-            exec_registry.clone(),
-            self.forwarder.clone(),
-            self.exec_forwarder.clone(),
-            self.forwarded_exec_sessions.clone(),
-            self.kube_provider.clone(),
-            self.peer_routes_hash_tx.clone(),
-        );
+            agent_state: agent_state.clone(),
+            watch_registry: watch_registry.clone(),
+            exec_registry: exec_registry.clone(),
+            forwarder: self.forwarder.clone(),
+            exec_forwarder: self.exec_forwarder.clone(),
+            forwarded_exec_sessions: self.forwarded_exec_sessions.clone(),
+            kube_provider: self.kube_provider.clone(),
+            pending_lookups: dashmap::DashMap::new(),
+            peer_routes_hash_tx: self.peer_routes_hash_tx.clone(),
+        };
 
         self.command_handler_handle = Some(tokio::spawn(async move {
             loop {

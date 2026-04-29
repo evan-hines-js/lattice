@@ -16,7 +16,7 @@ use kube::{Api, Client};
 use tracing::{debug, info};
 
 use crate::error::{Error, Result};
-use lattice_common::is_local_resource;
+use lattice_common::is_inherited_resource;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::OIDCProvider;
 
@@ -34,10 +34,10 @@ pub async fn from_crd(client: &Client) -> Result<OidcValidator> {
     let mut inherited: Option<OIDCProvider> = None;
     let mut local: Option<OIDCProvider> = None;
     for provider in all_providers.items {
-        if is_local_resource(&provider.metadata) {
-            local.get_or_insert(provider);
-        } else {
+        if is_inherited_resource(&provider.metadata) {
             inherited.get_or_insert(provider);
+        } else {
+            local.get_or_insert(provider);
         }
     }
 
