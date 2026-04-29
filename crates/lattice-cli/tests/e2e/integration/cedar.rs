@@ -173,29 +173,50 @@ pub async fn apply_e2e_default_policy(kubeconfig: &str) -> Result<(), String> {
 // Verification Functions
 // =============================================================================
 
-/// Verify SA has access to the proxy (expects 200 OK)
+/// Verify SA has access to the proxy (expects 200 OK).
 ///
-/// Uses retry logic to handle transient failures from chaos testing.
+/// Polls because Cedar policy propagation isn't synchronous: we just
+/// applied a `permit` CedarPolicy, but the proxy's Cedar evaluator picks
+/// it up via an informer watch and recompiles. During that window the
+/// evaluator answers "no permit found" → HTTP 403 — a *transient* 4xx
+/// that `http_get_with_retry` (correctly for permission tests)
+/// classifies as permanent. We treat 403 as "still propagating, keep
+/// polling" up to the budget; any other non-2xx is propagated up.
 async fn verify_sa_access_allowed(
     proxy_url: &str,
     token: &str,
     cluster_name: &str,
 ) -> Result<(), String> {
     let url = format!("{}/clusters/{}/api/v1/namespaces", proxy_url, cluster_name);
-    let response = http_get_with_retry(&url, token, 10).await?;
-
-    if response.is_success() {
-        info!(
-            "[Integration/Cedar] Access allowed as expected (HTTP {})",
-            response.status_code
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "Expected HTTP 200, got {} for allowed SA at {}",
-            response.status_code, url
-        ))
-    }
+    wait_for_condition(
+        "allowed SA reaches HTTP 200 through proxy",
+        Duration::from_secs(60),
+        Duration::from_secs(2),
+        || {
+            let url = url.clone();
+            let token = token.to_string();
+            async move {
+                let response = http_get_with_retry(&url, &token, 10).await?;
+                if response.is_success() {
+                    info!(
+                        "[Integration/Cedar] Access allowed as expected (HTTP {})",
+                        response.status_code
+                    );
+                    return Ok(true);
+                }
+                if response.is_forbidden() {
+                    // Cedar reload still in flight; poll again.
+                    return Ok(false);
+                }
+                Err(format!(
+                    "Expected HTTP 200 (or transient 403 during Cedar reload), got {} for allowed SA at {}",
+                    response.status_code, url
+                ))
+            }
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Verify SA is denied access to the proxy (expects 403 Forbidden)

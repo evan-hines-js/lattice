@@ -444,29 +444,37 @@ where
 
     // ── Webhook-precondition gate ──
     //
-    // If this install owns an admission webhook, refuse to apply CRs until
-    // the webhook Service has Ready Endpoints. Without this, the operator's
-    // own freshly-applied CRs each round-trip through an unreachable webhook
-    // and fail with `no endpoints available` 500s — dozens per reconcile.
-    if let Some((ns, svc)) = webhook_service {
-        let ready = endpoints_ready(&ctx.client, ns, svc)
-            .await
-            .map_err(|e| ReconcileError::Internal(e.to_string()))?;
-        if !ready {
-            info!(install = %name, kind = %log_kind, webhook = %format!("{ns}/{svc}"),
-                  "install gated on webhook Service Endpoints");
-            write_with_td(
-                &ctx.client,
-                install_ref,
-                field_manager,
-                StatusUpdate::pending(format!(
-                    "waiting for admission webhook {ns}/{svc} endpoints"
-                ))
-                .with_condition(requires_cond),
-                td,
-            )
-            .await?;
-            return Ok(Action::requeue(Duration::from_secs(15)));
+    // Skip on the very first install: when `observed_version` is unset, the
+    // webhook Service can't possibly exist — its own manifests haven't been
+    // applied yet. Gating here would deadlock self-hosted webhooks (Istio's
+    // istiod, etc.). On subsequent reconciles, refuse to re-apply CRs until
+    // the webhook has Ready Endpoints, so we don't pile up `no endpoints
+    // available` 500s from the webhook gating its own CRs mid-rollout.
+    let already_installed = install
+        .install_status()
+        .and_then(|s| s.observed_version.as_deref())
+        .is_some();
+    if already_installed {
+        if let Some((ns, svc)) = webhook_service {
+            let ready = endpoints_ready(&ctx.client, ns, svc)
+                .await
+                .map_err(|e| ReconcileError::Internal(e.to_string()))?;
+            if !ready {
+                info!(install = %name, kind = %log_kind, webhook = %format!("{ns}/{svc}"),
+                      "install gated on webhook Service Endpoints");
+                write_with_td(
+                    &ctx.client,
+                    install_ref,
+                    field_manager,
+                    StatusUpdate::pending(format!(
+                        "waiting for admission webhook {ns}/{svc} endpoints"
+                    ))
+                    .with_condition(requires_cond),
+                    td,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(15)));
+            }
         }
     }
 

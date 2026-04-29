@@ -27,8 +27,19 @@ use tracing::info;
 
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_namespace, list_with_retry,
-    run_kubectl, wait_for_condition, wait_for_pod_running, DEFAULT_TIMEOUT, POLL_INTERVAL,
+    run_kubectl, wait_for_condition, wait_for_pod_running, POLL_INTERVAL,
 };
+
+/// Wait budget for the post-Rook-Ready PVC drain.
+///
+/// The CSI external-provisioner's exponential-backoff retry caps at
+/// roughly 5 minutes per claim, so a Pending PVC stuck behind an
+/// "infeasible" failure naturally re-enters its work queue within that
+/// window once Rook has finished writing `rook-ceph-csi-config`. 15
+/// minutes gives ~3x headroom over that natural reconcile so the test
+/// only fails when something is genuinely broken, not when Rook + CSI
+/// just need a bit longer to settle.
+const PVC_DRAIN_TIMEOUT: Duration = Duration::from_secs(900);
 
 const NAMESPACE: &str = "storage-test";
 const PVC_NAME: &str = "storage-test-pvc";
@@ -252,7 +263,7 @@ async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
 
     wait_for_condition(
         "all PVCs to leave Pending after nudge",
-        DEFAULT_TIMEOUT,
+        PVC_DRAIN_TIMEOUT,
         POLL_INTERVAL,
         || {
             let pvc_api = pvc_api.clone();

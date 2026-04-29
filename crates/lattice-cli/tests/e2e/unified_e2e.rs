@@ -61,6 +61,15 @@ use super::integration::{self, setup};
 
 const E2E_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// `LATTICE_E2E_KEEP=1` skips every teardown phase so the user can
+/// re-run `cargo test --ignored test_*_standalone` against the same
+/// fixture without paying the 20-minute provisioning cost each time.
+fn keep_clusters() -> bool {
+    std::env::var("LATTICE_E2E_KEEP")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn test_configurable_provider_pivot() {
     init_e2e_test();
@@ -507,8 +516,9 @@ async fn run_full_e2e() -> Result<(), String> {
         ));
     }
 
-    // Workload2 deletion (if exists) — pause chaos first to avoid log spam
-    if ctx.has_workload2() {
+    // Workload2 deletion (if exists) — pause chaos first to avoid log spam.
+    // Skipped when `LATTICE_E2E_KEEP=1`: see the Phase 8 comment for why.
+    if ctx.has_workload2() && !keep_clusters() {
         setup_result.pause_chaos_on_cluster(WORKLOAD2_CLUSTER_NAME);
         let child_kc = ctx.require_workload2()?.to_string();
         let parent_kc = ctx.require_workload()?.to_string();
@@ -544,6 +554,22 @@ async fn run_full_e2e() -> Result<(), String> {
     // =========================================================================
     // Phase 8: Delete workload (unpivot to mgmt)
     // =========================================================================
+    // `LATTICE_E2E_KEEP=1` short-circuits all teardown phases (workload
+    // unpivot, recreate, parent-initiated delete, mgmt teardown). The
+    // suite leaves clusters running so the user can re-target the same
+    // fixture with `cargo test --ignored test_*_standalone` and skip the
+    // 20-minute startup. Kubeconfigs are already on disk from the
+    // setup-phase `write_resolved_kubeconfigs` call.
+    if keep_clusters() {
+        info!(
+            "[Phase 8+] LATTICE_E2E_KEEP=1: skipping workload/mgmt teardown — \
+             clusters left running for repeated standalone test runs"
+        );
+        setup_result.stop_chaos().await;
+        info!("E2E test complete: setup + integration phases passed (teardown skipped)");
+        return Ok(());
+    }
+
     // Resume chaos on mgmt cluster for deletion/unpivot testing
     setup_result.resume_chaos_on_cluster(MGMT_CLUSTER_NAME, &ctx.mgmt_kubeconfig, None);
     setup_result.restart_chaos();

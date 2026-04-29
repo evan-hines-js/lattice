@@ -86,14 +86,14 @@ spec:
         type: service
         direction: inbound
   replicas: 1
+  advertise:
+    allowedServices: ["*"]
   ingress:
     gatewayClass: istio
     routes:
       public:
         hosts:
           - jellyfin.home.arpa
-        advertise:
-          allowedServices: ["*"]
         tls:
           issuerRef:
             name: homelab-selfsigned

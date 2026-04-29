@@ -649,8 +649,12 @@ async fn apply_resource(
 /// Serialize a batch of CRD-backed resources into (name, kind, json, ApiResource) tuples.
 ///
 /// Resolves the CRD from the registry on demand. Returns immediately if the resource
-/// list is empty (no registry call, no warnings). Returns an error if resources need
-/// applying but the CRD is not installed.
+/// list is empty (no registry call, no warnings). When the CRD is not yet installed,
+/// logs a warning and skips this batch — the reconcile will requeue and reapply once
+/// the CRD becomes available. Skipping is essential during cluster bootstrap: e.g.
+/// the operator's own CiliumNetworkPolicy must apply even before istio's
+/// AuthorizationPolicy CRD lands, otherwise the operator pod is locked out of egress
+/// by the cluster-wide default-deny policy and never finishes provisioning.
 async fn serialize_crd_batch<T: serde::Serialize>(
     items: &mut Vec<(
         String,
@@ -668,12 +672,14 @@ async fn serialize_crd_batch<T: serde::Serialize>(
     }
 
     let kind = crd_kind.kind_str();
-    let ar = registry.resolve(crd_kind).await?.ok_or_else(|| {
-        ReconcileError::Internal(format!(
-            "{kind} CRD not installed but {} resources need applying",
-            resources.len()
-        ))
-    })?;
+    let Some(ar) = registry.resolve(crd_kind).await? else {
+        warn!(
+            kind = %kind,
+            count = resources.len(),
+            "CRD not installed yet, skipping batch (will retry on requeue)"
+        );
+        return Ok(());
+    };
 
     for resource in resources {
         let mut json = serde_json::to_value(resource)

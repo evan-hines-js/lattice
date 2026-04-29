@@ -204,14 +204,14 @@ spec:
           cpu: 500m
           memory: 256Mi
   replicas: 1
+  advertise:
+    allowedServices: ["*"]
   ingress:
     gatewayClass: istio
     routes:
       public:
         hosts:
           - nzbget.home.arpa
-        advertise:
-          allowedServices: ["*"]
         tls:
           issuerRef:
             name: homelab-selfsigned

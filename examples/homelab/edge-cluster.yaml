@@ -32,6 +32,13 @@ spec:
   nodes:
     controlPlane:
       replicas: 1
+      # Soft pin to the enterprise-PLP-SSD host so etcd's fsync hits
+      # the fast path. Falls back if tier=fast has no capacity.
+      placement:
+        prefers:
+          - key: tier
+            value: fast
+            weight: 100
       instanceType:
         cores: 8
         memoryGib: 16
@@ -39,6 +46,13 @@ spec:
     workerPools:
       default:
         replicas: 2
+        # Workers prefer the cheaper-disk host so the CP host doesn't
+        # get crowded out under churn.
+        placement:
+          prefers:
+            - key: tier
+              value: slow
+              weight: 100
         instanceType:
           cores: 8
           memoryGib: 32

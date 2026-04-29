@@ -30,7 +30,7 @@ pub async fn reconcile(
     install: Arc<CiliumInstall>,
     ctx: Arc<ControllerContext>,
 ) -> Result<Action, ReconcileError> {
-    let local_cluster = load_local_cluster(&ctx.client).await?;
+    let local_cluster = load_local_cluster(&ctx.client, &ctx.config).await?;
     // Single source: read the canonical apiserver endpoint off the local
     // LatticeCluster's status. The cluster controller's
     // `refresh_status_endpoint` writes it from the CAPI Cluster CR (or
@@ -95,20 +95,38 @@ pub async fn reconcile(
     .await
 }
 
-/// Read the singleton local `LatticeCluster` CR that describes this
-/// cluster. The cilium reconciler needs both its `status.endpoint`
-/// (canonical apiserver address for `k8sServiceHost`) and its
+/// Read the local `LatticeCluster` CR that describes this cluster.
+///
+/// Looks up by `LATTICE_CLUSTER_NAME` rather than `Api::all().next()`.
+/// A cell hosts sibling LatticeCluster CRs for every child it tracks;
+/// `.list().next()` picks whichever sorts first, which on at least one
+/// edge cell rendered Cilium with the *backend* cluster's
+/// `status.endpoint` (a 172.20.0.1 kind/Docker apiserver IP), breaking
+/// worker-pod auth on the local apiserver.
+///
+/// The cilium reconciler needs both `status.endpoint` (canonical
+/// apiserver address for `k8sServiceHost`) and
 /// `spec.provider.kubernetes.cluster_network.pod_cidr` (which must
 /// exactly match Cilium's `ipv4NativeRoutingCIDR`).
-async fn load_local_cluster(client: &Client) -> Result<LatticeCluster, ReconcileError> {
-    let api: Api<LatticeCluster> = Api::all(client.clone());
-    let list = api
-        .list(&Default::default())
-        .await
-        .map_err(|e| ReconcileError::Validation(format!("list LatticeCluster: {e}")))?;
-    list.items.into_iter().next().ok_or_else(|| {
+async fn load_local_cluster(
+    client: &Client,
+    config: &lattice_common::SharedConfig,
+) -> Result<LatticeCluster, ReconcileError> {
+    let cluster_name = config.cluster_name.as_deref().ok_or_else(|| {
         ReconcileError::Validation(
-            "no LatticeCluster CR found; Cilium install cannot proceed".to_string(),
+            "LATTICE_CLUSTER_NAME must be set so Cilium installs against the right cluster"
+                .to_string(),
         )
-    })
+    })?;
+    let api: Api<LatticeCluster> = Api::all(client.clone());
+    api.get_opt(cluster_name)
+        .await
+        .map_err(|e| {
+            ReconcileError::Validation(format!("get LatticeCluster '{cluster_name}': {e}"))
+        })?
+        .ok_or_else(|| {
+            ReconcileError::Validation(format!(
+                "LatticeCluster '{cluster_name}' not found; Cilium install cannot proceed"
+            ))
+        })
 }

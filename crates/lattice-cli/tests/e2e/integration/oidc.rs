@@ -290,31 +290,27 @@ roleRef:
         .await;
     }
 
-    // Wait for the OIDC validator to reload and the admin token to be accepted.
-    //    Polls until the proxy returns 200 for the admin OIDC token, which confirms
-    //    both the OIDCProvider watcher has reloaded and the Cedar policy is active.
+    // Hit the proxy with the admin token, letting `http_get_with_retry`
+    // ride out 5xx/connection blips while the OIDCProvider watcher
+    // reloads and the Cedar policy propagates. A success here confirms
+    // both. The earlier `wait_for_condition` wrapper around this call
+    // double-nested the retry budget — the inner backoff schedule blew
+    // past the outer 30s gate on the first attempt and the test never
+    // got a real second poll.
     info!("[Integration/OIDC] Testing admin access (should be allowed)...");
     let url = format!(
         "{}/clusters/{}/api/v1/namespaces",
         proxy_url, child_cluster_name
     );
-    let admin_url = url.clone();
-    let admin_token_owned = admin_token.clone();
-    wait_for_condition(
-        "OIDC admin token accepted by proxy",
-        Duration::from_secs(30),
-        Duration::from_secs(2),
-        || {
-            let url = admin_url.clone();
-            let token = admin_token_owned.clone();
-            async move {
-                let response = http_get_with_retry(&url, &token, 1).await?;
-                Ok(response.is_success())
-            }
-        },
-    )
-    .await
-    .map_err(|e| format!("Expected admin OIDC access to succeed, but it never did: {e}"))?;
+    let response = http_get_with_retry(&url, &admin_token, 10)
+        .await
+        .map_err(|e| format!("Expected admin OIDC access to succeed, but it never did: {e}"))?;
+    if !response.is_success() {
+        return Err(format!(
+            "Expected admin OIDC access to succeed, got HTTP {} - {}",
+            response.status_code, response.body
+        ));
+    }
     info!("[Integration/OIDC] Admin access allowed as expected");
 
     // Verify viewer OIDC token is denied (not in lattice-admins group)

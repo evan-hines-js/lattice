@@ -33,8 +33,8 @@ use crate::resources::{distributable_resources_to_proto, fetch_distributable_res
 use crate::server::AgentServer;
 use lattice_common::DistributableResources;
 use lattice_common::{
-    lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY,
-    CELL_INTERNAL_SERVICE_NAME, CELL_SERVICE_NAME,
+    lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_INTERNAL_SERVICE_NAME,
+    CELL_SERVICE_NAME,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{

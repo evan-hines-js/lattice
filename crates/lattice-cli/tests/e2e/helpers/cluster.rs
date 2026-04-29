@@ -695,18 +695,38 @@ pub fn load_cluster_config(env_var: &str, default_fixture: &str) -> Result<Clust
         }
     }
 
-    let cluster =
+    let mut cluster =
         cluster.ok_or_else(|| format!("No LatticeCluster document found in {}", path.display()))?;
 
+    // `LATTICE_E2E_STORAGE` is the single switch that gates Rook end to
+    // end: it controls whether the storage integration test runs AND
+    // whether the operator installs Rook for this fixture. Without this
+    // override the fixture's `storage: true` would still deploy Rook
+    // (and provision Pending PVCs against `rook-ceph-block`) on a run
+    // that asked to skip storage entirely.
+    if !storage_e2e_enabled() {
+        cluster.spec.storage = false;
+    }
+
     info!(
-        "Loaded cluster config: {} ({} pre-cluster doc(s))",
+        "Loaded cluster config: {} ({} pre-cluster doc(s), spec.storage={})",
         path.display(),
-        other_docs.len()
+        other_docs.len(),
+        cluster.spec.storage,
     );
     Ok(ClusterBundle {
         cluster,
         other_docs,
     })
+}
+
+/// Mirror of `integration::storage::storage_tests_enabled`, kept here to
+/// avoid a `helpers -> integration` import cycle. Default-off so a fresh
+/// fixture run doesn't auto-install Rook unless the harness opts in.
+fn storage_e2e_enabled() -> bool {
+    std::env::var("LATTICE_E2E_STORAGE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false)
 }
 
 /// Load any deserializable K8s resource from a YAML fixture file in the services directory.

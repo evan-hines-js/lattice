@@ -33,6 +33,13 @@ spec:
   nodes:
     controlPlane:
       replicas: 1
+      # Soft pin to the enterprise-PLP-SSD host so etcd's fsync hits
+      # the fast path. Falls back if tier=fast has no capacity.
+      placement:
+        prefers:
+          - key: tier
+            value: fast
+            weight: 100
       instanceType:
         cores: 8
         memoryGib: 32
@@ -40,12 +47,19 @@ spec:
     workerPools:
       default:
         replicas: 3
+        # Workers prefer the cheaper-disk host so the CP host doesn't
+        # get crowded out under churn.
+        placement:
+          prefers:
+            - key: tier
+              value: slow
+              weight: 100
         instanceType:
           cores: 12
           memoryGib: 64
           diskGib: 250
-          # 250 GiB raw block device per worker, presented as /dev/vdc
+          # 175 GiB raw block device per worker, presented as /dev/vdc
           # by Basis. Rook's CephCluster claims it via the deviceFilter
           # `^vd[c-z]$`, so each worker contributes one OSD.
-          dataDiskGibs: [250]
+          dataDiskGibs: [175]
   services: true

@@ -95,14 +95,14 @@ spec:
         type: service
         direction: outbound
   replicas: 1
+  advertise:
+    allowedServices: ["*"]
   ingress:
     gatewayClass: istio
     routes:
       public:
         hosts:
           - sonarr.home.arpa
-        advertise:
-          allowedServices: ["*"]
         tls:
           issuerRef:
             name: homelab-selfsigned
