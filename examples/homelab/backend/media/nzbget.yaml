@@ -84,7 +84,7 @@ spec:
     permit(
       principal == Lattice::Service::"media/nzbget",
       action == Lattice::Action::"AccessExternalEndpoint",
-      resource == Lattice::ExternalEndpoint::"79.127.187.156:51820"
+      resource == Lattice::ExternalEndpoint::"192.144.21.2:51820"
     );
 ---
 apiVersion: lattice.dev/v1alpha1
@@ -148,7 +148,7 @@ spec:
         direction: outbound
         params:
           endpoints:
-            wireguard: udp://79.127.187.156:51820
+            wireguard: udp://192.144.21.2:51820
       sonarr:
         type: service
         direction: inbound

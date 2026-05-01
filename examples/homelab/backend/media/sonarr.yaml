@@ -19,7 +19,27 @@ spec:
     permit(
       principal == Lattice::Service::"media/sonarr",
       action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:CHOWN"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:DAC_OVERRIDE"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:FOWNER"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
       resource == Lattice::SecurityOverride::"runAsRoot"
+    );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
     );
     permit(
       principal == Lattice::Service::"media/sonarr",
@@ -44,8 +64,9 @@ spec:
         image: docker.io/linuxserver/sonarr:latest
         security:
           runAsUser: 0
+          readOnlyRootFilesystem: false
           apparmorProfile: Unconfined
-          capabilities: [SETUID, SETGID]
+          capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
           allowedBinaries: ["*"]
         variables:
           PUID: "1000"

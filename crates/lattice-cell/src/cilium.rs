@@ -27,7 +27,17 @@ pub(crate) enum CiliumRenderError {
 /// it gratuitous-ARP for them on every node interface so the IPs are
 /// reachable on the cluster's L2 segment.
 pub(crate) fn generate_l2_lb_resources(cidr: &str) -> Result<Vec<String>, CiliumRenderError> {
-    Ok(vec![generate_ip_pool_l2(cidr)?, generate_l2_policy()?])
+    Ok(vec![generate_ip_pool(cidr)?, generate_l2_policy()?])
+}
+
+/// Just the pool — the CiliumBGPClusterConfig + CiliumBGPAdvertisement
+/// CRDs that name the cell's route reflector and select this pool live
+/// in `basis-capi-provider`, since they need the reflector address +
+/// ASN that only basis knows. Lattice's bootstrap bundle stops at the
+/// pool because emitting BGP CRDs here would require leaking
+/// reflector/ASN into the LatticeCluster surface.
+pub(crate) fn generate_bgp_lb_pool(cidr: &str) -> Result<Vec<String>, CiliumRenderError> {
+    Ok(vec![generate_ip_pool(cidr)?])
 }
 
 /// Convert a CIDR (operator-friendly) into an inclusive host range
@@ -36,7 +46,11 @@ pub(crate) fn generate_l2_lb_resources(cidr: &str) -> Result<Vec<String>, Cilium
 /// /28 means LBIPAM hands out `.0` and `.15`, neither of which any
 /// upstream device will accept. `start`/`stop` lets us narrow to
 /// `[network+1, broadcast-1]`. /32 is a single host (start==stop).
-fn generate_ip_pool_l2(cidr: &str) -> Result<String, CiliumRenderError> {
+///
+/// The pool is mode-agnostic — same shape whether the LB IPs end up
+/// gARP'd by L2-announce or BGP-announced. The advertisement CRDs
+/// differ; the pool itself is just IPAM input.
+fn generate_ip_pool(cidr: &str) -> Result<String, CiliumRenderError> {
     let net: ipnet::Ipv4Net = cidr.parse().map_err(|e: ipnet::AddrParseError| {
         CiliumRenderError::InvalidCidr(cidr.into(), e.to_string())
     })?;
@@ -151,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_l2_pool_single_host_for_slash_32() {
-        let json = generate_ip_pool_l2("172.18.255.1/32").unwrap();
+        let json = generate_ip_pool("172.18.255.1/32").unwrap();
         assert!(json.contains(r#""kind":"CiliumLoadBalancerIPPool""#));
         assert!(json.contains(r#""start":"172.18.255.1""#));
         assert!(json.contains(r#""stop":"172.18.255.1""#));
@@ -161,7 +175,7 @@ mod tests {
     #[test]
     fn test_l2_pool_skips_network_and_broadcast_for_slash_28() {
         // /28 = 16 addrs; usable = .1..=.14 inside .0/28.
-        let json = generate_ip_pool_l2("10.0.0.208/28").unwrap();
+        let json = generate_ip_pool("10.0.0.208/28").unwrap();
         assert!(json.contains(r#""start":"10.0.0.209""#));
         assert!(json.contains(r#""stop":"10.0.0.222""#));
         // Network + broadcast must NOT leak as cidr/start/stop.
@@ -189,7 +203,7 @@ mod tests {
 
     #[test]
     fn test_l2_pool_rejects_garbage_cidr() {
-        let err = generate_ip_pool_l2("not-a-cidr").unwrap_err();
+        let err = generate_ip_pool("not-a-cidr").unwrap_err();
         match err {
             CiliumRenderError::InvalidCidr(input, _) => assert_eq!(input, "not-a-cidr"),
             other => panic!("expected InvalidCidr, got {other:?}"),

@@ -143,7 +143,11 @@ pub struct InstallStatus {
     pub observed_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Serialized even when `None` (as JSON `null`) so the merge-patch
+    /// status write actually clears a stale message left by a prior
+    /// failed reconcile — `skip_serializing_if` would otherwise omit
+    /// the field and merge-patch would preserve the old value.
+    #[serde(default)]
     pub message: Option<String>,
     /// Istio-specific: trust domain currently in use (derived from `lattice-ca`).
     /// Other controllers leave this `None`.
@@ -233,7 +237,9 @@ pub struct UpgradeAttempt {
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<UpgradeOutcome>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Serialized even when `None` (as JSON `null`) so a Succeeded retry
+    /// clears the prior attempt's reason under merge-patch semantics.
+    #[serde(default)]
     pub failure_reason: Option<String>,
 }
 
@@ -418,6 +424,36 @@ mod tests {
         assert_eq!(
             failed.failure_reason.as_deref(),
             Some("readiness gate failed"),
+        );
+    }
+
+    #[test]
+    fn ready_status_serializes_message_as_null() {
+        // Status is patched onto the apiserver as JSON merge-patch. Under
+        // RFC 7396 a key omitted from the patch is preserved on the server,
+        // so a stale `message` from a prior failed reconcile would survive
+        // the failed → ready transition unless we send an explicit JSON
+        // `null`. Pin the wire format here.
+        let ready = InstallStatus {
+            phase: InstallPhase::Ready,
+            observed_version: Some("1.19.4".into()),
+            target_version: Some("1.19.4".into()),
+            message: None,
+            last_upgrade: Some(UpgradeAttempt {
+                from_version: None,
+                to_version: "1.19.4".into(),
+                started_at: Some("2026-04-30T12:35:41Z".into()),
+                completed_at: Some("2026-04-30T12:49:06Z".into()),
+                outcome: Some(UpgradeOutcome::Succeeded),
+                failure_reason: None,
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&ready).unwrap();
+        assert_eq!(v.get("message"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            v.pointer("/lastUpgrade/failureReason"),
+            Some(&serde_json::Value::Null),
         );
     }
 }

@@ -116,5 +116,11 @@ spec:
       http:
         kind: HTTPRoute
         port: http
+        # Hostnames enumerated (not `*.home.arpa`) so external-dns publishes
+        # one Pi-hole A record per host pointing at the haproxy-fw LB IP.
+        # Pi-hole's customdns API does not accept wildcards. HAProxy still
+        # routes by Host header to the right backend via the route-adapter.
         hosts:
-          - "*.home.arpa"
+          - jellyfin.home.arpa
+          - sonarr.home.arpa
+          - nzbget.home.arpa

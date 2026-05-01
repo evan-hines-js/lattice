@@ -161,21 +161,29 @@ The volume resources in `backend/media/` don't pin a `storageClassName`, so
 they bind against the cluster default — `rook-ceph-block` — and survive node
 failures.
 
-## Step 8: Configure DNS
+## Step 8: Publish DNS records to Pi-hole
 
-Find the edge HAProxy LoadBalancer IP (allocated from `cell-public`):
+`edge/dns-provider.yaml` defines a `DNSProvider` for your Pi-hole. The
+operator brings up an `external-dns` Deployment that watches the
+haproxy-fw HTTPRoute and PUTs one A record per hostname to Pi-hole's
+customdns API — no manual `/etc/hosts` edits.
+
+Edit `pihole.url`, `resolver`, and the password in
+`edge/dns-provider.yaml` to match your Pi-hole, then apply:
 
 ```bash
-kubectl get svc -n edge -l lattice.dev/service=haproxy-fw \
-  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
+kubectl apply -f edge/dns-provider.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Ready \
+  dnsprovider/pihole-home -n lattice-system --timeout=2m
 ```
 
-Add to your router's DNS or `/etc/hosts`:
+Verify the records landed:
 
-```
-<edge-lb-ip>  jellyfin.home.arpa
-<edge-lb-ip>  sonarr.home.arpa
-<edge-lb-ip>  nzbget.home.arpa
+```bash
+curl -s "http://<pihole-ip>/admin/api.php?customdns&action=get&auth=<password>"
+# [["jellyfin.home.arpa","<edge-lb-ip>"],
+#  ["sonarr.home.arpa","<edge-lb-ip>"],
+#  ["nzbget.home.arpa","<edge-lb-ip>"]]
 ```
 
 ## Step 9: Verify

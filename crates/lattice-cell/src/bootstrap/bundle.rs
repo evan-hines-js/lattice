@@ -33,15 +33,34 @@ pub async fn generate_bootstrap_bundle<G: ManifestGenerator>(
     // writes into the CAPI Cluster's `clusterNetwork`. Cilium's
     // `ipv4NativeRoutingCIDR` MUST match exactly; wider CIDRs leak
     // pod IPs out of the cluster.
+    let lb_mode = lattice_cilium::install::manifests::CiliumLbMode::from(facts.provider);
     manifests.extend(lattice_cilium::install::manifests::render_cilium_manifests(
         config.api_server_endpoint,
         &facts.pod_cidr,
+        lb_mode,
     ));
 
+    // LB IP advertisement: L2 vs BGP comes from the cilium LB mode.
+    // The provider-specific BGP CRDs (CiliumBGPClusterConfig +
+    // CiliumBGPAdvertisement naming the cell RR) are added by
+    // basis-capi-provider, not here — they need the reflector
+    // address + ASN, which only basis knows. This branch only
+    // emits the LB-IPAM pool itself.
     if let Some(cidr) = facts.lb_cidr.as_deref() {
-        let resources = crate::cilium::generate_l2_lb_resources(cidr).map_err(|e| {
-            BootstrapError::Internal(format!("failed to generate Cilium L2 LB resources: {e}"))
-        })?;
+        let resources = match lb_mode {
+            lattice_cilium::install::manifests::CiliumLbMode::L2 => {
+                crate::cilium::generate_l2_lb_resources(cidr).map_err(|e| {
+                    BootstrapError::Internal(format!(
+                        "failed to generate Cilium L2 LB resources: {e}"
+                    ))
+                })?
+            }
+            lattice_cilium::install::manifests::CiliumLbMode::Bgp => {
+                crate::cilium::generate_bgp_lb_pool(cidr).map_err(|e| {
+                    BootstrapError::Internal(format!("failed to generate Cilium BGP LB pool: {e}"))
+                })?
+            }
+        };
         manifests.extend(resources);
     }
 

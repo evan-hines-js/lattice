@@ -15,12 +15,63 @@ use lattice_common::policy::cilium::{
 };
 use lattice_common::ApiServerEndpoint;
 use lattice_core::system_namespaces;
+use lattice_crd::crd::ProviderType;
 
-static CILIUM_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/cilium.yaml"));
+/// L2-announce + SNAT variant of the Cilium install.
+static CILIUM_L2_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/cilium-l2.yaml"));
+/// BGP control-plane + DSR variant. Used by the basis provider; k8s
+/// nodes peer with the cell's iBGP route reflector embedded in
+/// basis-controller. The CRDs that name the reflector + select the
+/// LB pool are rendered per-cluster by basis-capi-provider, not here.
+static CILIUM_BGP_TEMPLATE: &str = include_str!(concat!(env!("OUT_DIR"), "/cilium-bgp.yaml"));
 
 const PLACEHOLDER_HOST: &str = "__LATTICE_API_SERVER_HOST__";
 const PLACEHOLDER_PORT: &str = "__LATTICE_API_SERVER_PORT__";
 const PLACEHOLDER_POD_CIDR: &str = "__LATTICE_POD_CIDR__";
+
+/// Which LB advertisement plane Cilium is configured for. Selected
+/// per-cluster: providers with a BGP fabric (basis) get [`Self::Bgp`],
+/// the rest get [`Self::L2`]. The two paths share everything except
+/// `loadBalancer.mode`, `l2announcements.enabled`, and
+/// `bgpControlPlane.enabled`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CiliumLbMode {
+    /// L2-announce + SNAT. Default for non-BGP providers.
+    L2,
+    /// BGP-announce + DSR (geneve dispatch). Selected for basis.
+    Bgp,
+}
+
+impl CiliumLbMode {
+    fn template(self) -> &'static str {
+        match self {
+            Self::L2 => CILIUM_L2_TEMPLATE,
+            Self::Bgp => CILIUM_BGP_TEMPLATE,
+        }
+    }
+}
+
+impl From<ProviderType> for CiliumLbMode {
+    /// Pick the variant based on whether the provider has a BGP
+    /// fabric available. basis runs an iBGP route reflector embedded
+    /// in basis-controller; everything else (Docker/kind, Proxmox,
+    /// cloud providers) gets the L2-announce path. Cloud providers
+    /// don't actually use Cilium's L2-announce — their LB IPs come
+    /// from the cloud LB — but L2 is the safe default that doesn't
+    /// require any control-plane peer config.
+    fn from(provider: ProviderType) -> Self {
+        match provider {
+            ProviderType::Basis => Self::Bgp,
+            // Docker/kind, Proxmox, and cloud providers default to L2.
+            // Cloud providers don't actually use Cilium's L2-announce
+            // (their LB IPs come from the cloud LB) but L2 is the
+            // safe default that doesn't require any control-plane
+            // peer config. The wildcard catches future variants the
+            // same way — non-basis = L2 until proven otherwise.
+            _ => Self::L2,
+        }
+    }
+}
 
 /// Cilium chart version pinned at build time from `versions.toml`.
 pub fn cilium_version() -> &'static str {
@@ -40,8 +91,16 @@ pub fn cilium_version() -> &'static str {
 /// `KUBE_PROXY_REPLACEMENT = true` (the host/port placeholders are
 /// only emitted in that mode). With stock kube-proxy the param is
 /// kept on the signature so callers don't churn when the toggle flips.
-pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint, pod_cidr: &str) -> Vec<String> {
-    let yaml = CILIUM_TEMPLATE
+///
+/// `lb_mode` selects the L2-announce or BGP variant of the chart;
+/// see [`CiliumLbMode`].
+pub fn render_cilium_manifests(
+    endpoint: &ApiServerEndpoint,
+    pod_cidr: &str,
+    lb_mode: CiliumLbMode,
+) -> Vec<String> {
+    let yaml = lb_mode
+        .template()
         .replace(PLACEHOLDER_HOST, &endpoint.host)
         .replace(PLACEHOLDER_PORT, &endpoint.port.to_string())
         .replace(PLACEHOLDER_POD_CIDR, pod_cidr);
@@ -50,13 +109,14 @@ pub fn render_cilium_manifests(endpoint: &ApiServerEndpoint, pod_cidr: &str) -> 
 
 /// Image registry hosts referenced by Cilium's chart manifests.
 ///
-/// Computed once from the unrendered template — the API server endpoint
-/// placeholders never appear on `image:` lines, so substitution is
-/// irrelevant for registry extraction. Used by the registry-mirror
-/// resolver to enumerate every registry the install pulls from.
+/// Computed once from the unrendered templates — the API server
+/// endpoint placeholders never appear on `image:` lines, so
+/// substitution is irrelevant for registry extraction. Both LB
+/// variants share the same image set, but we feed both in to be
+/// robust against a future divergence (e.g. a BGP-only sidecar).
 pub fn image_registries() -> &'static BTreeSet<String> {
     static REGS: LazyLock<BTreeSet<String>> =
-        LazyLock::new(|| extract_image_registries(&[CILIUM_TEMPLATE]));
+        LazyLock::new(|| extract_image_registries(&[CILIUM_L2_TEMPLATE, CILIUM_BGP_TEMPLATE]));
     &REGS
 }
 
@@ -365,7 +425,7 @@ mod tests {
 
     #[test]
     fn manifests_contain_agent() {
-        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16");
+        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16", CiliumLbMode::L2);
         assert!(!m.is_empty());
         let combined = m.join("\n");
         assert!(combined.contains("kind: DaemonSet"));
@@ -374,7 +434,7 @@ mod tests {
 
     #[test]
     fn rendered_manifests_substitute_placeholders() {
-        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16");
+        let m = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16", CiliumLbMode::L2);
         let combined = m.join("\n");
         assert!(
             !combined.contains(PLACEHOLDER_HOST),
@@ -397,6 +457,22 @@ mod tests {
             assert!(combined.contains("api.example.com"));
             assert!(combined.contains("6443"));
         }
+    }
+
+    /// L2 vs BGP variants must differ on the LB advertisement
+    /// plane: only L2 sets `loadBalancer.mode=snat` /
+    /// `l2announcements.enabled=true`, only BGP enables
+    /// `bgpControlPlane`. Pin the wire output here so a future
+    /// chart upgrade can't silently collapse the variants.
+    #[test]
+    fn lb_mode_picks_distinct_templates() {
+        let l2 = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16", CiliumLbMode::L2)
+            .join("\n");
+        let bgp = render_cilium_manifests(&test_endpoint(), "192.168.0.0/16", CiliumLbMode::Bgp)
+            .join("\n");
+        assert_ne!(l2, bgp, "L2 and BGP templates must render differently");
+        assert!(l2.contains("enable-l2-announcements: \"true\""));
+        assert!(bgp.contains("enable-bgp-control-plane: \"true\""));
     }
 
     #[test]

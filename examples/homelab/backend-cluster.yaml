@@ -32,7 +32,7 @@ spec:
       mirror: "http://10.0.0.131:5556"
   nodes:
     controlPlane:
-      replicas: 1
+      replicas: 3
       # Soft pin to the enterprise-PLP-SSD host so etcd's fsync hits
       # the fast path. Falls back if tier=fast has no capacity.
       placement:

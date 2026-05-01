@@ -95,8 +95,8 @@ services:
     container_name: lattice-pihole
     ports:
       - "8053:80"
-      - "5353:53/tcp"
-      - "5353:53/udp"
+      - "53:53/tcp"
+      - "53:53/udp"
     environment:
       WEBPASSWORD: "lattice"
       DNSMASQ_LISTENING: "all"

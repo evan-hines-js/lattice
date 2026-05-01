@@ -64,7 +64,15 @@ pub async fn reconcile(
         .cluster_network
         .pod_cidr
         .clone();
-    let mut manifests: Vec<String> = manifests::render_cilium_manifests(&endpoint, &pod_cidr);
+    // LB advertisement plane: BGP for basis (cell RR exists; nodes
+    // peer as additional iBGP clients), L2-announce for everyone
+    // else. The mode is structural — once a cluster is brought up
+    // one way, swapping live would require a Cilium restart and
+    // re-announcement. provider_type is stable across reconciles
+    // (it's pinned at provision time on the LatticeCluster spec).
+    let lb_mode = manifests::CiliumLbMode::from(local_cluster.spec.provider.provider_type());
+    let mut manifests: Vec<String> =
+        manifests::render_cilium_manifests(&endpoint, &pod_cidr, lb_mode);
     for policy in [
         serde_json::to_string_pretty(&manifests::generate_ztunnel_allowlist()),
         serde_json::to_string_pretty(&manifests::generate_allow_node_ingress()),
