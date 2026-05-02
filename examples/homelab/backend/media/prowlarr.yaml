@@ -109,9 +109,6 @@ spec:
       radarr:
         type: service
         direction: outbound
-      whisparr:
-        type: service
-        direction: outbound
       nzbgeek:
         type: external-service
         direction: outbound
@@ -119,14 +116,7 @@ spec:
           endpoints:
             https: api.nzbgeek.info:443
   replicas: 1
+  # Mesh-internal only: callers reach prowlarr via the in-cluster FQDN over
+  # Istio multicluster. haproxy-fw fronts the public hostname (see service.hostnames).
   advertise:
     allowedServices: ["*"]
-  ingress:
-    gatewayClass: istio
-    routes:
-      public:
-        hosts:
-          - prowlarr.home.arpa
-        tls:
-          issuerRef:
-            name: homelab-selfsigned

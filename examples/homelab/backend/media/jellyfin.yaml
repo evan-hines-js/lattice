@@ -21,6 +21,21 @@ spec:
       action == Lattice::Action::"OverrideSecurity",
       resource == Lattice::SecurityOverride::"allowedBinary:*"
     );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"api.themoviedb.org:443"
+    );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"image.tmdb.org:443"
+    );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"www.omdbapi.com:443"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -45,7 +60,6 @@ spec:
             source: ${resources.cache}
           /media:
             source: ${resources.media-storage}
-            path: library
           /tmp: {}
         resources:
           requests:
@@ -59,6 +73,13 @@ spec:
             path: /health
             port: 8096
     service:
+      # Only jellyfin needs serviceType=LoadBalancer (everyone else stays
+      # ClusterIP). The reason is the istio HBONE wedge — see the trade-off
+      # comment below the spec. The route reconciler resolves this Service's
+      # LB VIP into ClusterRoute.address; haproxy-fw's route-adapter looks up
+      # this service by name (matching the first label of the public hostname
+      # listed in haproxy-fw's ingress) and renders a direct backend pointing
+      # at the LB VIP.
       serviceType: LoadBalancer
       ports:
         http:
@@ -82,10 +103,16 @@ spec:
           accessMode: ReadWriteOnce
           allowedConsumers:
             - sonarr
+            - radarr
             - nzbget
-      sonarr:
-        type: service
-        direction: inbound
+      metadata-providers:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            tmdb-api: api.themoviedb.org:443
+            tmdb-images: image.tmdb.org:443
+            omdb: www.omdbapi.com:443
   replicas: 1
   advertise:
     allowedServices: ["*"]

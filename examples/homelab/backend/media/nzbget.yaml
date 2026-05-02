@@ -152,6 +152,9 @@ spec:
       sonarr:
         type: service
         direction: inbound
+      radarr:
+        type: service
+        direction: inbound
   sidecars:
     wireguard:
       image: docker.io/linuxserver/wireguard:latest
@@ -204,14 +207,7 @@ spec:
           cpu: 500m
           memory: 256Mi
   replicas: 1
+  # Mesh-internal only: callers reach nzbget via the in-cluster FQDN over
+  # Istio multicluster. haproxy-fw fronts the public hostname.
   advertise:
     allowedServices: ["*"]
-  ingress:
-    gatewayClass: istio
-    routes:
-      public:
-        hosts:
-          - nzbget.home.arpa
-        tls:
-          issuerRef:
-            name: homelab-selfsigned

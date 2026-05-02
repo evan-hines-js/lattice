@@ -18,14 +18,16 @@ spec:
       resource == Lattice::SecurityOverride::"automountServiceAccountToken"
     );
 ---
-# RBAC: allow haproxy-fw SA to watch LatticeClusterRoutes CRDs
+# RBAC: allow haproxy-fw SA to watch LatticeClusterRoutes CRDs and read its
+# own LatticeService (the route-adapter parses ingress.routes[*].hosts to know
+# which Host: headers to ACL-match).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: lattice-route-watcher
 rules:
   - apiGroups: ["lattice.dev"]
-    resources: ["latticeclusterroutes"]
+    resources: ["latticeclusterroutes", "latticeservices"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -97,6 +99,8 @@ spec:
       variables:
         CONFIG_PATH: "/config/haproxy.cfg"
         HAPROXY_PROCESS_NAME: "haproxy"
+        WORKLOAD_NAME: "haproxy-fw"
+        WORKLOAD_NAMESPACE: "edge"
       volumes:
         /config:
           source: ${resources.haproxy-config}
@@ -123,4 +127,6 @@ spec:
         hosts:
           - jellyfin.home.arpa
           - sonarr.home.arpa
+          - radarr.home.arpa
+          - prowlarr.home.arpa
           - nzbget.home.arpa
