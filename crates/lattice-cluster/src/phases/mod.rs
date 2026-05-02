@@ -396,6 +396,24 @@ pub async fn generate_capi_manifests(
             .await?;
     }
 
+    // Pre-pivot: clamp CP replicas to 1 so only one control-plane VM is
+    // provisioned, runs `kubeadm init`, and pivots before siblings join.
+    // Post-pivot: emit the user-desired count (the self-cluster's drift
+    // loop will scale the live KCP via `update_cp_replicas`). Clamping to
+    // `min(desired, 1)` preserves `replicas: 0` for users who want to
+    // tear the CP down without touching the rest of the spec.
+    let desired_cp = cluster.spec.nodes.control_plane.replicas;
+    let pivoted = cluster
+        .status
+        .as_ref()
+        .map(|s| s.pivot_complete)
+        .unwrap_or(false);
+    bootstrap.cp_replicas = if pivoted {
+        desired_cp
+    } else {
+        desired_cp.min(1)
+    };
+
     let provider = create_provider(cluster.spec.provider.provider_type(), &capi_ns)?;
     provider.generate_capi_manifests(cluster, &bootstrap).await
 }

@@ -1323,6 +1323,63 @@ mod tests {
             // Docker provider should generate manifests
             assert!(!manifests.is_empty());
         }
+
+        /// Pre-pivot the CP must be provisioned with replicas=1 regardless of
+        /// what the user asked for, so that exactly one CP runs `kubeadm init`
+        /// and pivots before any siblings join. The drift loop scales it up
+        /// post-pivot. The clamp is provider-agnostic — it lives in
+        /// `phases::generate_capi_manifests`.
+        #[tokio::test]
+        async fn pre_pivot_cp_clamps_to_one_replica() {
+            let mut cluster = cluster_with_docker_config("ha-cluster");
+            cluster.spec.nodes.control_plane.replicas = 3;
+            // status absent → not yet pivoted
+            assert!(cluster.status.is_none());
+            let ctx = mock_context();
+
+            let manifests = generate_capi_manifests(&cluster, &ctx)
+                .await
+                .expect("manifest generation should succeed");
+            let kcp = manifests
+                .iter()
+                .find(|m| m.kind == "KubeadmControlPlane")
+                .expect("KubeadmControlPlane should be emitted");
+            let spec = kcp.spec.as_ref().expect("KCP spec should exist");
+            assert_eq!(
+                spec.get("replicas").expect("replicas should be set"),
+                1,
+                "pre-pivot CP must clamp to 1 even when spec asks for 3"
+            );
+        }
+
+        /// Post-pivot, the lifecycle clamp lifts and the renderer emits the
+        /// user-desired CP count. The self-cluster's drift loop is what
+        /// actually patches the live KCP from 1 → desired; this test pins
+        /// the renderer side of that contract.
+        #[tokio::test]
+        async fn post_pivot_cp_emits_desired_replicas() {
+            let mut cluster = cluster_with_docker_config("ha-cluster");
+            cluster.spec.nodes.control_plane.replicas = 3;
+            cluster.status = Some(lattice_crd::crd::LatticeClusterStatus {
+                pivot_complete: true,
+                ..Default::default()
+            });
+            let ctx = mock_context();
+
+            let manifests = generate_capi_manifests(&cluster, &ctx)
+                .await
+                .expect("manifest generation should succeed");
+            let kcp = manifests
+                .iter()
+                .find(|m| m.kind == "KubeadmControlPlane")
+                .expect("KubeadmControlPlane should be emitted");
+            let spec = kcp.spec.as_ref().expect("KCP spec should exist");
+            assert_eq!(
+                spec.get("replicas").expect("replicas should be set"),
+                3,
+                "post-pivot CP must reflect the user-desired replica count"
+            );
+        }
     }
 
     /// Infrastructure Ready Detection Tests

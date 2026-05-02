@@ -125,14 +125,7 @@ spec:
           endpoints:
             https: api.nzbgeek.info:443
   replicas: 1
+  # Mesh-internal only: callers (e.g. jellyfin) reach radarr via the in-cluster
+  # FQDN over Istio multicluster. No public hostname, no gateway, no edge proxy.
   advertise:
     allowedServices: ["*"]
-  ingress:
-    gatewayClass: istio
-    routes:
-      public:
-        hosts:
-          - radarr.home.arpa
-        tls:
-          issuerRef:
-            name: homelab-selfsigned

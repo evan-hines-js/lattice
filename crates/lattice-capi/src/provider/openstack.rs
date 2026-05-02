@@ -183,7 +183,7 @@ impl Provider for OpenStackProvider {
 
         // No kube-vip for OpenStack - we use Octavia LB
         let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane.replicas,
+            replicas: bootstrap.cp_replicas,
             cert_sans: build_cert_sans(cluster),
             post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
             vip: None,

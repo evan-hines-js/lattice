@@ -1,15 +1,25 @@
-//! Remote secret reconciler for Istio multi-cluster discovery.
+//! Reconciler for `LatticeClusterRoutes` — materializes per-cluster artifacts
+//! that let workloads on this cluster reach services advertised from a remote
+//! cluster.
 //!
-//! Creates Istio remote secrets so istiod can discover services on remote
-//! clusters. Local child clusters use a direct API server kubeconfig (copied
-//! pre-pivot). Peer clusters (from parent) use the parent's auth proxy.
+//! For each `LatticeClusterRoutes` CRD the reconciler ensures:
 //!
-//! Also creates headless Service stubs on the local cluster for each advertised
-//! route so CoreDNS can resolve the remote service's DNS name. Istiod matches
-//! these stubs to remote endpoints discovered via the remote secret.
-//!
-//! Updates the `meshNetworks` field in the `istio` ConfigMap so istiod knows
-//! how to reach endpoints on each remote network via the east-west gateway.
+//! - Istio remote secret in `istio-system` so istiod can discover endpoints on
+//!   the source cluster. Local children use a direct API server kubeconfig
+//!   (copied pre-pivot); peer clusters (from parent) use the parent's auth
+//!   proxy.
+//! - `meshNetworks` entry in the `istio` ConfigMap so istiod knows how to
+//!   reach endpoints on each remote network via the east-west gateway.
+//! - Headless Service stub on the local cluster for each advertised route so
+//!   CoreDNS resolves the remote service FQDN; istiod matches the stub to
+//!   remote endpoints discovered via the remote secret.
+//! - `CiliumClusterwideNetworkPolicy` egress allow-rule for each route that
+//!   advertises a directly-routable address (a LoadBalancer VIP). The mesh
+//!   path through ztunnel/east-west-gateway is governed by the bilateral-
+//!   agreement CNPs the mesh-policy compiler emits; the LB-direct path
+//!   bypasses the mesh and would be silently dropped by the cluster's
+//!   default-deny CCNP without an explicit allow-rule. Scoped to the route's
+//!   `allowed_services` (wildcard → cluster-wide; specific list → per-caller).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -32,15 +42,24 @@ const MANAGED_LABEL: &str = "lattice.dev/remote-secret-managed";
 /// Label on Service stubs so we can track and clean them up.
 const SERVICE_STUB_LABEL: &str = "lattice.dev/service-stub";
 
+/// Label on `CiliumClusterwideNetworkPolicy` route-egress allow rules so we
+/// can track and prune them per source cluster.
+const ROUTE_EGRESS_SOURCE_LABEL: &str = "lattice.dev/cluster-route-source";
+
+/// Label identifying a specific route a CCNP was generated for, so we can
+/// prune CCNPs whose corresponding route has gone away while their source
+/// cluster still has other advertised routes.
+const ROUTE_EGRESS_KEY_LABEL: &str = "lattice.dev/cluster-route-key";
+
 /// Context for the remote secret reconciler.
-pub struct RemoteSecretContext {
+pub struct ClusterRoutesContext {
     pub client: Client,
     pub cache: lattice_cache::ResourceCache,
 }
 
 pub async fn reconcile(
     routes: Arc<LatticeClusterRoutes>,
-    ctx: Arc<RemoteSecretContext>,
+    ctx: Arc<ClusterRoutesContext>,
 ) -> Result<Action, Error> {
     let source_cluster = routes.name_any();
     debug!(source = %source_cluster, "reconciling remote secret");
@@ -51,6 +70,7 @@ pub async fn reconcile(
     if routes.spec.routes.is_empty() {
         cleanup_remote_secret(&ctx.client, &source_cluster).await;
         cleanup_service_stubs(&ctx.client, &ctx.cache, &source_cluster).await;
+        cleanup_route_egress_policies(&ctx.client, &source_cluster).await;
         cleanup_mesh_network(&ctx.client, &ctx.cache, &source_cluster).await;
         return Ok(Action::requeue(Duration::from_secs(300)));
     }
@@ -108,11 +128,17 @@ pub async fn reconcile(
     // Ensure Service stubs for DNS resolution on this cluster
     ensure_service_stubs(&ctx.client, &source_cluster, &routes.spec.routes).await;
 
+    // Allow callers on this cluster to reach LB-direct addresses advertised
+    // by the source cluster (mesh-internal routes are covered by the
+    // bilateral-agreement CNPs the mesh-policy compiler emits).
+    ensure_route_egress_policies(&ctx.client, &source_cluster, &routes.spec.routes).await;
+    prune_stale_route_egress_policies(&ctx.client, &source_cluster, &routes.spec.routes).await;
+
     info!(
         secret = %secret_name,
         source_cluster = %source_cluster,
         routes = routes.spec.routes.len(),
-        "ensured remote secret, mesh network, and service stubs"
+        "ensured remote secret, mesh network, service stubs, and route egress policies"
     );
 
     // Requeue periodically to recreate any deleted service stubs and
@@ -237,6 +263,192 @@ async fn cleanup_service_stubs(
             Ok(_) => info!(service = %name, namespace = %ns, "deleted service stub"),
             Err(kube::Error::Api(e)) if e.code == 404 => {}
             Err(e) => warn!(service = %name, error = %e, "failed to delete service stub"),
+        }
+    }
+}
+
+/// `CiliumClusterwideNetworkPolicy` GVK used for route-egress rules.
+fn ccnp_resource() -> kube::discovery::ApiResource {
+    use kube::api::GroupVersionKind;
+    use kube::discovery::ApiResource;
+    ApiResource::from_gvk(&GroupVersionKind::gvk(
+        "cilium.io",
+        "v2",
+        "CiliumClusterwideNetworkPolicy",
+    ))
+}
+
+/// Stable, sanitized name for a per-caller route-egress CCNP. Bounded to fit
+/// the K8s 63-char DNS-label limit by hashing when long.
+fn route_egress_policy_name(source_cluster: &str, route: &ClusterRoute, caller: &str) -> String {
+    lattice_crd::crd::derived_name(
+        "lattice-route-egress-",
+        &[
+            source_cluster,
+            &route.service_namespace,
+            &route.service_name,
+            caller,
+        ],
+    )
+}
+
+/// Stable identifier for a route used in `ROUTE_EGRESS_KEY_LABEL`. Pruning
+/// during a partial-route reconcile compares this against the policy label.
+fn route_egress_key(route: &ClusterRoute) -> String {
+    format!("{}-{}", route.service_namespace, route.service_name)
+}
+
+/// Build the `endpointSelector` for a CCNP based on a single allowed-services
+/// entry. Wildcard (`"*"`) matches every pod; `"namespace/name"` matches a
+/// specific lattice workload by its `app.kubernetes.io/name` label scoped to
+/// the namespace.
+fn caller_endpoint_selector(caller: &str) -> Option<serde_json::Value> {
+    if caller == "*" {
+        return Some(serde_json::json!({}));
+    }
+    let parts: Vec<&str> = caller.splitn(2, '/').collect();
+    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+        warn!(caller = %caller, "ignoring malformed allowed_services entry");
+        return None;
+    }
+    Some(serde_json::json!({
+        "matchLabels": {
+            "k8s:io.kubernetes.pod.namespace": parts[0],
+            "k8s:app.kubernetes.io/name": parts[1],
+        }
+    }))
+}
+
+/// Emit one `CiliumClusterwideNetworkPolicy` per (LB-direct route × allowed
+/// caller) so the cluster's default-deny CCNP doesn't drop egress to the
+/// remote LB VIP. Mesh-internal routes (empty address) are skipped — they
+/// flow through the mesh dataplane and are governed by the bilateral-
+/// agreement CNPs the mesh-policy compiler emits.
+async fn ensure_route_egress_policies(
+    client: &Client,
+    source_cluster: &str,
+    routes: &[ClusterRoute],
+) {
+    let params = PatchParams::apply(FIELD_MANAGER).force();
+    let api: Api<kube::api::DynamicObject> = Api::all_with(client.clone(), &ccnp_resource());
+
+    for route in routes {
+        if route.address.is_empty() || route.port == 0 {
+            continue;
+        }
+        for caller in &route.allowed_services {
+            let Some(endpoint_selector) = caller_endpoint_selector(caller) else {
+                continue;
+            };
+            let policy_name = route_egress_policy_name(source_cluster, route, caller);
+
+            let cnp = serde_json::json!({
+                "apiVersion": "cilium.io/v2",
+                "kind": "CiliumClusterwideNetworkPolicy",
+                "metadata": {
+                    "name": policy_name,
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "lattice",
+                        ROUTE_EGRESS_SOURCE_LABEL: source_cluster,
+                        ROUTE_EGRESS_KEY_LABEL: route_egress_key(route),
+                    }
+                },
+                "spec": {
+                    "endpointSelector": endpoint_selector,
+                    "egress": [{
+                        "toCIDR": [format!("{}/32", route.address)],
+                        "toPorts": [{
+                            "ports": [{
+                                "port": route.port.to_string(),
+                                "protocol": "TCP"
+                            }]
+                        }]
+                    }]
+                }
+            });
+
+            if let Err(e) = api.patch(&policy_name, &params, &Patch::Apply(&cnp)).await {
+                warn!(policy = %policy_name, error = %e, "failed to ensure route egress policy");
+            }
+        }
+    }
+}
+
+/// Delete CCNPs we previously emitted for `source_cluster` whose route is no
+/// longer present in the current route list (or whose caller list shrank).
+/// Lists existing policies by `ROUTE_EGRESS_SOURCE_LABEL` and computes the
+/// expected policy-name set from `routes`; the difference is deleted.
+async fn prune_stale_route_egress_policies(
+    client: &Client,
+    source_cluster: &str,
+    routes: &[ClusterRoute],
+) {
+    use std::collections::HashSet;
+
+    let mut expected: HashSet<String> = HashSet::new();
+    for route in routes {
+        if route.address.is_empty() || route.port == 0 {
+            continue;
+        }
+        for caller in &route.allowed_services {
+            if caller_endpoint_selector(caller).is_some() {
+                expected.insert(route_egress_policy_name(source_cluster, route, caller));
+            }
+        }
+    }
+
+    let api: Api<kube::api::DynamicObject> = Api::all_with(client.clone(), &ccnp_resource());
+    let selector = format!("{}={}", ROUTE_EGRESS_SOURCE_LABEL, source_cluster);
+    let list = match api
+        .list(&kube::api::ListParams::default().labels(&selector))
+        .await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            debug!(error = %e, "failed to list route egress CCNPs for prune");
+            return;
+        }
+    };
+    for obj in list.items {
+        let Some(name) = obj.metadata.name.as_deref() else {
+            continue;
+        };
+        if expected.contains(name) {
+            continue;
+        }
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => info!(policy = %name, "deleted stale route egress policy"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => {
+                warn!(policy = %name, error = %e, "failed to delete stale route egress policy")
+            }
+        }
+    }
+}
+
+/// Delete every route-egress CCNP we emitted for `source_cluster`.
+/// Used when the source cluster's `LatticeClusterRoutes` is empty or deleted.
+async fn cleanup_route_egress_policies(client: &Client, source_cluster: &str) {
+    let api: Api<kube::api::DynamicObject> = Api::all_with(client.clone(), &ccnp_resource());
+    let selector = format!("{}={}", ROUTE_EGRESS_SOURCE_LABEL, source_cluster);
+    let list = match api
+        .list(&kube::api::ListParams::default().labels(&selector))
+        .await
+    {
+        Ok(l) => l,
+        Err(e) => {
+            debug!(error = %e, "failed to list route egress CCNPs for cleanup");
+            return;
+        }
+    };
+    for obj in list.items {
+        let Some(name) = obj.metadata.name.as_deref() else {
+            continue;
+        };
+        match api.delete(name, &Default::default()).await {
+            Ok(_) => info!(policy = %name, "deleted route egress policy"),
+            Err(kube::Error::Api(e)) if e.code == 404 => {}
+            Err(e) => warn!(policy = %name, error = %e, "failed to delete route egress policy"),
         }
     }
 }

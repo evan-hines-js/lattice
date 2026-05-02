@@ -616,7 +616,7 @@ impl WorkloadCompiler {
             }
         }
         if service_type.is_external() {
-            if let Some(svc) = svc_spec.filter(|s| !s.hostnames.is_empty()) {
+            if let Some(svc) = svc_spec.filter(|s| s.publish_dns && !s.hostnames.is_empty()) {
                 metadata.annotations.insert(
                     lattice_common::network::gateway_api::EXTERNAL_DNS_HOSTNAME_ANNOTATION
                         .to_string(),
@@ -1490,7 +1490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_emits_external_dns_annotation_when_hostnames_set() {
+    async fn service_emits_external_dns_annotation_when_publish_dns_true() {
         let mut service = make_service("my-app", "default");
         let svc_spec = service.spec.workload.service.as_mut().unwrap();
         svc_spec.service_type = ServiceType::LoadBalancer;
@@ -1498,6 +1498,7 @@ mod tests {
             "app.example.com".to_string(),
             "app.alt.example.com".to_string(),
         ];
+        svc_spec.publish_dns = true;
 
         let output =
             test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
@@ -1512,5 +1513,25 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("app.example.com,app.alt.example.com")
         );
+    }
+
+    #[tokio::test]
+    async fn service_omits_external_dns_when_publish_dns_false() {
+        let mut service = make_service("my-app", "default");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["app.example.com".to_string()];
+        // publish_dns left false: hostname is for routing, not DNS publishing
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        let svc = output.service.expect("should have Service");
+        assert!(!svc
+            .metadata
+            .annotations
+            .contains_key("external-dns.alpha.kubernetes.io/hostname"));
     }
 }

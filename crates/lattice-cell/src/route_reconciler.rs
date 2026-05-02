@@ -170,18 +170,20 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
 
     info!(cluster = %cluster_name, "Route reconciler started");
 
-    // Seed local routes on startup so peer route sync has data immediately
-    let mut local_routes = discover_local_routes(&client).await;
-    if !local_routes.is_empty() {
-        let tagged: Vec<TaggedRoute> = local_routes
-            .iter()
-            .map(|r| (cluster_name.clone(), r.clone()))
-            .collect();
-        let _ = all_routes_tx.send(tagged);
-    }
-
     let svc_api: Api<LatticeService> = Api::all(client.clone());
     let mut svc_stream = std::pin::pin!(resilient_watcher(svc_api, watcher::Config::default()));
+
+    // Periodic full re-discovery is the safety net so eventual consistency
+    // holds even if a watcher event is missed, the K8s API connection drops,
+    // or someone hand-edits a LatticeService — convergence is bounded by one
+    // tick instead of waiting for the next service-side change.
+    //
+    // Tick fires immediately on first poll (default behavior), giving us a
+    // synchronous initial reconcile without a separate startup write path.
+    let mut periodic = tokio::time::interval(std::time::Duration::from_secs(60));
+    periodic.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut local_routes: Vec<ClusterRoute> = Vec::new();
 
     loop {
         let mut should_reconcile = false;
@@ -192,6 +194,10 @@ async fn run_route_reconciler(config: RouteReconcilerConfig) {
                     local_routes = discover_local_routes(&client).await;
                     should_reconcile = true;
                 }
+            }
+            _ = periodic.tick() => {
+                local_routes = discover_local_routes(&client).await;
+                should_reconcile = true;
             }
             // Child route updates from heartbeats
             update = child_rx.recv() => {
@@ -360,10 +366,18 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
             (String::new(), 0)
         };
 
-        // Collect hostnames from ingress routes (if any) for external discovery.
-        // Mesh-internal services use the service FQDN directly — no hostname needed
-        // in the route table, but we still publish a route for the route-adapter.
-        let hostnames: Vec<String> = ls
+        // Hostname source priority:
+        //   1) ingress.routes[*].hosts (Gateway API path)
+        //   2) workload.service.hostnames (direct-exposed LoadBalancer/NodePort
+        //      path, where this Service is the canonical public endpoint)
+        // ingress + service-type-external are mutually exclusive at validation
+        // time, so at most one source is populated. When neither is set, the
+        // service is unnamed publicly — it still gets one ClusterRoute entry
+        // (with empty hostname) so consumers can find it by service name.
+        // This is the typical edge-proxy-fronted shape: the proxy declares
+        // the public hostnames in its own ingress and looks up backends here
+        // by name.
+        let mut hostnames: Vec<String> = ls
             .spec
             .ingress
             .as_ref()
@@ -371,16 +385,21 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
                 i.routes
                     .values()
                     .flat_map(|r| r.hosts.iter().cloned())
-                    .collect()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|h: &Vec<_>| !h.is_empty())
+            .or_else(|| {
+                ls.spec
+                    .workload
+                    .service
+                    .as_ref()
+                    .filter(|s| !s.hostnames.is_empty())
+                    .map(|s| s.hostnames.clone())
             })
             .unwrap_or_default();
-
-        // For mesh-internal services, use the service FQDN as the hostname
-        let hostnames = if hostnames.is_empty() {
-            vec![format!("{svc_name}.{svc_ns}.svc.cluster.local")]
-        } else {
-            hostnames
-        };
+        if hostnames.is_empty() {
+            hostnames.push(String::new());
+        }
 
         for hostname in &hostnames {
             let cr = ClusterRoute {

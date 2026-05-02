@@ -313,7 +313,7 @@ impl Provider for DockerProvider {
         };
 
         let cp_config = ControlPlaneConfig {
-            replicas: cluster.spec.nodes.control_plane.replicas,
+            replicas: bootstrap.cp_replicas,
             cert_sans,
             post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
             vip: None,
@@ -657,14 +657,18 @@ mod tests {
             assert_eq!(docker_cluster.metadata.name, "my-cluster");
         }
 
-        /// Story: For HA clusters, users specify the number of control plane nodes.
-        /// The KubeadmControlPlane resource should reflect the requested replica count.
+        /// Story: the renderer faithfully reflects whatever CP replica count
+        /// the cluster controller decided on (`bootstrap.cp_replicas`). The
+        /// pre-pivot clamp to 1 lives in `phases::generate_capi_manifests`,
+        /// not here — providers stay lifecycle-agnostic.
         #[tokio::test]
         async fn control_plane_respects_replica_count() {
             let provider = DockerProvider::new();
-            let mut cluster = sample_cluster("my-cluster", 2);
-            cluster.spec.nodes.control_plane.replicas = 3;
-            let bootstrap = BootstrapInfo::default();
+            let cluster = sample_cluster("my-cluster", 2);
+            let bootstrap = BootstrapInfo {
+                cp_replicas: 3,
+                ..BootstrapInfo::default()
+            };
 
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)
@@ -1139,14 +1143,20 @@ mod tests {
             );
         }
 
-        /// Story: HA clusters with 3 control plane nodes should generate
-        /// a KubeadmControlPlane with replicas=3 for fault tolerance.
+        /// Story: when the cluster is pivoted and the user wants HA, the
+        /// drift loop sets `bootstrap.cp_replicas` to the user-desired count
+        /// and the renderer emits a KCP with that replica count for fault
+        /// tolerance. (Pre-pivot the same renderer would receive
+        /// `cp_replicas: 1` — that lifecycle clamp is verified in
+        /// `lattice-cluster::phases` tests, not here.)
         #[tokio::test]
         async fn ha_cluster_has_three_control_plane_nodes() {
             let provider = DockerProvider::new();
-            let mut cluster = sample_cluster("ha-cluster", 3);
-            cluster.spec.nodes.control_plane.replicas = 3;
-            let bootstrap = BootstrapInfo::default();
+            let cluster = sample_cluster("ha-cluster", 3);
+            let bootstrap = BootstrapInfo {
+                cp_replicas: 3,
+                ..BootstrapInfo::default()
+            };
 
             let manifests = provider
                 .generate_capi_manifests(&cluster, &bootstrap)

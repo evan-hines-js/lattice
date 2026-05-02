@@ -51,6 +51,11 @@ spec:
       action == Lattice::Action::"OverrideSecurity",
       resource == Lattice::SecurityOverride::"allowedBinary:*"
     );
+    permit(
+      principal == Lattice::Service::"media/sonarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"api.nzbgeek.info:443"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -80,7 +85,7 @@ spec:
             path: downloads
           /tv:
             source: ${resources.media-storage}
-            path: library
+            path: tv
           /tmp: {}
           /run: {}
         resources:
@@ -112,18 +117,17 @@ spec:
       nzbget:
         type: service
         direction: outbound
-      jellyfin:
+      prowlarr:
         type: service
+        direction: inbound
+      nzbgeek:
+        type: external-service
         direction: outbound
+        params:
+          endpoints:
+            https: api.nzbgeek.info:443
   replicas: 1
+  # Mesh-internal only: callers (e.g. jellyfin) reach sonarr via the in-cluster
+  # FQDN over Istio multicluster. No public hostname, no gateway, no edge proxy.
   advertise:
     allowedServices: ["*"]
-  ingress:
-    gatewayClass: istio
-    routes:
-      public:
-        hosts:
-          - sonarr.home.arpa
-        tls:
-          issuerRef:
-            name: homelab-selfsigned

@@ -118,15 +118,19 @@ spec:
     allowedServices: ["*"]
   # serviceType: LoadBalancer instead of an istio gateway path.
   #
-  # The route reconciler resolves the LB Service VIP into ClusterRoute.address;
-  # edge/haproxy-fw's route-adapter writes a literal "server gw <ip>:<port>"
-  # into haproxy.cfg, so haproxy reaches this pod over plain TCP via Cilium
-  # BGP-advertised VIP — no istio gateway envoy in the data path.
+  # End-to-end path: the route reconciler resolves the LB Service VIP into
+  # ClusterRoute.address; the cluster-routes controller auto-emits a
+  # CiliumClusterwideNetworkPolicy on every cluster that has a stub for this
+  # service, allowing the workloads listed in `advertise.allowedServices` to
+  # reach the LB VIP. edge/haproxy-fw's route-adapter writes a literal
+  # `server gw <ip>:<port>` into haproxy.cfg, so haproxy reaches this pod
+  # over plain TCP via Cilium BGP-advertised VIP — no istio gateway envoy
+  # in the data path.
   #
   # Why: jellyfin's seek-driven Range churn wedges every istio gateway envoy
-  # in the path (backend gateway + east-west gateway), via RST_STREAM(INTERNAL_ERROR)
-  # mid-stream and a leaked accounting slot in the HBONE upstream pool.
-  # Reproduces on Istio 1.29.2 and 1.30.0-beta.0 ambient.
+  # in the path (backend gateway + east-west gateway), via
+  # RST_STREAM(INTERNAL_ERROR) mid-stream and a leaked accounting slot in the
+  # HBONE upstream pool. Reproduces on Istio 1.29.2 and 1.30.0-beta.0 ambient.
   # See istio-hbone-wedge-repro for the minimal reproducer.
   #
   # Trade-off: opts jellyfin out of L7 AuthorizationPolicy on inbound traffic

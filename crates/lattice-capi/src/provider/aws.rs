@@ -193,7 +193,7 @@ impl Provider for AwsProvider {
 
         // No kube-vip for AWS - we use NLB
         let cp_config = ControlPlaneConfig {
-            replicas: spec.nodes.control_plane.replicas,
+            replicas: bootstrap.cp_replicas,
             cert_sans: build_cert_sans(cluster),
             post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
             vip: None,

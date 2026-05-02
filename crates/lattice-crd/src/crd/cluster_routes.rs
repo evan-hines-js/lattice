@@ -121,12 +121,12 @@ impl ClusterRoute {
     /// the heartbeat ingestion path (server.rs) and the local discovery path
     /// (route_reconciler.rs) to ensure identical validation regardless of source.
     pub fn validate(&self) -> Result<(), String> {
-        // Address and port are required for externally routable routes but
-        // optional for mesh-internal routes (advertise-only, no external gateway).
-        // Consumers of mesh-internal routes use the service FQDN via Istio
-        // multi-cluster, not the gateway address.
-        let has_gateway = !self.address.is_empty() || self.port > 0;
-        if has_gateway {
+        // Address and port are required together when either is set (the route
+        // points at a directly-routable endpoint). Both empty/zero is a valid
+        // mesh-internal route — consumers reach the service by FQDN over
+        // multicluster instead.
+        let has_endpoint = !self.address.is_empty() || self.port > 0;
+        if has_endpoint {
             if self.port == 0 {
                 return Err("port is 0".to_string());
             }
@@ -134,13 +134,14 @@ impl ClusterRoute {
                 return Err("empty address".to_string());
             }
         }
-        if self.hostname.is_empty() {
-            return Err("empty hostname".to_string());
-        }
-        // Block hostnames that look like URLs or internal K8s service names
-        if self.hostname.contains("://")
-            || self.hostname.ends_with(".svc.cluster.local")
-            || self.hostname.contains(':')
+        // Hostname is optional: services that don't declare a public hostname
+        // appear in the route table by service name only, and consumers (e.g.
+        // an edge proxy whose own spec declares the hostnames it serves) look
+        // them up by name. When set, reject malformed values.
+        if !self.hostname.is_empty()
+            && (self.hostname.contains("://")
+                || self.hostname.ends_with(".svc.cluster.local")
+                || self.hostname.contains(':'))
         {
             return Err(format!(
                 "invalid hostname '{}' (URL, internal K8s service, or contains port)",

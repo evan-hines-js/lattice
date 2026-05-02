@@ -280,7 +280,7 @@ impl Provider for BasisProvider {
             let post_bootstrap_commands = build_post_bootstrap_commands(name, bootstrap)?;
 
             let cp_config = ControlPlaneConfig {
-                replicas: spec.nodes.control_plane.replicas,
+                replicas: bootstrap.cp_replicas,
                 cert_sans,
                 post_bootstrap_commands,
                 vip,

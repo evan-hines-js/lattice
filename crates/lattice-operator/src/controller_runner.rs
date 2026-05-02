@@ -33,8 +33,8 @@ use lattice_crd::crd::{
     VeleroInstall, VictoriaMetricsInstall, VolcanoInstall,
 };
 use lattice_graph::ServiceGraph;
+use lattice_mesh_member::cluster_routes;
 use lattice_mesh_member::controller as mesh_member_ctrl;
-use lattice_mesh_member::remote_secret;
 use lattice_service::compiler::VMServiceScrapePhase;
 use lattice_service::controller::{reconcile as service_reconcile, ServiceContext};
 
@@ -868,16 +868,19 @@ pub fn build_mesh_member_controller(
 
 /// Spawn the remote secret controller for Istio multi-cluster discovery.
 ///
-/// Watches `LatticeClusterRoutes` and creates Istio remote secrets so istiod
-/// can discover services on remote clusters. Local children use direct API
-/// server kubeconfigs; peer clusters use the parent's auth proxy.
-pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle<()> {
-    let ctx = Arc::new(remote_secret::RemoteSecretContext {
+/// Watches `LatticeClusterRoutes` and materializes per-cluster artifacts for
+/// each advertised cross-cluster route: Istio remote secrets so istiod can
+/// discover remote-cluster endpoints, headless Service stubs so CoreDNS
+/// resolves the FQDN, and Cilium egress allow-rules for routes that advertise
+/// a directly-routable LB address (the LB-direct path bypasses the mesh and
+/// would otherwise be dropped by the cluster's default-deny CCNP).
+pub fn spawn_cluster_routes_controller(client: Client) -> tokio::task::JoinHandle<()> {
+    let ctx = Arc::new(cluster_routes::ClusterRoutesContext {
         client: client.clone(),
         cache: lattice_cache::ResourceCache::empty(),
     });
 
-    tracing::info!("- RemoteSecret controller");
+    tracing::info!("- ClusterRoutes controller");
 
     tokio::spawn(async move {
         Controller::new(
@@ -886,14 +889,14 @@ pub fn spawn_remote_secret_controller(client: Client) -> tokio::task::JoinHandle
         )
         .shutdown_on_signal()
         .run(
-            remote_secret::reconcile,
+            cluster_routes::reconcile,
             lattice_common::default_error_policy,
             ctx,
         )
-        .for_each(log_reconcile_result("RemoteSecret"))
+        .for_each(log_reconcile_result("ClusterRoutes"))
         .await;
 
-        tracing::error!("RemoteSecret controller exited — multi-cluster discovery will stop");
+        tracing::error!("ClusterRoutes controller exited — multi-cluster discovery will stop");
     })
 }
 

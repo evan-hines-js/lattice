@@ -785,7 +785,14 @@ impl ServiceGraph {
                 ..
             } = existing.type_
             {
-                if existing_source != source_cluster && *existing_host == route.hostname {
+                // Hostname-collision detection only fires when both routes
+                // declare a public hostname. Empty hostnames (services that
+                // don't claim a public name and are reachable only by service
+                // identity) never conflict — they're inherently per-cluster.
+                if existing_source != source_cluster
+                    && !existing_host.is_empty()
+                    && *existing_host == route.hostname
+                {
                     warn!(
                         hostname = %route.hostname,
                         existing_cluster = %existing_source,

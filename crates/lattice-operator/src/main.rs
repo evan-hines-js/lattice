@@ -1263,7 +1263,7 @@ async fn start_auth_proxy(
 
     tracing::info!(addr = %addr, cluster = %cluster_name, "Starting auth proxy server");
 
-    controller_runner::spawn_remote_secret_controller(client.clone());
+    controller_runner::spawn_cluster_routes_controller(client.clone());
 
     if let Some(rx) = all_routes_rx {
         parent_servers

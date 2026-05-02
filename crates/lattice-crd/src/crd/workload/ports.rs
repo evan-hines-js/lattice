@@ -37,11 +37,24 @@ pub struct ServicePortsSpec {
     #[serde(default)]
     pub service_type: ServiceType,
 
-    /// DNS hostnames published via external-dns when the Service is externally
-    /// exposed (`serviceType != ClusterIP`). Emitted as an
+    /// Public hostnames this Service handles. Optional — declare here when
+    /// the Service is the canonical public endpoint (no upstream proxy in
+    /// front of it). When fronted by an edge proxy, leave empty and let the
+    /// proxy own the hostname list. Drives `ClusterRoute.hostname` entries
+    /// for downstream consumers and (when `publishDns: true`) the
     /// `external-dns.alpha.kubernetes.io/hostname` annotation on the Service.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hostnames: Vec<String>,
+
+    /// When true, emit an `external-dns.alpha.kubernetes.io/hostname`
+    /// annotation on the K8s Service so external-dns publishes DNS records
+    /// pointing at this Service's external IP. Defaults to false: hostnames
+    /// (if any) flow into the route table for routing without claiming
+    /// public DNS — for setups where an upstream proxy owns the DNS record.
+    /// Requires `serviceType` external (NodePort or LoadBalancer) and
+    /// non-empty `hostnames`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub publish_dns: bool,
 }
 
 impl ServicePortsSpec {
@@ -87,10 +100,15 @@ impl ServicePortsSpec {
             }
         }
 
-        if !self.hostnames.is_empty() && !self.service_type.is_external() {
+        if self.publish_dns && self.hostnames.is_empty() {
             return Err(crate::ValidationError::new(
-                "service.hostnames requires serviceType=NodePort or LoadBalancer; \
-                 ClusterIP services have no external IP for external-dns to publish",
+                "service.publishDns=true requires at least one entry in service.hostnames",
+            ));
+        }
+        if self.publish_dns && !self.service_type.is_external() {
+            return Err(crate::ValidationError::new(
+                "service.publishDns=true requires serviceType=NodePort or LoadBalancer; \
+                 ClusterIP services have no external endpoint for external-dns to publish",
             ));
         }
         for hostname in &self.hostnames {
@@ -228,13 +246,36 @@ mod tests {
     }
 
     #[test]
-    fn hostnames_with_cluster_ip_rejected() {
+    fn hostnames_allowed_on_cluster_ip_for_routing_advertisement() {
         let svc = ServicePortsSpec {
             hostnames: vec!["app.example.com".to_string()],
             ..Default::default()
         };
+        // ClusterIP + hostnames + publishDns=false: routing only, no DNS publish.
+        // Caller (e.g. edge proxy) reaches the pod via FQDN over the mesh.
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn publish_dns_without_hostnames_rejected() {
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            publish_dns: true,
+            ..Default::default()
+        };
         let err = svc.validate().unwrap_err().to_string();
-        assert!(err.contains("hostnames"), "got: {err}");
+        assert!(err.contains("publishDns"), "got: {err}");
+    }
+
+    #[test]
+    fn publish_dns_on_cluster_ip_rejected() {
+        let svc = ServicePortsSpec {
+            hostnames: vec!["app.example.com".to_string()],
+            publish_dns: true,
+            ..Default::default()
+        };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("publishDns"), "got: {err}");
     }
 
     #[test]

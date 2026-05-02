@@ -152,6 +152,22 @@ pub struct BootstrapInfo {
     /// allocated); `Some` on subsequent passes. Providers whose
     /// endpoint is statically known (proxmox/docker/aws) ignore it.
     pub control_plane_endpoint: Option<String>,
+    /// Replica count to write into the `KubeadmControlPlane` (or RKE2
+    /// equivalent) for the *current* reconcile.
+    ///
+    /// Pre-pivot, this is clamped to 1 regardless of the user's
+    /// `spec.nodes.control_plane.replicas`. Once the cluster is pivoted
+    /// (`status.pivotComplete: true`) the self-cluster's drift loop
+    /// (`phases::reconcile_capi_drift` → `capi::update_cp_replicas`)
+    /// scales the live `KubeadmControlPlane` up to the user-desired
+    /// count. Provisioning a single CP first avoids 3× concurrent
+    /// bootstrap-webhook flows, a race between pivot import and
+    /// additional CP joins, and slower failure detection on bad
+    /// images / VIP misconfig.
+    ///
+    /// Providers MUST consume this field instead of reading
+    /// `spec.nodes.control_plane.replicas` directly.
+    pub cp_replicas: u32,
 }
 
 impl Default for BootstrapInfo {
@@ -164,6 +180,7 @@ impl Default for BootstrapInfo {
             scripts_dir: "/scripts".to_string(),
             credentials_secret_name: None,
             control_plane_endpoint: None,
+            cp_replicas: 1,
         }
     }
 }
@@ -184,6 +201,7 @@ impl BootstrapInfo {
             scripts_dir,
             credentials_secret_name: None,
             control_plane_endpoint: None,
+            cp_replicas: 1,
         }
     }
 
