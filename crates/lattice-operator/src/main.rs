@@ -997,7 +997,7 @@ async fn cell_activation_watcher(cell: CellInfraConfig) {
             pc.bootstrap_port,
             pc.grpc_port,
             pc.proxy_port,
-            &pc.service.type_,
+            pc.service.type_,
             provider_type,
         )
         .await

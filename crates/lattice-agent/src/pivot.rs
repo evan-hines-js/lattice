@@ -14,6 +14,7 @@ use tracing::{debug, info};
 
 use crate::kube_client::KubeClientProvider;
 use lattice_common::kubeconfig_secret_name;
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::DistributableResources;
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
@@ -191,14 +192,21 @@ async fn apply_kubeconfig_patch(
         }
     });
 
-    secrets
-        .patch(
-            secret_name,
-            &PatchParams::apply("lattice-agent").force(),
-            &Patch::Apply(&ssa_patch),
-        )
-        .await
-        .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
+    retry_with_backoff(
+        &RetryConfig::install(),
+        "patch kubeconfig secret",
+        || async {
+            secrets
+                .patch(
+                    secret_name,
+                    &PatchParams::apply("lattice-agent").force(),
+                    &Patch::Apply(&ssa_patch),
+                )
+                .await
+        },
+    )
+    .await
+    .map_err(|e| PivotError::Internal(format!("failed to patch kubeconfig secret: {}", e)))?;
 
     Ok(())
 }
@@ -290,18 +298,25 @@ async fn apply_secrets_to_namespaces(
             continue;
         }
 
-        lattice_common::kube_utils::ensure_namespace(client, namespace, None, "lattice-pivot")
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to ensure namespace {namespace}: {e}"))
-            })?;
+        retry_with_backoff(&RetryConfig::install(), "ensure_namespace", || async {
+            lattice_common::kube_utils::ensure_namespace(client, namespace, None, "lattice-pivot")
+                .await
+        })
+        .await
+        .map_err(|e| {
+            PivotError::Internal(format!("failed to ensure namespace {namespace}: {e}"))
+        })?;
 
         let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
-        api.patch(name, params, &Patch::Apply(&secret))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply Secret {namespace}/{name}: {e}"))
-            })?;
+        retry_with_backoff(
+            &RetryConfig::install(),
+            "patch distributed Secret",
+            || async { api.patch(name, params, &Patch::Apply(&secret)).await },
+        )
+        .await
+        .map_err(|e| {
+            PivotError::Internal(format!("failed to apply Secret {namespace}/{name}: {e}"))
+        })?;
 
         info!(secret = %name, namespace = %namespace, "applied distributed secret");
     }
@@ -335,11 +350,15 @@ where
             .as_ref()
             .ok_or_else(|| PivotError::Internal(format!("{} has no name", resource_type)))?;
 
-        api.patch(name, params, &Patch::Apply(&resource))
-            .await
-            .map_err(|e| {
-                PivotError::Internal(format!("failed to apply {} {}: {}", resource_type, name, e))
-            })?;
+        retry_with_backoff(
+            &RetryConfig::install(),
+            "patch distributed resource",
+            || async { api.patch(name, params, &Patch::Apply(&resource)).await },
+        )
+        .await
+        .map_err(|e| {
+            PivotError::Internal(format!("failed to apply {} {}: {}", resource_type, name, e))
+        })?;
 
         info!(%resource_type, %name, "Applied distributed resource");
     }

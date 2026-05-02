@@ -375,6 +375,7 @@ impl<'a> WorkloadCompiler<'a> {
         namespace: &str,
         rendered_files: &BTreeMap<String, lattice_render::RenderedFile>,
         secret_refs: &BTreeMap<String, crate::pipeline::secrets::SecretRef>,
+        owner_refs: &[OwnerReference],
         files: &mut FileAccumulators,
     ) -> Result<(), CompilationError> {
         let compiled = files::compile(
@@ -383,6 +384,7 @@ impl<'a> WorkloadCompiler<'a> {
             namespace,
             rendered_files,
             secret_refs,
+            owner_refs,
         )?;
 
         if let Some(cm) = compiled.config_map {
@@ -418,7 +420,12 @@ impl<'a> WorkloadCompiler<'a> {
         )?;
 
         // Compile secrets
-        let compiled_secrets = SecretsCompiler::compile(self.name, self.namespace, self.workload)?;
+        let compiled_secrets = SecretsCompiler::compile(
+            self.name,
+            self.namespace,
+            self.workload,
+            &self.owner_references,
+        )?;
 
         // Quota enforcement — check resource limits before authorization
         if let Some(ref budget) = self.quota_budget {
@@ -525,6 +532,7 @@ impl<'a> WorkloadCompiler<'a> {
                 container_name,
                 self.namespace,
                 &rendered.variables,
+                &self.owner_references,
             );
             if let Some(cm) = compiled_env.config_map {
                 env_config_maps.push(cm);
@@ -542,6 +550,7 @@ impl<'a> WorkloadCompiler<'a> {
                     self.namespace,
                     &rendered.eso_templated_variables,
                     &compiled_secrets.secret_refs,
+                    &self.owner_references,
                 )?;
                 files.external_secrets.extend(eso_secrets);
                 container_env_from.extend(eso_env_from);
@@ -578,6 +587,7 @@ impl<'a> WorkloadCompiler<'a> {
                 self.namespace,
                 &rendered.files,
                 &compiled_secrets.secret_refs,
+                &self.owner_references,
                 &mut files,
             )?;
         }
@@ -600,6 +610,7 @@ impl<'a> WorkloadCompiler<'a> {
                 self.namespace,
                 &rendered_files,
                 &compiled_secrets.secret_refs,
+                &self.owner_references,
                 &mut files,
             )?;
         }
@@ -735,6 +746,9 @@ impl<'a> WorkloadCompiler<'a> {
                 lattice_common::LABEL_SERVICE_OWNER.to_string(),
                 self.name.to_string(),
             );
+            // Owner refs let K8s GC cascade-delete the ExternalSecret when the
+            // owning CR is deleted.
+            es.metadata.owner_references = self.owner_references.clone();
 
             all_external_secrets.push(es);
             pod_template

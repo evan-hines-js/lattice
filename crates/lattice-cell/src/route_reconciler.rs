@@ -80,6 +80,45 @@ struct GatewayListener {
     port: u16,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sServiceSpec {
+    #[serde(default, rename = "type")]
+    type_: String,
+    #[serde(default)]
+    ports: Vec<K8sServicePort>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sServicePort {
+    #[serde(default)]
+    port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sServiceStatus {
+    #[serde(default)]
+    load_balancer: K8sLoadBalancerStatus,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sLoadBalancerStatus {
+    #[serde(default)]
+    ingress: Vec<K8sLoadBalancerIngress>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct K8sLoadBalancerIngress {
+    #[serde(default)]
+    ip: String,
+    #[serde(default)]
+    hostname: String,
+}
+
 /// A route tagged with its source cluster name.
 pub type TaggedRoute = (String, ClusterRoute);
 
@@ -260,6 +299,7 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
     };
 
     let gateways = list_gateways(client).await;
+    let services_external = list_external_services(client).await;
     let mut routes = Vec::new();
 
     for ls in &services {
@@ -290,16 +330,35 @@ async fn discover_local_routes(client: &Client) -> Vec<ClusterRoute> {
             })
             .unwrap_or_default();
 
-        // If the service has ingress routes, use the gateway address and
-        // hostnames for externally routable discovery. Otherwise, publish
-        // as a mesh-internal route (no address, consumers use the service FQDN).
-        let (address, port) = ls
+        // Resolve the externally-routable address in priority order:
+        //   1) Gateway API ingress (Istio gateway LB VIP + listener port)
+        //   2) Service.type=LoadBalancer (Service.status.loadBalancer.ingress[0])
+        //   3) Empty — mesh-internal route, consumers use the service FQDN
+        // Consumers MUST prefer the address when non-empty; this is what lets
+        // edge proxies bypass the mesh dataplane on the proxy → backend hop
+        // (e.g. when an in-mesh path through the east-west gateway is
+        // unsuitable for a particular service's traffic shape).
+        let (address, port) = if let Some(addr_port) = ls
             .spec
             .ingress
             .as_ref()
             .filter(|i| !i.routes.is_empty())
             .map(|_| resolve_gateway_address(svc_ns, &gateways))
-            .unwrap_or((String::new(), 0));
+            .filter(|(addr, _)| !addr.is_empty())
+        {
+            addr_port
+        } else if ls
+            .spec
+            .workload
+            .service
+            .as_ref()
+            .is_some_and(|s| s.service_type.is_external())
+        {
+            resolve_lb_service_address(svc_name, svc_ns, &services_external)
+                .unwrap_or((String::new(), 0))
+        } else {
+            (String::new(), 0)
+        };
 
         // Collect hostnames from ingress routes (if any) for external discovery.
         // Mesh-internal services use the service FQDN directly — no hostname needed
@@ -371,6 +430,82 @@ async fn list_gateways(client: &Client) -> HashMap<String, DynamicObject> {
             HashMap::new()
         }
     }
+}
+
+/// List Kubernetes Services of type LoadBalancer (and NodePort) keyed by
+/// "namespace/name" so we can resolve an externally routable address per
+/// service name in `discover_local_routes`.
+async fn list_external_services(client: &Client) -> HashMap<String, DynamicObject> {
+    let svc_gvk = GroupVersionKind::gvk("", "v1", "Service");
+    let svc_ar = ApiResource::from_gvk(&svc_gvk);
+    let svc_api: Api<DynamicObject> = Api::all_with(client.clone(), &svc_ar);
+
+    match svc_api.list(&Default::default()).await {
+        Ok(list) => list
+            .items
+            .into_iter()
+            .filter_map(|svc| {
+                let ns = svc.metadata.namespace.as_deref().unwrap_or("default");
+                let name = svc.metadata.name.as_deref()?;
+                let key = format!("{ns}/{name}");
+                let spec: Option<K8sServiceSpec> = svc
+                    .data
+                    .get("spec")
+                    .and_then(|s| serde_json::from_value(s.clone()).ok());
+                let is_external = spec
+                    .as_ref()
+                    .is_some_and(|s| s.type_ == "LoadBalancer" || s.type_ == "NodePort");
+                if !is_external {
+                    return None;
+                }
+                Some((key, svc))
+            })
+            .collect(),
+        Err(e) => {
+            debug!(error = %e, "failed to list Services");
+            HashMap::new()
+        }
+    }
+}
+
+/// Resolve a LoadBalancer/NodePort Service's externally-routable address.
+///
+/// Reads `status.loadBalancer.ingress[0]` (preferring `ip`, falling back to
+/// `hostname`) and the first `spec.ports[].port`. Returns `None` if the
+/// Service has no allocated LB address yet — callers fall through to the
+/// FQDN/mesh path so a transiently-unallocated VIP doesn't poison the route
+/// table.
+fn resolve_lb_service_address(
+    svc_name: &str,
+    namespace: &str,
+    services: &HashMap<String, DynamicObject>,
+) -> Option<(String, u16)> {
+    let key = format!("{namespace}/{svc_name}");
+    let svc = services.get(&key)?;
+
+    let status: K8sServiceStatus = svc
+        .data
+        .get("status")
+        .and_then(|s| serde_json::from_value(s.clone()).ok())?;
+    let ingress = status.load_balancer.ingress.first()?;
+    let address = if !ingress.ip.is_empty() {
+        ingress.ip.clone()
+    } else if !ingress.hostname.is_empty() {
+        ingress.hostname.clone()
+    } else {
+        return None;
+    };
+
+    let spec: K8sServiceSpec = svc
+        .data
+        .get("spec")
+        .and_then(|s| serde_json::from_value(s.clone()).ok())?;
+    let port = spec.ports.first().map(|p| p.port).unwrap_or(0);
+    if port == 0 {
+        return None;
+    }
+
+    Some((address, port))
 }
 
 /// Resolve a Gateway LoadBalancer address in a namespace.
@@ -646,5 +781,67 @@ mod tests {
         let (addr, port) = resolve_gateway_address("media", &gateways);
         assert_eq!(addr, "");
         assert_eq!(port, 0);
+    }
+
+    fn make_lb_service(ns: &str, name: &str, ip: &str, hostname: &str, port: u16) -> DynamicObject {
+        let mut obj = DynamicObject::new(
+            name,
+            &ApiResource::from_gvk(&GroupVersionKind::gvk("", "v1", "Service")),
+        );
+        obj.metadata.namespace = Some(ns.to_string());
+        obj.data = serde_json::json!({
+            "spec": {
+                "type": "LoadBalancer",
+                "ports": [{ "port": port }]
+            },
+            "status": {
+                "loadBalancer": {
+                    "ingress": [{ "ip": ip, "hostname": hostname }]
+                }
+            }
+        });
+        obj
+    }
+
+    #[test]
+    fn resolve_lb_service_returns_ip_when_present() {
+        let mut services = HashMap::new();
+        services.insert(
+            "media/jellyfin".to_string(),
+            make_lb_service("media", "jellyfin", "10.0.0.42", "", 8096),
+        );
+
+        let (addr, port) = resolve_lb_service_address("jellyfin", "media", &services).unwrap();
+        assert_eq!(addr, "10.0.0.42");
+        assert_eq!(port, 8096);
+    }
+
+    #[test]
+    fn resolve_lb_service_falls_back_to_hostname() {
+        let mut services = HashMap::new();
+        services.insert(
+            "media/jellyfin".to_string(),
+            make_lb_service("media", "jellyfin", "", "lb-1234.elb.aws", 8096),
+        );
+
+        let (addr, port) = resolve_lb_service_address("jellyfin", "media", &services).unwrap();
+        assert_eq!(addr, "lb-1234.elb.aws");
+        assert_eq!(port, 8096);
+    }
+
+    #[test]
+    fn resolve_lb_service_returns_none_when_unallocated() {
+        let mut services = HashMap::new();
+        let mut svc = make_lb_service("media", "jellyfin", "", "", 8096);
+        svc.data["status"]["loadBalancer"]["ingress"] = serde_json::json!([]);
+        services.insert("media/jellyfin".to_string(), svc);
+
+        assert!(resolve_lb_service_address("jellyfin", "media", &services).is_none());
+    }
+
+    #[test]
+    fn resolve_lb_service_returns_none_when_missing() {
+        let services = HashMap::new();
+        assert!(resolve_lb_service_address("jellyfin", "media", &services).is_none());
     }
 }

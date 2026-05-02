@@ -154,6 +154,20 @@ impl LatticeServiceSpec {
         self.workload.validate()?;
         self.runtime.validate()?;
 
+        // External Service exposure (NodePort/LoadBalancer) and Gateway-API
+        // ingress are mutually exclusive: ingress already provides external
+        // access via the istio gateway, and emitting both creates two
+        // independent ingress paths with conflicting policy assumptions.
+        if let Some(ref svc) = self.workload.service {
+            if svc.service_type.is_external() && self.ingress.is_some() {
+                return Err(crate::ValidationError::new(format!(
+                    "service.serviceType={} is mutually exclusive with spec.ingress; \
+                     pick exactly one external-access path",
+                    svc.service_type
+                )));
+            }
+        }
+
         // Validate autoscaling
         if let Some(ref autoscaling) = self.autoscaling {
             if self.replicas > autoscaling.max {
@@ -313,6 +327,82 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn validate_rejects_load_balancer_combined_with_ingress() {
+        use super::super::workload::ingress::IngressSpec;
+        use super::super::workload::ports::{PortSpec, ServicePortsSpec};
+        use crate::crd::types::ServiceType;
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.workload.service = Some(ServicePortsSpec {
+            ports,
+            service_type: ServiceType::LoadBalancer,
+            ..Default::default()
+        });
+        spec.ingress = Some(IngressSpec::default());
+
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_allows_load_balancer_without_ingress() {
+        use super::super::workload::ports::{PortSpec, ServicePortsSpec};
+        use crate::crd::types::ServiceType;
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.workload.service = Some(ServicePortsSpec {
+            ports,
+            service_type: ServiceType::LoadBalancer,
+            ..Default::default()
+        });
+        assert!(spec.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_cluster_ip_with_ingress() {
+        use super::super::workload::ingress::IngressSpec;
+        use super::super::workload::ports::{PortSpec, ServicePortsSpec};
+
+        let mut ports = BTreeMap::new();
+        ports.insert(
+            "http".to_string(),
+            PortSpec {
+                port: 80,
+                target_port: None,
+                protocol: None,
+            },
+        );
+
+        let mut spec = sample_service_spec();
+        spec.workload.service = Some(ServicePortsSpec {
+            ports,
+            ..Default::default()
+        });
+        spec.ingress = Some(IngressSpec::default());
+        assert!(spec.validate().is_ok());
     }
 
     // =========================================================================

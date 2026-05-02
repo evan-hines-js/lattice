@@ -1,4 +1,6 @@
 /target
+**/target/
+examples/homelab/route-adapter/Cargo.lock
 tarpaulin-report.html
 *.profraw
 .env

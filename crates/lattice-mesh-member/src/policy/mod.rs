@@ -280,7 +280,10 @@ pub(crate) mod tests {
             workload: WorkloadSpec {
                 containers,
                 resources,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
             },
             ..Default::default()
         }

@@ -360,7 +360,8 @@ mod tests {
     use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, ClusterNetworkSpec, Condition, ConditionStatus,
         ControlPlaneSpec, EndpointsSpec, InfraProvider, KubernetesSpec, LatticeClusterSpec,
-        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, WorkerPoolSpec,
+        MonitoringConfig, NodeSpec, ProviderConfig, ProviderSpec, ServiceSpec, ServiceType,
+        WorkerPoolSpec,
     };
     use mockall::mock;
 
@@ -453,7 +454,7 @@ mod tests {
             bootstrap_port: 8443,
             proxy_port: 8081,
             service: ServiceSpec {
-                type_: "LoadBalancer".to_string(),
+                type_: ServiceType::LoadBalancer,
             },
             cert_policy: None,
         });

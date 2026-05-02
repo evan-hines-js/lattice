@@ -1,0 +1,138 @@
+apiVersion: lattice.dev/v1alpha1
+kind: CedarPolicy
+metadata:
+  name: whisparr-security
+  namespace: lattice-system
+spec:
+  description: Allow whisparr security overrides for the hotio image
+  policies: |
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETUID"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:SETGID"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:CHOWN"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:DAC_OVERRIDE"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"capability:FOWNER"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"runAsRoot"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"readWriteRootFilesystem"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"apparmor:Unconfined"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"OverrideSecurity",
+      resource == Lattice::SecurityOverride::"allowedBinary:*"
+    );
+    permit(
+      principal == Lattice::Service::"media/whisparr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"api.nzbgeek.info:443"
+    );
+---
+apiVersion: lattice.dev/v1alpha1
+kind: LatticeService
+metadata:
+  name: whisparr
+  namespace: media
+spec:
+  workload:
+    containers:
+      main:
+        image: ghcr.io/hotio/whisparr:latest
+        security:
+          runAsUser: 0
+          readOnlyRootFilesystem: false
+          apparmorProfile: Unconfined
+          capabilities: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+          allowedBinaries: ["*"]
+        variables:
+          PUID: "1000"
+          PGID: "1000"
+          TZ: "America/New_York"
+        volumes:
+          /config:
+            source: ${resources.config}
+          /downloads:
+            source: ${resources.media-storage}
+            path: downloads
+          /xxx:
+            source: ${resources.media-storage}
+            path: adult
+          /tmp: {}
+          /run: {}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 6969
+    service:
+      ports:
+        http:
+          port: 6969
+          protocol: TCP
+    resources:
+      config:
+        type: volume
+        params:
+          size: 5Gi
+      media-storage:
+        type: volume
+        id: media-storage
+      nzbget:
+        type: service
+        direction: outbound
+      prowlarr:
+        type: service
+        direction: inbound
+      nzbgeek:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            https: api.nzbgeek.info:443
+  replicas: 1
+  advertise:
+    allowedServices: ["*"]
+  ingress:
+    gatewayClass: istio
+    routes:
+      public:
+        hosts:
+          - whisparr.home.arpa
+        tls:
+          issuerRef:
+            name: homelab-selfsigned

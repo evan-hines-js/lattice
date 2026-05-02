@@ -30,7 +30,7 @@ use super::super::helpers::{
     apply_cedar_policy_crd, apply_yaml, cedar_policy_exists, delete_cedar_policies_by_label,
     delete_namespace, ensure_fresh_namespace, get_child_cluster_name, get_or_create_proxy,
     get_sa_token, http_get_with_retry, proxy_service_exists, run_kubectl, wait_for_condition,
-    with_diagnostics, DiagnosticContext, TestHarness,
+    with_diagnostics, DiagnosticContext, TestHarness, DEFAULT_TIMEOUT,
 };
 use super::super::providers::InfraProvider;
 
@@ -190,7 +190,7 @@ async fn verify_sa_access_allowed(
     let url = format!("{}/clusters/{}/api/v1/namespaces", proxy_url, cluster_name);
     wait_for_condition(
         "allowed SA reaches HTTP 200 through proxy",
-        Duration::from_secs(60),
+        DEFAULT_TIMEOUT,
         Duration::from_secs(2),
         || {
             let url = url.clone();

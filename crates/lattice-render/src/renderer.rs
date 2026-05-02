@@ -700,7 +700,10 @@ mod tests {
         let spec = LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()

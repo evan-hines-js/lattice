@@ -184,6 +184,25 @@ impl ServiceNode {
             .map(|r| (r.resolve_namespace(namespace).to_string(), r.name))
             .collect();
 
+        // WHY: When the K8s Service is exposed externally (NodePort / LoadBalancer),
+        // inbound traffic arrives via the node IP / cloud LB without a SPIFFE
+        // identity. With mesh-wide STRICT PeerAuthentication, ztunnel rejects
+        // such plaintext on the destination pod. We force PERMISSIVE mTLS on
+        // every port the workload publishes so external clients can reach it,
+        // scoped to the workload's own selector (not the namespace). Cilium L4
+        // CiliumNetworkPolicy from bilateral-agreement still applies; only L7
+        // identity-based AuthorizationPolicy enforcement is opted out.
+        let externally_exposed = workload
+            .service
+            .as_ref()
+            .map(|s| s.service_type.is_external())
+            .unwrap_or(false);
+        let port_peer_auth = if externally_exposed {
+            PeerAuth::Permissive
+        } else {
+            PeerAuth::Strict
+        };
+
         let ports: BTreeMap<String, PortMapping> = workload
             .service
             .as_ref()
@@ -196,7 +215,7 @@ impl ServiceNode {
                             PortMapping {
                                 service_port: ps.port,
                                 target_port: ps.target_port.unwrap_or(ps.port),
-                                peer_auth: PeerAuth::Strict,
+                                peer_auth: port_peer_auth,
                             },
                         )
                     })
@@ -1369,10 +1388,38 @@ mod tests {
                             protocol: None,
                         },
                     )]),
+                    ..Default::default()
                 }),
             },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn external_service_type_forces_permissive_ports() {
+        use lattice_crd::crd::ServiceType;
+
+        let mut spec = make_service_spec(vec![], vec![]);
+        spec.workload.service.as_mut().unwrap().service_type = ServiceType::LoadBalancer;
+
+        let node = ServiceNode::from_service_spec("prod", "api", &spec);
+        assert!(!node.ports.is_empty());
+        for pm in node.ports.values() {
+            assert_eq!(pm.peer_auth, PeerAuth::Permissive);
+        }
+        // Non-strict ports propagate so PolicyCompiler emits PeerAuthentication PERMISSIVE.
+        assert!(!node.all_non_strict_port_numbers().is_empty());
+    }
+
+    #[test]
+    fn cluster_ip_keeps_strict_ports() {
+        let spec = make_service_spec(vec![], vec![]);
+        let node = ServiceNode::from_service_spec("prod", "api", &spec);
+        assert!(!node.ports.is_empty());
+        for pm in node.ports.values() {
+            assert_eq!(pm.peer_auth, PeerAuth::Strict);
+        }
+        assert!(node.all_non_strict_port_numbers().is_empty());
     }
 
     #[test]
@@ -1436,6 +1483,7 @@ mod tests {
                             protocol: None,
                         },
                     )]),
+                    ..Default::default()
                 }),
             },
             ..Default::default()
@@ -1629,6 +1677,7 @@ mod tests {
                             protocol: None,
                         },
                     )]),
+                    ..Default::default()
                 }),
             },
             ..Default::default()
@@ -1869,6 +1918,7 @@ mod tests {
                                 protocol: None,
                             },
                         )]),
+                        ..Default::default()
                     }),
                 },
                 ..Default::default()
@@ -2099,6 +2149,7 @@ mod tests {
                             protocol: None,
                         },
                     )]),
+                    ..Default::default()
                 }),
             },
             ..Default::default()

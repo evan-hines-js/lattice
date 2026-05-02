@@ -10,7 +10,7 @@ use lattice_common::kube_utils::{build_cell_internal_service, build_cell_service
 use lattice_common::{CELL_INTERNAL_SERVICE_NAME, CELL_SERVICE_NAME};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 
-use lattice_crd::crd::{LatticeCluster, ProviderType};
+use lattice_crd::crd::{LatticeCluster, ProviderType, ServiceType};
 
 use super::polling::{
     wait_for_resource, DEFAULT_POLL_INTERVAL, DEFAULT_RESOURCE_TIMEOUT, LOAD_BALANCER_POLL_INTERVAL,
@@ -28,7 +28,7 @@ pub async fn ensure_cell_service_exists(
     bootstrap_port: u16,
     grpc_port: u16,
     proxy_port: u16,
-    service_type: &str,
+    service_type: ServiceType,
     provider_type: ProviderType,
 ) -> anyhow::Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
@@ -39,7 +39,7 @@ pub async fn ensure_cell_service_exists(
         tracing::info!(
             bootstrap_port,
             grpc_port,
-            service_type,
+            service_type = service_type.as_str(),
             "Created {CELL_SERVICE_NAME} Service"
         );
     }
@@ -148,7 +148,7 @@ pub async fn get_cell_server_sans(
         parent_config.bootstrap_port,
         parent_config.grpc_port,
         parent_config.proxy_port,
-        &parent_config.service.type_,
+        parent_config.service.type_,
         provider_type,
     )
     .await

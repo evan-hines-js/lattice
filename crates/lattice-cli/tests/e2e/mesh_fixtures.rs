@@ -132,7 +132,10 @@ fn http_port() -> ServicePortsSpec {
             protocol: None,
         },
     );
-    ServicePortsSpec { ports }
+    ServicePortsSpec {
+        ports,
+        ..Default::default()
+    }
 }
 
 pub fn outbound_dep(name: &str) -> (String, ResourceSpec) {
@@ -582,7 +585,10 @@ pub fn postgres_port() -> ServicePortsSpec {
             protocol: None,
         },
     );
-    ServicePortsSpec { ports }
+    ServicePortsSpec {
+        ports,
+        ..Default::default()
+    }
 }
 
 /// Service port spec for Redis (port 6379).
@@ -596,5 +602,8 @@ pub fn redis_port() -> ServicePortsSpec {
             protocol: None,
         },
     );
-    ServicePortsSpec { ports }
+    ServicePortsSpec {
+        ports,
+        ..Default::default()
+    }
 }

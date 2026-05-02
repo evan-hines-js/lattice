@@ -133,6 +133,7 @@ fn wrap_service(
                 containers,
                 service: Some(ServicePortsSpec {
                     ports: default_ports(),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },

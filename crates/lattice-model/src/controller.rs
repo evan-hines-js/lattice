@@ -1311,6 +1311,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
                 namespace: Some("test-ns".to_string()),
+                uid: Some("test-uid-0000".to_string()),
                 generation: Some(1),
                 ..Default::default()
             },

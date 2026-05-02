@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    build_cert_sans, build_post_bootstrap_commands, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
@@ -365,7 +365,7 @@ impl Provider for ProxmoxProvider {
         let cp_config = ControlPlaneConfig {
             replicas: spec.nodes.control_plane.replicas,
             cert_sans,
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
+            post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
             vip,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
             registry_mirrors: bootstrap.registry_mirrors.clone(),

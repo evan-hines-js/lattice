@@ -47,10 +47,20 @@ pub struct ClusterRoute {
     /// Ingress hostname
     pub hostname: String,
 
-    /// Gateway address (LoadBalancer IP)
+    /// Externally-routable address for this service (Gateway LB VIP, or the
+    /// service's own LoadBalancer/NodePort Service VIP when ingress is absent).
+    /// Empty when the service is mesh-internal only — consumers SHOULD fall
+    /// back to the service FQDN over Istio multicluster in that case.
+    ///
+    /// **Consumers MUST prefer this address when non-empty.** It exists so
+    /// edge proxies can reach a service directly over the network, bypassing
+    /// the mesh dataplane on the proxy → backend hop. This is required for
+    /// services whose traffic shape is incompatible with mesh paths (e.g. an
+    /// envoy gateway in the path) or for performance-sensitive flows where
+    /// mesh hops add unacceptable overhead.
     pub address: String,
 
-    /// Gateway port
+    /// Port matching `address`. Zero when `address` is empty.
     pub port: u16,
 
     /// Protocol (HTTP, HTTPS, TCP, GRPC)

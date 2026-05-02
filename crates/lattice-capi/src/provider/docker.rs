@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{
-    build_cert_sans, build_post_kubeadm_commands, control_plane_name, create_cluster_labels,
+    build_cert_sans, build_post_bootstrap_commands, control_plane_name, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix, CAPIManifest,
     ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
@@ -315,7 +315,7 @@ impl Provider for DockerProvider {
         let cp_config = ControlPlaneConfig {
             replicas: cluster.spec.nodes.control_plane.replicas,
             cert_sans,
-            post_kubeadm_commands: build_post_kubeadm_commands(name, bootstrap)?,
+            post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
             vip: None,
             ssh_authorized_keys: vec![],
             registry_mirrors: bootstrap.registry_mirrors.clone(),
@@ -408,14 +408,14 @@ mod tests {
     use super::*;
     use crate::constants::DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA2;
     use crate::provider::{
-        build_post_kubeadm_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
+        build_post_bootstrap_commands, CAPI_BOOTSTRAP_API_VERSION, CAPI_CLUSTER_API_VERSION,
         CAPI_CONTROLPLANE_API_VERSION,
     };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use lattice_crd::crd::{
         BackupsConfig, BootstrapProvider, ClusterNetworkSpec, ControlPlaneSpec, EndpointsSpec,
         KubernetesSpec, LatticeClusterSpec, MonitoringConfig, NodeSpec, ProviderConfig,
-        ProviderSpec, ServiceSpec, WorkerPoolSpec,
+        ProviderSpec, ServiceSpec, ServiceType, WorkerPoolSpec,
     };
 
     /// Helper to create a sample LatticeCluster for testing
@@ -481,7 +481,7 @@ mod tests {
             bootstrap_port: 8443,
             proxy_port: 8081,
             service: ServiceSpec {
-                type_: "LoadBalancer".to_string(),
+                type_: ServiceType::LoadBalancer,
             },
             cert_policy: None,
         });
@@ -1012,7 +1012,7 @@ mod tests {
         fn no_bootstrap_info_produces_no_commands() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("test", &bootstrap).unwrap();
+            let commands = build_post_bootstrap_commands("test", &bootstrap).unwrap();
 
             assert!(commands.is_empty());
         }
@@ -1028,7 +1028,7 @@ mod tests {
                 env!("LATTICE_SCRIPTS_DIR").to_string(),
             );
 
-            let commands = build_post_kubeadm_commands("workload-1", &bootstrap).unwrap();
+            let commands = build_post_bootstrap_commands("workload-1", &bootstrap).unwrap();
 
             assert!(!commands.is_empty());
             let commands_str = commands.join("\n");
@@ -1048,7 +1048,7 @@ mod tests {
         fn cell_cluster_does_not_call_bootstrap() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("mgmt", &bootstrap).unwrap();
+            let commands = build_post_bootstrap_commands("mgmt", &bootstrap).unwrap();
 
             assert!(commands.is_empty());
         }
@@ -1058,7 +1058,7 @@ mod tests {
         fn standalone_cluster_no_bootstrap() {
             let bootstrap = BootstrapInfo::default();
 
-            let commands = build_post_kubeadm_commands("standalone", &bootstrap).unwrap();
+            let commands = build_post_bootstrap_commands("standalone", &bootstrap).unwrap();
 
             assert!(commands.is_empty());
         }

@@ -203,7 +203,10 @@ mod tests {
                     service: if ports.is_empty() {
                         None
                     } else {
-                        Some(ServicePortsSpec { ports })
+                        Some(ServicePortsSpec {
+                            ports,
+                            ..Default::default()
+                        })
                     },
                     ..Default::default()
                 },

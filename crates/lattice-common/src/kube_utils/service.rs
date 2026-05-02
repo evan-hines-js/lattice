@@ -11,14 +11,10 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 /// K8s API proxy lives on a separate in-cluster Service (see
 /// [`build_cell_internal_service`]) so a misconfigured LoadBalancer can't
 /// hand out anonymous read access to child K8s APIs.
-///
-/// `service_type` mirrors `LatticeCluster.spec.parent_config.service.type`:
-/// `"LoadBalancer"`, `"NodePort"`, or `"ClusterIP"`. Cloud-specific LB
-/// annotations are emitted only for LoadBalancer.
 pub fn build_cell_service(
     bootstrap_port: u16,
     grpc_port: u16,
-    service_type: &str,
+    service_type: lattice_crd::crd::ServiceType,
     provider_type: &lattice_crd::crd::ProviderType,
 ) -> Service {
     let auth_proxy_port = crate::DEFAULT_AUTH_PROXY_PORT;
@@ -26,7 +22,7 @@ pub fn build_cell_service(
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), "lattice-operator".to_string());
 
-    let annotations = if service_type == "LoadBalancer" {
+    let annotations = if matches!(service_type, lattice_crd::crd::ServiceType::LoadBalancer) {
         provider_type.load_balancer_annotations()
     } else {
         Default::default()
@@ -45,7 +41,7 @@ pub fn build_cell_service(
             ..Default::default()
         },
         spec: Some(ServiceSpec {
-            type_: Some(service_type.to_string()),
+            type_: Some(service_type.as_str().to_string()),
             selector: Some(leader_pod_selector()),
             ports: Some(vec![
                 tcp_port("bootstrap", bootstrap_port),

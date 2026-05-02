@@ -37,6 +37,9 @@ pub enum ModelError {
     #[error("missing name on LatticeModel")]
     MissingName,
 
+    #[error("missing metadata.uid on LatticeModel")]
+    MissingUid,
+
     #[error("missing metadata.generation on LatticeModel")]
     MissingGeneration,
 
@@ -56,6 +59,7 @@ impl Retryable for ModelError {
             Self::MissingNamespace => false,
             Self::KthenaCrdMissing => true,
             Self::MissingName => false,
+            Self::MissingUid => false,
             Self::MissingGeneration => false,
             Self::MissingInferencePort => false,
             Self::Validation(_) => false,

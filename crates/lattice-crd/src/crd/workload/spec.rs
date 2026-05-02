@@ -639,7 +639,10 @@ mod tests {
         );
 
         let mut spec = sample_workload();
-        spec.service = Some(ServicePortsSpec { ports });
+        spec.service = Some(ServicePortsSpec {
+            ports,
+            ..Default::default()
+        });
 
         let result = spec.ports();
         assert_eq!(result.len(), 2);

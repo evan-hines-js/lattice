@@ -61,17 +61,13 @@ pub trait KubeClient: Send + Sync {
 
     /// Ensure both cell Services exist: the externally-typed one for
     /// bootstrap/gRPC/auth-proxy and the in-cluster ClusterIP for the
-    /// CAPI proxy.
-    ///
-    /// `service_type` mirrors `parent_config.service.type` from the
-    /// LatticeCluster — `"LoadBalancer"`, `"NodePort"`, or `"ClusterIP"`.
-    /// The internal proxy Service is always ClusterIP regardless.
+    /// CAPI proxy. The internal proxy Service is always ClusterIP regardless.
     async fn ensure_cell_service(
         &self,
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
-        service_type: &str,
+        service_type: lattice_crd::crd::ServiceType,
         provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error>;
 
@@ -298,7 +294,7 @@ impl KubeClient for KubeClientImpl {
         bootstrap_port: u16,
         grpc_port: u16,
         proxy_port: u16,
-        service_type: &str,
+        service_type: lattice_crd::crd::ServiceType,
         provider_type: &lattice_crd::crd::ProviderType,
     ) -> Result<(), Error> {
         use k8s_openapi::api::core::v1::Service;
@@ -313,7 +309,7 @@ impl KubeClient for KubeClientImpl {
         {
             debug!("{CELL_SERVICE_NAME} already exists");
         } else {
-            info!("creating cell Service ({service_type})");
+            info!("creating cell Service ({})", service_type.as_str());
             let service = lattice_common::kube_utils::build_cell_service(
                 bootstrap_port,
                 grpc_port,

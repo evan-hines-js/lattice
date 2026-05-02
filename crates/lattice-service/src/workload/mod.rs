@@ -364,7 +364,7 @@ impl GeneratedWorkloads {
 
 use crate::crd::{
     AutoscalingMetric, AutoscalingSpec, DeployStrategy, LatticeService, LatticeServiceSpec,
-    MonitoringConfig, WorkloadSpec,
+    MonitoringConfig, ProviderType, ServiceType, WorkloadSpec,
 };
 
 /// Compiler for generating LatticeService-specific Kubernetes workload resources.
@@ -384,6 +384,7 @@ impl WorkloadCompiler {
         namespace: &str,
         pod_template: CompiledPodTemplate,
         monitoring: &MonitoringConfig,
+        provider_type: ProviderType,
     ) -> Result<GeneratedWorkloads, CompilationError> {
         let spec = &service.spec;
         let workload = &spec.workload;
@@ -433,6 +434,7 @@ impl WorkloadCompiler {
                 namespace,
                 workload,
                 has_advertise,
+                provider_type,
                 &owner_refs,
             ));
         }
@@ -578,14 +580,14 @@ impl WorkloadCompiler {
         namespace: &str,
         workload: &WorkloadSpec,
         has_advertise: bool,
+        provider_type: ProviderType,
         owner_refs: &[OwnerReference],
     ) -> Service {
         let mut selector = BTreeMap::new();
         selector.insert(lattice_common::LABEL_NAME.to_string(), name.to_string());
 
-        let ports: Vec<ServicePort> = workload
-            .service
-            .as_ref()
+        let svc_spec = workload.service.as_ref();
+        let ports: Vec<ServicePort> = svc_spec
             .map(|svc| {
                 svc.ports
                     .iter()
@@ -599,6 +601,8 @@ impl WorkloadCompiler {
             })
             .unwrap_or_default();
 
+        let service_type = svc_spec.map(|s| s.service_type).unwrap_or_default();
+
         let mut metadata =
             ObjectMeta::new(name, namespace).with_owner_references(owner_refs.to_vec());
         if has_advertise {
@@ -606,6 +610,26 @@ impl WorkloadCompiler {
                 .labels
                 .insert("istio.io/global".to_string(), "true".to_string());
         }
+        if matches!(service_type, ServiceType::LoadBalancer) {
+            for (k, v) in provider_type.load_balancer_annotations() {
+                metadata.annotations.insert(k, v);
+            }
+        }
+        if service_type.is_external() {
+            if let Some(svc) = svc_spec.filter(|s| !s.hostnames.is_empty()) {
+                metadata.annotations.insert(
+                    lattice_common::network::gateway_api::EXTERNAL_DNS_HOSTNAME_ANNOTATION
+                        .to_string(),
+                    svc.hostnames.join(","),
+                );
+            }
+        }
+
+        let type_ = if matches!(service_type, ServiceType::ClusterIP) {
+            None
+        } else {
+            Some(service_type.as_str().to_string())
+        };
 
         Service {
             api_version: "v1".to_string(),
@@ -614,7 +638,7 @@ impl WorkloadCompiler {
             spec: ServiceSpec {
                 selector,
                 ports,
-                type_: None,
+                type_,
             },
         }
     }
@@ -758,6 +782,14 @@ mod tests {
         service: &LatticeService,
         monitoring: MonitoringConfig,
     ) -> Result<GeneratedWorkloads, CompilationError> {
+        test_compile_with_provider(service, monitoring, crate::crd::ProviderType::Docker).await
+    }
+
+    async fn test_compile_with_provider(
+        service: &LatticeService,
+        monitoring: MonitoringConfig,
+        provider_type: crate::crd::ProviderType,
+    ) -> Result<GeneratedWorkloads, CompilationError> {
         let name = service
             .metadata
             .name
@@ -792,7 +824,7 @@ mod tests {
             "service",
             &service.spec.workload,
             &service.spec.runtime,
-            crate::crd::ProviderType::Docker,
+            provider_type,
             &cedar,
         )
         .with_graph(&graph)
@@ -806,6 +838,7 @@ mod tests {
             namespace,
             compiled.pod_template,
             &monitoring,
+            provider_type,
         )?;
 
         workloads.config = compiled.config;
@@ -857,7 +890,10 @@ mod tests {
             spec: crate::crd::LatticeServiceSpec {
                 workload: WorkloadSpec {
                     containers,
-                    service: Some(ServicePortsSpec { ports }),
+                    service: Some(ServicePortsSpec {
+                        ports,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1408,5 +1444,73 @@ mod tests {
             .containers
             .iter()
             .any(|c| c.name == "vpn"));
+    }
+
+    #[tokio::test]
+    async fn service_emits_cluster_ip_default() {
+        let service = make_service("my-app", "default");
+        let output = compile_service(&service).await;
+
+        let svc = output.service.expect("should have Service");
+        assert_eq!(svc.spec.type_, None);
+        assert!(svc.metadata.annotations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_emits_load_balancer_with_aws_annotations() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.service.as_mut().unwrap().service_type = ServiceType::LoadBalancer;
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Aws)
+                .await
+                .expect("compile must succeed");
+
+        let svc = output.service.expect("should have Service");
+        assert_eq!(svc.spec.type_.as_deref(), Some("LoadBalancer"));
+        assert!(svc
+            .metadata
+            .annotations
+            .contains_key("service.beta.kubernetes.io/aws-load-balancer-type"));
+    }
+
+    #[tokio::test]
+    async fn service_emits_node_port_without_lb_annotations() {
+        let mut service = make_service("my-app", "default");
+        service.spec.workload.service.as_mut().unwrap().service_type = ServiceType::NodePort;
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Aws)
+                .await
+                .expect("compile must succeed");
+
+        let svc = output.service.expect("should have Service");
+        assert_eq!(svc.spec.type_.as_deref(), Some("NodePort"));
+        assert!(svc.metadata.annotations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_emits_external_dns_annotation_when_hostnames_set() {
+        let mut service = make_service("my-app", "default");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec![
+            "app.example.com".to_string(),
+            "app.alt.example.com".to_string(),
+        ];
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        let svc = output.service.expect("should have Service");
+        assert_eq!(
+            svc.metadata
+                .annotations
+                .get("external-dns.alpha.kubernetes.io/hostname")
+                .map(|s| s.as_str()),
+            Some("app.example.com,app.alt.example.com")
+        );
     }
 }

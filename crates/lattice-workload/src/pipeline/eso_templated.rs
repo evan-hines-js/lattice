@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use lattice_common::kube_utils::OwnerReference;
 use lattice_render::EsoTemplatedEnvVar;
 use lattice_secret_provider::eso::ExternalSecret;
 
@@ -23,6 +24,7 @@ pub(crate) fn compile_eso_templated_env_vars(
     namespace: &str,
     eso_templated_variables: &BTreeMap<String, EsoTemplatedEnvVar>,
     secret_refs: &BTreeMap<String, SecretRef>,
+    owner_refs: &[OwnerReference],
 ) -> Result<(Vec<ExternalSecret>, Vec<EnvFromSource>), CompilationError> {
     // Validate per-var store consistency and group vars by store
     let mut by_store: BTreeMap<String, Vec<(&String, &EsoTemplatedEnvVar)>> = BTreeMap::new();
@@ -69,6 +71,9 @@ pub(crate) fn compile_eso_templated_env_vars(
             lattice_common::LABEL_SERVICE_OWNER.to_string(),
             service_name.to_string(),
         );
+        // Owner refs let K8s GC cascade-delete the ExternalSecret when the
+        // owning CR is deleted.
+        es.metadata.owner_references = owner_refs.to_vec();
         external_secrets.push(es);
 
         env_from_refs.push(EnvFromSource {

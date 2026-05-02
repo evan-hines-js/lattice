@@ -122,7 +122,10 @@ fn build_observability_service() -> lattice_crd::crd::LatticeService {
     );
 
     svc.spec.workload.containers = containers;
-    svc.spec.workload.service = Some(ServicePortsSpec { ports });
+    svc.spec.workload.service = Some(ServicePortsSpec {
+        ports,
+        ..Default::default()
+    });
     svc.spec.replicas = 1;
 
     // Configure observability with a PromQL mapping that queries our test metric

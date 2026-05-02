@@ -48,7 +48,10 @@ fn default_ports() -> ServicePortsSpec {
             protocol: None,
         },
     );
-    ServicePortsSpec { ports }
+    ServicePortsSpec {
+        ports,
+        ..Default::default()
+    }
 }
 
 fn make_service(name: &str, namespace: &str, spec: LatticeServiceSpec) -> LatticeService {

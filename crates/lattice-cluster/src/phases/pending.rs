@@ -40,7 +40,7 @@ pub async fn handle_pending(
                 cell_spec.bootstrap_port,
                 cell_spec.grpc_port,
                 cell_spec.proxy_port,
-                &cell_spec.service.type_,
+                cell_spec.service.type_,
                 &cluster.spec.provider.provider_type(),
             )
             .await?;

@@ -262,6 +262,21 @@ pub fn validate_dns_label(name: &str, field: &str) -> Result<(), String> {
     }
 }
 
+/// Validate that a string is a valid RFC 1123 DNS subdomain (one or more
+/// dot-separated labels), as used for hostnames published via external-dns.
+pub fn validate_dns_subdomain(name: &str, field: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 253 {
+        return Err(format!(
+            "{} '{}' must be 1..=253 chars (RFC 1123 DNS subdomain)",
+            field, name
+        ));
+    }
+    for label in name.split('.') {
+        validate_dns_label(label, field)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

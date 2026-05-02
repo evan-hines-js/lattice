@@ -45,7 +45,7 @@ use lattice_common::{capi_namespace, kubeconfig_secret_name, OPERATOR_NAME};
 use lattice_core::{LATTICE_SYSTEM_NAMESPACE, SECRET_TYPE_SA_TOKEN};
 use lattice_crd::crd::{BootstrapProvider, LatticeCluster, ProviderType};
 
-use lattice_common::retry::RetryConfig;
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 
 use super::CommandErrorExt;
 use crate::{Error, Result};
@@ -791,31 +791,30 @@ impl Installer {
         // Retry getting the docker port - LB container may not be ready immediately
         let retry_config = lattice_common::retry::RetryConfig::default();
         let container = lb_container.clone();
-        let port: String =
-            lattice_common::retry::retry_with_backoff(&retry_config, "docker_port_lookup", || {
-                let c = container.clone();
-                async move {
-                    let output = Command::new("docker")
-                        .args(["port", &c, "6443"])
-                        .output()
-                        .await
-                        .map_err(|e| format!("docker command failed: {}", e))?;
+        let port: String = retry_with_backoff(&retry_config, "docker_port_lookup", || {
+            let c = container.clone();
+            async move {
+                let output = Command::new("docker")
+                    .args(["port", &c, "6443"])
+                    .output()
+                    .await
+                    .map_err(|e| format!("docker command failed: {}", e))?;
 
-                    if !output.status.success() {
-                        return Err("LB container port not ready".to_string());
-                    }
-
-                    let port_str = String::from_utf8_lossy(&output.stdout);
-                    port_str
-                        .trim()
-                        .split(':')
-                        .next_back()
-                        .map(|p| p.to_string())
-                        .ok_or_else(|| "failed to parse port".to_string())
+                if !output.status.success() {
+                    return Err("LB container port not ready".to_string());
                 }
-            })
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to get Docker LB port: {}", e)))?;
+
+                let port_str = String::from_utf8_lossy(&output.stdout);
+                port_str
+                    .trim()
+                    .split(':')
+                    .next_back()
+                    .map(|p| p.to_string())
+                    .ok_or_else(|| "failed to parse port".to_string())
+            }
+        })
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to get Docker LB port: {}", e)))?;
 
         info!("Docker LB port found: {}", port);
         let localhost_url = format!("https://127.0.0.1:{}", port);
@@ -1058,12 +1057,15 @@ impl Installer {
     ) -> Result<()> {
         use kube::api::{Api, Patch, PatchParams};
 
-        kube_utils::ensure_namespace(
-            client,
-            lattice_common::LOCAL_SECRETS_NAMESPACE,
-            None,
-            "lattice-cli",
-        )
+        retry_with_backoff(&RetryConfig::install(), "ensure_namespace", || async {
+            kube_utils::ensure_namespace(
+                client,
+                lattice_common::LOCAL_SECRETS_NAMESPACE,
+                None,
+                "lattice-cli",
+            )
+            .await
+        })
         .await
         .cmd_err()?;
 
@@ -1074,14 +1076,17 @@ impl Installer {
             .name
             .as_ref()
             .ok_or_else(|| Error::validation("Secret must have a name"))?;
-        secrets
-            .patch(
-                name,
-                &PatchParams::apply("lattice-cli").force(),
-                &Patch::Apply(secret),
-            )
-            .await
-            .map_err(|e| Error::command_failed(format!("Failed to seed secret '{name}': {e}")))?;
+        retry_with_backoff(&RetryConfig::install(), "patch seed secret", || async {
+            secrets
+                .patch(
+                    name,
+                    &PatchParams::apply("lattice-cli").force(),
+                    &Patch::Apply(secret),
+                )
+                .await
+        })
+        .await
+        .map_err(|e| Error::command_failed(format!("Failed to seed secret '{name}': {e}")))?;
 
         Ok(())
     }
@@ -1230,7 +1235,7 @@ impl Installer {
         let mgmt_kc = mgmt_kubeconfig.clone();
         let ns = namespace.clone();
         let cluster = self.cluster_name().to_string();
-        lattice_common::retry::retry_with_backoff(&retry_config, "capi_move", || {
+        retry_with_backoff(&retry_config, "capi_move", || {
             let bs_kc = bs_kc.clone();
             let mgmt_kc = mgmt_kc.clone();
             let ns = ns.clone();

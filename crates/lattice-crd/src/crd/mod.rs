@@ -134,7 +134,7 @@ pub use types::{
     GpuCapacity, InstanceType, KubernetesSpec, NodeCapacityHint, NodeResourceSpec, NodeSpec,
     NodeTaint, PlacementPreference, PlacementRequirement, PlacementSpec, ProviderConfig,
     ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec,
-    TaintEffect, WorkerPoolSpec,
+    ServiceType, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

@@ -426,7 +426,10 @@ mod tests {
         let spec = lattice_crd::crd::LatticeServiceSpec {
             workload: lattice_crd::crd::WorkloadSpec {
                 containers,
-                service: Some(lattice_crd::crd::ServicePortsSpec { ports }),
+                service: Some(lattice_crd::crd::ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()

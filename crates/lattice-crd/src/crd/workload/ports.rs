@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::crd::types::ServiceType;
+
 /// Service port specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -23,10 +25,23 @@ pub struct PortSpec {
 
 /// Service exposure specification
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct ServicePortsSpec {
     /// Named network ports
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub ports: BTreeMap<String, PortSpec>,
+
+    /// K8s `Service.spec.type`. Defaults to ClusterIP. NodePort and LoadBalancer
+    /// expose the workload externally and are mutually exclusive with
+    /// `LatticeService.spec.ingress` (Gateway API).
+    #[serde(default)]
+    pub service_type: ServiceType,
+
+    /// DNS hostnames published via external-dns when the Service is externally
+    /// exposed (`serviceType != ClusterIP`). Emitted as an
+    /// `external-dns.alpha.kubernetes.io/hostname` annotation on the Service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
 }
 
 impl ServicePortsSpec {
@@ -72,6 +87,17 @@ impl ServicePortsSpec {
             }
         }
 
+        if !self.hostnames.is_empty() && !self.service_type.is_external() {
+            return Err(crate::ValidationError::new(
+                "service.hostnames requires serviceType=NodePort or LoadBalancer; \
+                 ClusterIP services have no external IP for external-dns to publish",
+            ));
+        }
+        for hostname in &self.hostnames {
+            lattice_core::validate_dns_subdomain(hostname, "hostname")
+                .map_err(crate::ValidationError::new)?;
+        }
+
         Ok(())
     }
 }
@@ -104,7 +130,10 @@ mod tests {
             },
         );
 
-        let svc = ServicePortsSpec { ports };
+        let svc = ServicePortsSpec {
+            ports,
+            ..Default::default()
+        };
         assert!(svc.validate().is_err());
     }
 
@@ -120,7 +149,10 @@ mod tests {
             },
         );
 
-        let svc = ServicePortsSpec { ports };
+        let svc = ServicePortsSpec {
+            ports,
+            ..Default::default()
+        };
         assert!(svc.validate().is_err());
     }
 
@@ -135,7 +167,10 @@ mod tests {
                 protocol: None,
             },
         );
-        let svc = ServicePortsSpec { ports };
+        let svc = ServicePortsSpec {
+            ports,
+            ..Default::default()
+        };
         let err = svc.validate().unwrap_err().to_string();
         assert!(err.contains("port name"));
     }
@@ -151,7 +186,10 @@ mod tests {
                 protocol: None,
             },
         );
-        let svc = ServicePortsSpec { ports };
+        let svc = ServicePortsSpec {
+            ports,
+            ..Default::default()
+        };
         let err = svc.validate().unwrap_err().to_string();
         assert!(err.contains("15 character"));
     }
@@ -167,7 +205,58 @@ mod tests {
                 protocol: None,
             },
         );
-        let svc = ServicePortsSpec { ports };
+        let svc = ServicePortsSpec {
+            ports,
+            ..Default::default()
+        };
         assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn service_type_defaults_to_cluster_ip() {
+        let svc = ServicePortsSpec::default();
+        assert_eq!(svc.service_type, ServiceType::ClusterIP);
+        assert!(!svc.service_type.is_external());
+    }
+
+    #[test]
+    fn service_type_round_trips() {
+        let json = r#"{"serviceType":"LoadBalancer"}"#;
+        let svc: ServicePortsSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(svc.service_type, ServiceType::LoadBalancer);
+        assert!(svc.service_type.is_external());
+    }
+
+    #[test]
+    fn hostnames_with_cluster_ip_rejected() {
+        let svc = ServicePortsSpec {
+            hostnames: vec!["app.example.com".to_string()],
+            ..Default::default()
+        };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("hostnames"), "got: {err}");
+    }
+
+    #[test]
+    fn hostnames_with_load_balancer_accepted() {
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            hostnames: vec![
+                "app.example.com".to_string(),
+                "app.alt.example.com".to_string(),
+            ],
+            ..Default::default()
+        };
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_hostname_rejected() {
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            hostnames: vec!["BAD_HOSTNAME!".to_string()],
+            ..Default::default()
+        };
+        assert!(svc.validate().is_err());
     }
 }

@@ -395,7 +395,7 @@ pub async fn handle_ready(cluster: &LatticeCluster, ctx: &Context) -> Result<Act
                 pc.bootstrap_port,
                 pc.grpc_port,
                 pc.proxy_port,
-                &pc.service.type_,
+                pc.service.type_,
                 &provider_type,
             )
             .await

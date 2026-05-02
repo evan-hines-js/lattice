@@ -1002,25 +1002,42 @@ fn default_proxy_port() -> u16 {
     crate::DEFAULT_PROXY_PORT
 }
 
-/// Service exposure specification
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-pub struct ServiceSpec {
-    /// Service type (LoadBalancer, NodePort, ClusterIP)
-    #[serde(rename = "type")]
-    pub type_: String,
+/// K8s Service `.spec.type` — shared between the cell `Service` and per-workload
+/// `LatticeService` Service emission.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServiceType {
+    #[default]
+    ClusterIP,
+    NodePort,
+    LoadBalancer,
 }
 
-impl ServiceSpec {
-    /// Validate the service specification.
-    pub fn validate(&self) -> Result<(), crate::ValidationError> {
-        match self.type_.as_str() {
-            "LoadBalancer" | "NodePort" | "ClusterIP" => Ok(()),
-            _ => Err(crate::ValidationError::new(format!(
-                "service type must be LoadBalancer, NodePort, or ClusterIP, got: {}",
-                self.type_
-            ))),
+impl ServiceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClusterIP => "ClusterIP",
+            Self::NodePort => "NodePort",
+            Self::LoadBalancer => "LoadBalancer",
         }
     }
+
+    pub fn is_external(&self) -> bool {
+        !matches!(self, Self::ClusterIP)
+    }
+}
+
+impl std::fmt::Display for ServiceType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Cell Service exposure spec (for `LatticeCluster.spec.parentConfig.service`).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct ServiceSpec {
+    #[serde(rename = "type", default)]
+    pub type_: ServiceType,
 }
 
 impl EndpointsSpec {
@@ -1052,7 +1069,6 @@ impl EndpointsSpec {
                 "bootstrap_port and proxy_port must be distinct",
             ));
         }
-        self.service.validate()?;
         if let Some(ref policy) = self.cert_policy {
             policy.validate()?;
         }
@@ -2361,6 +2377,7 @@ mod tests {
                 serde_json::from_str(json).expect("EndpointsSpec deserialization should succeed");
             assert_eq!(spec.grpc_port, 50051);
             assert_eq!(spec.bootstrap_port, 8443);
+            assert_eq!(spec.service.type_, ServiceType::LoadBalancer);
         }
     }
 
@@ -2373,7 +2390,7 @@ mod tests {
                 bootstrap_port: 8443,
                 proxy_port: 8081,
                 service: ServiceSpec {
-                    type_: "LoadBalancer".to_string(),
+                    type_: ServiceType::LoadBalancer,
                 },
                 cert_policy: None,
             }
@@ -2511,23 +2528,21 @@ mod tests {
 
         #[test]
         fn invalid_service_type_rejected() {
-            let mut spec = valid_endpoints();
-            spec.service.type_ = "ExternalName".to_string();
-            let err = spec.validate().unwrap_err().to_string();
-            assert!(err.contains("LoadBalancer"), "got: {err}");
+            let json = r#"{"grpcPort":50051,"bootstrapPort":8443,"proxyPort":8081,"service":{"type":"ExternalName"}}"#;
+            assert!(serde_json::from_str::<EndpointsSpec>(json).is_err());
         }
 
         #[test]
         fn nodeport_service_type_accepted() {
             let mut spec = valid_endpoints();
-            spec.service.type_ = "NodePort".to_string();
+            spec.service.type_ = ServiceType::NodePort;
             assert!(spec.validate().is_ok());
         }
 
         #[test]
         fn clusterip_service_type_accepted() {
             let mut spec = valid_endpoints();
-            spec.service.type_ = "ClusterIP".to_string();
+            spec.service.type_ = ServiceType::ClusterIP;
             assert!(spec.validate().is_ok());
         }
     }

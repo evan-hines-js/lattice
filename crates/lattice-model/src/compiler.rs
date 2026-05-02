@@ -139,6 +139,19 @@ pub async fn compile_model(
 
     let roles = prepare_roles(model)?;
 
+    let model_uid = {
+        use kube::ResourceExt;
+        model.uid().ok_or(ModelError::MissingUid)?
+    };
+    let owner_refs = vec![lattice_common::kube_utils::OwnerReference {
+        api_version: "lattice.dev/v1alpha1".to_string(),
+        kind: "LatticeModel".to_string(),
+        name: name.to_string(),
+        uid: model_uid,
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }];
+
     let comp = CompilationCtx {
         namespace,
         provider_type: ctx.provider_type,
@@ -148,6 +161,7 @@ pub async fn compile_model(
         has_topology: model.spec.topology.is_some(),
         quota_budget: ctx.quota_budget,
         image_providers: ctx.image_providers.clone(),
+        owner_refs,
     };
 
     let mut compiled = compile_roles(name, &roles, &comp).await?;
@@ -228,6 +242,9 @@ struct CompilationCtx<'a> {
     has_topology: bool,
     quota_budget: Option<&'a lattice_quota::QuotaBudget>,
     image_providers: std::collections::BTreeMap<String, lattice_crd::crd::CredentialSpec>,
+    /// Owner ref propagated to every child resource (PVCs, ConfigMaps,
+    /// Secrets, ExternalSecrets) so K8s GC cascades on LatticeModel delete.
+    owner_refs: Vec<lattice_common::kube_utils::OwnerReference>,
 }
 
 /// Compile a single workload (entry or worker) through the WorkloadCompiler pipeline.
@@ -259,7 +276,8 @@ async fn compile_workload(
     )
     .with_cluster_name(ctx.cluster_name)
     .with_graph(ctx.graph)
-    .with_image_providers(ctx.image_providers.clone());
+    .with_image_providers(ctx.image_providers.clone())
+    .with_owner_references(ctx.owner_refs.clone());
 
     if let Some(budget) = ctx.quota_budget {
         compiler = compiler.with_quota_budget(budget.clone(), 1);
@@ -920,7 +938,10 @@ mod tests {
             replicas: Some(replicas),
             entry_workload: WorkloadSpec {
                 containers,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             entry_runtime: RuntimeSpec::default(),
@@ -1370,7 +1391,10 @@ mod tests {
                 protocol: None,
             },
         );
-        decode.entry_workload.service = Some(ServicePortsSpec { ports });
+        decode.entry_workload.service = Some(ServicePortsSpec {
+            ports,
+            ..Default::default()
+        });
         decode.autoscaling = Some(ModelAutoscalingSpec {
             max: 8,
             metrics: vec![AutoscalingMetric {
@@ -1961,7 +1985,10 @@ mod tests {
             replicas: Some(1),
             entry_workload: WorkloadSpec {
                 containers,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
                 resources,
             },
             entry_runtime: RuntimeSpec::default(),

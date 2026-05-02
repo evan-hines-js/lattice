@@ -21,7 +21,7 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_kubeadm_commands, create_cluster_labels,
+    build_cert_sans, build_post_bootstrap_commands, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
@@ -277,12 +277,12 @@ impl Provider for BasisProvider {
                 BASIS_VIP_INTERFACE.to_string(),
                 cfg.kube_vip_image.clone(),
             ));
-            let post_kubeadm_commands = build_post_kubeadm_commands(name, bootstrap)?;
+            let post_bootstrap_commands = build_post_bootstrap_commands(name, bootstrap)?;
 
             let cp_config = ControlPlaneConfig {
                 replicas: spec.nodes.control_plane.replicas,
                 cert_sans,
-                post_kubeadm_commands,
+                post_bootstrap_commands,
                 vip,
                 // Bootstrap provider writes this into root's
                 // authorized_keys via kubeadm's `users[name=root]`

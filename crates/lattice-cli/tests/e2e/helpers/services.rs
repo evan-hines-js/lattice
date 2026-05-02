@@ -57,7 +57,10 @@ pub fn build_busybox_service(
             workload: WorkloadSpec {
                 containers,
                 resources,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
             },
             runtime: RuntimeSpec {
                 image_pull_secrets: vec!["default".to_string()],
@@ -209,7 +212,10 @@ pub fn create_service_with_security_overrides(
         spec: LatticeServiceSpec {
             workload: WorkloadSpec {
                 containers,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             runtime: RuntimeSpec {

@@ -386,7 +386,13 @@ mod tests {
                 protocol: None,
             },
         );
-        let mut role = make_role_with_service(2, Some(ServicePortsSpec { ports }));
+        let mut role = make_role_with_service(
+            2,
+            Some(ServicePortsSpec {
+                ports,
+                ..Default::default()
+            }),
+        );
         role.autoscaling = Some(ModelAutoscalingSpec {
             max: 5,
             metrics: vec![AutoscalingMetric {

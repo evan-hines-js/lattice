@@ -31,6 +31,8 @@ struct ClusterRoute {
     service_name: String,
     service_namespace: String,
     hostname: String,
+    #[serde(default)]
+    address: String,
     port: u16,
     #[serde(default)]
     service_ports: std::collections::BTreeMap<String, u16>,
@@ -50,13 +52,28 @@ impl ClusterRoute {
             .collect()
     }
 
-    /// The actual service port to connect to (first service_port, or gateway port).
-    fn service_port(&self) -> u16 {
-        self.service_ports
+    /// HAProxy backend `server` target.
+    ///
+    /// Prefers the `address` from the route table (a directly-routable LB VIP)
+    /// over the service FQDN, so the proxy → backend hop can bypass the mesh
+    /// dataplane. Falls back to the in-cluster FQDN when the route is
+    /// mesh-internal — ztunnel handles cross-cluster HBONE tunneling
+    /// transparently from there.
+    fn backend_target(&self) -> (String, u16) {
+        if !self.address.is_empty() && self.port > 0 {
+            return (self.address.clone(), self.port);
+        }
+        let host = format!(
+            "{}.{}.svc.cluster.local",
+            self.service_name, self.service_namespace
+        );
+        let port = self
+            .service_ports
             .values()
             .next()
             .copied()
-            .unwrap_or(self.port)
+            .unwrap_or(self.port);
+        (host, port)
     }
 }
 
@@ -129,20 +146,18 @@ backend empty
     }
     cfg.push_str("    default_backend fallback\n\n");
 
-    // Backends — connect to the local service stub (ClusterIP) and let
-    // ztunnel handle cross-cluster HBONE tunneling transparently.
+    // Backends — `backend_target` picks the direct LB VIP when the route
+    // advertises one (bypasses the mesh on the proxy → backend hop), else
+    // falls back to the service FQDN so ztunnel handles cross-cluster HBONE
+    // tunneling.
     for route in routes {
-        let svc_host = format!(
-            "{}.{}.svc.cluster.local",
-            route.service_name, route.service_namespace
-        );
-        let svc_port = route.service_port();
+        let (host, port) = route.backend_target();
         let _ = writeln!(
             cfg,
             "backend {}\n    server gw {}:{}\n",
             route.backend_name(),
-            svc_host,
-            svc_port
+            host,
+            port
         );
     }
 
@@ -255,6 +270,66 @@ async fn run_watcher(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn route_with(address: &str, port: u16, svc_ports: &[(&str, u16)]) -> ClusterRoute {
+        let mut sp = BTreeMap::new();
+        for (k, v) in svc_ports {
+            sp.insert((*k).to_string(), *v);
+        }
+        ClusterRoute {
+            service_name: "jellyfin".into(),
+            service_namespace: "media".into(),
+            hostname: "jellyfin.example.com".into(),
+            address: address.into(),
+            port,
+            service_ports: sp,
+        }
+    }
+
+    #[test]
+    fn backend_target_prefers_direct_address_when_present() {
+        let r = route_with("10.0.0.42", 8096, &[("http", 8096)]);
+        assert_eq!(r.backend_target(), ("10.0.0.42".to_string(), 8096));
+    }
+
+    #[test]
+    fn backend_target_falls_back_to_fqdn_when_address_empty() {
+        let r = route_with("", 0, &[("http", 8096)]);
+        assert_eq!(
+            r.backend_target(),
+            ("jellyfin.media.svc.cluster.local".to_string(), 8096)
+        );
+    }
+
+    #[test]
+    fn backend_target_falls_back_to_fqdn_when_port_zero() {
+        let r = route_with("10.0.0.42", 0, &[("http", 8096)]);
+        assert_eq!(
+            r.backend_target(),
+            ("jellyfin.media.svc.cluster.local".to_string(), 8096)
+        );
+    }
+
+    #[test]
+    fn rendered_backend_uses_direct_address() {
+        let routes = vec![route_with("10.0.0.42", 8096, &[("http", 8096)])];
+        let cfg = render_haproxy_config(&routes);
+        assert!(cfg.contains("server gw 10.0.0.42:8096"));
+        assert!(!cfg.contains("svc.cluster.local"));
+    }
+
+    #[test]
+    fn rendered_backend_falls_back_to_fqdn() {
+        let routes = vec![route_with("", 0, &[("http", 8096)])];
+        let cfg = render_haproxy_config(&routes);
+        assert!(cfg.contains("server gw jellyfin.media.svc.cluster.local:8096"));
     }
 }
 

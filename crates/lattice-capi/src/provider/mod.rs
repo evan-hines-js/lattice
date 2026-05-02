@@ -19,6 +19,7 @@
 mod aws;
 mod basis;
 mod docker;
+mod kube_vip;
 mod openstack;
 mod proxmox;
 pub mod registry;
@@ -320,8 +321,10 @@ pub struct ControlPlaneConfig {
     pub replicas: u32,
     /// Additional SANs for the API server certificate
     pub cert_sans: Vec<String>,
-    /// Commands to run after kubeadm completes
-    pub post_kubeadm_commands: Vec<String>,
+    /// Commands to run after the bootstrap tool (kubeadm or RKE2)
+    /// finishes on each CP. Used by both flavors — `postKubeadmCommands`
+    /// for kubeadm, `postRKE2Commands` for RKE2.
+    pub post_bootstrap_commands: Vec<String>,
     /// VIP configuration for kube-vip (required for bare-metal/Proxmox)
     pub vip: Option<VipConfig>,
     /// SSH authorized keys for node access
@@ -350,7 +353,7 @@ pub struct VipMode {
     pub interface: String,
 }
 
-use crate::constants::{DEFAULT_KUBE_VIP_IMAGE, KUBERNETES_API_SERVER_PORT};
+use crate::constants::DEFAULT_KUBE_VIP_IMAGE;
 
 impl VipConfig {
     pub fn arp(address: String, interface: String, image: Option<String>) -> Self {
@@ -366,132 +369,6 @@ impl VipConfig {
     pub fn node_interface(&self) -> &str {
         &self.mode.interface
     }
-}
-
-/// Build the env-var set kube-vip needs for the given VIP config.
-fn kube_vip_env(vip: &VipConfig) -> Vec<k8s_openapi::api::core::v1::EnvVar> {
-    use k8s_openapi::api::core::v1::EnvVar;
-
-    let mut env = vec![
-        EnvVar {
-            name: "cp_enable".to_string(),
-            value: Some("true".to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "address".to_string(),
-            value: Some(vip.address.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "port".to_string(),
-            value: Some(KUBERNETES_API_SERVER_PORT.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "vip_leaderelection".to_string(),
-            value: Some("true".to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "vip_leaseduration".to_string(),
-            value: Some("60".to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "vip_renewdeadline".to_string(),
-            value: Some("40".to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "vip_retryperiod".to_string(),
-            value: Some("5".to_string()),
-            ..Default::default()
-        },
-    ];
-
-    env.push(EnvVar {
-        name: "vip_interface".to_string(),
-        value: Some(vip.mode.interface.clone()),
-        ..Default::default()
-    });
-    env.push(EnvVar {
-        name: "vip_arp".to_string(),
-        value: Some("true".to_string()),
-        ..Default::default()
-    });
-
-    env
-}
-
-/// Generate kube-vip static pod manifest
-fn generate_kube_vip_manifest(
-    vip: &VipConfig,
-    bootstrap: &lattice_crd::crd::BootstrapProvider,
-) -> Result<String> {
-    use k8s_openapi::api::core::v1::{
-        Capabilities, Container, HostAlias, HostPathVolumeSource, Pod, PodSpec, SecurityContext,
-        Volume, VolumeMount,
-    };
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use lattice_crd::crd::BootstrapProvider;
-
-    let kubeconfig_path = match bootstrap {
-        BootstrapProvider::Rke2 => "/etc/rancher/rke2/rke2.yaml",
-        BootstrapProvider::Kubeadm => "/etc/kubernetes/super-admin.conf",
-        _ => {
-            return Err(Error::provider(format!(
-                "unsupported bootstrap provider: {bootstrap}"
-            )))
-        }
-    };
-
-    let pod = Pod {
-        metadata: ObjectMeta {
-            name: Some("kube-vip".to_string()),
-            namespace: Some("kube-system".to_string()),
-            ..Default::default()
-        },
-        spec: Some(PodSpec {
-            host_network: Some(true),
-            host_aliases: Some(vec![HostAlias {
-                hostnames: Some(vec!["kubernetes".to_string()]),
-                ip: "127.0.0.1".to_string(),
-            }]),
-            containers: vec![Container {
-                name: "kube-vip".to_string(),
-                image: Some(vip.image.clone()),
-                image_pull_policy: Some("IfNotPresent".to_string()),
-                args: Some(vec!["manager".to_string()]),
-                env: Some(kube_vip_env(vip)),
-                security_context: Some(SecurityContext {
-                    capabilities: Some(Capabilities {
-                        add: Some(vec!["NET_ADMIN".to_string(), "NET_RAW".to_string()]),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                volume_mounts: Some(vec![VolumeMount {
-                    name: "kubeconfig".to_string(),
-                    mount_path: "/etc/kubernetes/admin.conf".to_string(),
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }],
-            volumes: Some(vec![Volume {
-                name: "kubeconfig".to_string(),
-                host_path: Some(HostPathVolumeSource {
-                    path: kubeconfig_path.to_string(),
-                    type_: Some("FileOrCreate".to_string()),
-                }),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    serde_json::to_string(&pod).map_err(|e| Error::serialization(format!("kube-vip pod: {}", e)))
 }
 
 /// Configuration for a worker pool
@@ -1132,47 +1009,32 @@ fn generate_kubeadm_control_plane(
         }
     });
 
-    if !cp_config.post_kubeadm_commands.is_empty() {
-        kubeadm_config_spec["postKubeadmCommands"] =
-            serde_json::json!(cp_config.post_kubeadm_commands);
-    }
-
-    // Build files and preKubeadmCommands accumulators
     let mut files: Vec<serde_json::Value> = Vec::new();
-    let mut pre_kubeadm_commands: Vec<String> = Vec::new();
+    let mut pre_commands: Vec<String> = Vec::new();
+    let post_commands: Vec<String> = cp_config.post_bootstrap_commands.clone();
 
     // Mirror config (must come before VIP — restarts containerd)
     if !cp_config.registry_mirrors.is_empty() {
         files.extend(registry::generate_containerd_mirror_files(
             &cp_config.registry_mirrors,
         ));
-        pre_kubeadm_commands.extend(registry::generate_containerd_mirror_commands());
+        pre_commands.extend(registry::generate_containerd_mirror_commands());
     }
 
-    // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
-        let kube_vip_content = generate_kube_vip_manifest(vip, &config.bootstrap)?;
-        files.push(serde_json::json!({
-            "content": kube_vip_content,
-            "owner": "root:root",
-            "path": "/etc/kubernetes/manifests/kube-vip.yaml",
-            "permissions": "0644"
-        }));
-
-        // Set node-ip before kubeadm starts to prevent VIP registration issue
-        // See: https://github.com/kube-vip/kube-vip/issues/741
-        let interface = vip.node_interface();
-        pre_kubeadm_commands.push(format!(
-            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && echo "KUBELET_EXTRA_ARGS=\"--node-ip=$NODE_IP\"" > /etc/default/kubelet"#,
-            iface = interface
-        ));
+        let bundle = kube_vip::bundle(vip, &config.bootstrap)?;
+        files.push(bundle.file);
+        pre_commands.extend(bundle.pre_bootstrap);
     }
 
     if !files.is_empty() {
         kubeadm_config_spec["files"] = serde_json::json!(files);
     }
-    if !pre_kubeadm_commands.is_empty() {
-        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!(pre_kubeadm_commands);
+    if !pre_commands.is_empty() {
+        kubeadm_config_spec["preKubeadmCommands"] = serde_json::json!(pre_commands);
+    }
+    if !post_commands.is_empty() {
+        kubeadm_config_spec["postKubeadmCommands"] = serde_json::json!(post_commands);
     }
 
     // Add SSH authorized keys if configured
@@ -1222,28 +1084,23 @@ fn generate_rke2_control_plane(
 ) -> Result<CAPIManifest> {
     let cp_name = control_plane_name(config.name);
 
-    // Build files array for static pods, SSH keys, and mirror config
     let mut files: Vec<serde_json::Value> = Vec::new();
+    let mut pre_commands: Vec<String> = Vec::new();
+    let post_commands: Vec<String> = cp_config.post_bootstrap_commands.clone();
 
-    // Mirror config
     if !cp_config.registry_mirrors.is_empty() {
         files.push(registry::generate_rke2_registries_file(
             &cp_config.registry_mirrors,
         ));
     }
 
-    // Add kube-vip static pod if VIP is configured
     if let Some(ref vip) = cp_config.vip {
-        let kube_vip_content = generate_kube_vip_manifest(vip, &config.bootstrap)?;
-        files.push(serde_json::json!({
-            "content": kube_vip_content,
-            "owner": "root:root",
-            "path": "/var/lib/rancher/rke2/agent/pod-manifests/kube-vip.yaml",
-            "permissions": "0644"
-        }));
+        let bundle = kube_vip::bundle(vip, &config.bootstrap)?;
+        files.push(bundle.file);
+        pre_commands.extend(bundle.pre_bootstrap);
     }
 
-    // Add SSH authorized keys via files (RKE2 doesn't have native user support)
+    // RKE2 has no native user block; SSH keys go through files.
     if !cp_config.ssh_authorized_keys.is_empty() {
         files.push(serde_json::json!({
             "content": cp_config.ssh_authorized_keys.join("\n"),
@@ -1251,20 +1108,6 @@ fn generate_rke2_control_plane(
             "path": "/root/.ssh/authorized_keys",
             "permissions": "0600"
         }));
-    }
-
-    // Build preRKE2Commands to set node-ip before kube-vip adds the VIP
-    // This prevents kubelet from registering with the VIP instead of the actual node IP
-    // See: https://github.com/kube-vip/kube-vip/issues/741
-    let mut pre_rke2_commands: Vec<String> = vec![];
-    if let Some(ref vip) = cp_config.vip {
-        let interface = vip.node_interface();
-        // Get the node's actual IP (not the VIP) and write to RKE2 config
-        // This runs BEFORE RKE2 starts, so kube-vip hasn't added the VIP yet
-        pre_rke2_commands.push(format!(
-            r#"NODE_IP=$(ip -4 -o addr show {iface} | awk '{{print $4}}' | cut -d/ -f1 | head -1) && mkdir -p /etc/rancher/rke2 && echo "node-ip: $NODE_IP" >> /etc/rancher/rke2/config.yaml"#,
-            iface = interface
-        ));
     }
 
     // Build extra args using the shared functions
@@ -1334,12 +1177,11 @@ fn generate_rke2_control_plane(
         });
     }
 
-    if !pre_rke2_commands.is_empty() {
-        spec["preRKE2Commands"] = serde_json::json!(pre_rke2_commands);
+    if !pre_commands.is_empty() {
+        spec["preRKE2Commands"] = serde_json::json!(pre_commands);
     }
-
-    if !cp_config.post_kubeadm_commands.is_empty() {
-        spec["postRKE2Commands"] = serde_json::json!(cp_config.post_kubeadm_commands);
+    if !post_commands.is_empty() {
+        spec["postRKE2Commands"] = serde_json::json!(post_commands);
     }
 
     if !files.is_empty() {
@@ -1382,14 +1224,10 @@ fn render_bootstrap_script(
         .replace("{{ ca_cert_path }}", ca_cert_path))
 }
 
-/// Build postKubeadmCommands for agent bootstrap
-///
-/// This is shared across ALL providers. These are the shell commands that run
-/// after kubeadm completes on each control plane node.
-///
-/// For RKE2, the same commands are used in postRKE2Commands.
-/// The commands handle "token already used" errors gracefully by continuing.
-pub fn build_post_kubeadm_commands(
+/// Build the agent-bootstrap commands that run after the bootstrap
+/// tool finishes on each CP. Wired into `postKubeadmCommands` for
+/// kubeadm and `postRKE2Commands` for RKE2 — same shell, same body.
+pub fn build_post_bootstrap_commands(
     cluster_name: &str,
     bootstrap: &BootstrapInfo,
 ) -> Result<Vec<String>> {
@@ -1677,7 +1515,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec!["localhost".to_string()],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -1697,7 +1535,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec!["localhost".to_string()],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -1866,7 +1704,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec![],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -1898,7 +1736,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec![],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -1923,7 +1761,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: Some(VipConfig::arp(
                     "10.0.0.100".to_string(),
                     "eth0".to_string(),
@@ -1957,36 +1795,42 @@ mod tests {
                 .as_str()
                 .expect("content should be a string");
 
-            assert_eq!(path, "/etc/kubernetes/manifests/kube-vip.yaml");
+            // kube-vip's static-pod template stages OUTSIDE
+            // /etc/kubernetes/manifests/ so kubelet's watcher doesn't
+            // try to parse the placeholder version. preKubeadmCommands
+            // materializes the real manifest into manifests/.
+            assert_eq!(path, "/etc/kubernetes/kube-vip.yaml.tmpl");
             assert!(content.contains("kube-vip"));
             assert!(content.contains("10.0.0.100"));
             assert!(content.contains("eth0"));
             assert!(content.contains(DEFAULT_KUBE_VIP_IMAGE));
-            // Kubeadm uses super-admin.conf kubeconfig
-            assert!(
-                content.contains("/etc/kubernetes/super-admin.conf"),
-                "Kubeadm kube-vip should use kubeadm kubeconfig path"
-            );
 
-            // Verify preKubeadmCommands sets node-ip to prevent VIP registration issue
-            // See: https://github.com/kube-vip/kube-vip/issues/741
-            let pre_commands = spec
+            let pre_cmds = spec
                 .pointer("/kubeadmConfigSpec/preKubeadmCommands")
-                .expect("should have preKubeadmCommands when VIP configured");
-            let pre_commands_arr = pre_commands
-                .as_array()
-                .expect("preKubeadmCommands should be array");
+                .and_then(|v| v.as_array())
+                .expect("preKubeadmCommands should be set when VIP is configured");
+            let joined: String = pre_cmds
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(joined.contains("--node-ip"), "node-ip pin missing");
+            assert!(joined.contains("eth0"), "node-ip uses VIP interface");
             assert!(
-                !pre_commands_arr.is_empty(),
-                "preKubeadmCommands should have commands"
+                joined.contains("/run/kubeadm/kubeadm.yaml"),
+                "init/join discriminator missing"
             );
-            let cmd = pre_commands_arr[0]
-                .as_str()
-                .expect("command should be a string");
-            assert!(cmd.contains("node-ip"), "should set node-ip for kubelet");
             assert!(
-                cmd.contains("eth0"),
-                "should use VIP interface for IP detection"
+                joined.contains("/etc/kubernetes/super-admin.conf"),
+                "init-machine kubeconfig missing"
+            );
+            assert!(
+                joined.contains("/etc/kubernetes/admin.conf"),
+                "join-machine kubeconfig missing"
+            );
+            assert!(
+                joined.contains("/etc/kubernetes/manifests/kube-vip.yaml"),
+                "manifest must be materialized into the static-pod dir"
             );
 
             // Verify API server advertise-address is set to VIP for multi-NIC environments
@@ -2014,7 +1858,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec![],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -2042,7 +1886,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 3,
                 cert_sans: vec!["10.0.0.100".to_string()],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: Some(VipConfig::arp(
                     "10.0.0.100".to_string(),
                     "eth0".to_string(),
@@ -2136,7 +1980,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec![],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
@@ -2163,7 +2007,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec![],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: None,
                 ssh_authorized_keys: vec![
                     "ssh-ed25519 AAAAC3... user@host".to_string(),
@@ -2205,7 +2049,7 @@ mod tests {
             let cp_config = ControlPlaneConfig {
                 replicas: 1,
                 cert_sans: vec!["10.0.0.100".to_string()],
-                post_kubeadm_commands: vec![],
+                post_bootstrap_commands: vec![],
                 vip: Some(VipConfig::arp(
                     "10.0.0.100".to_string(),
                     "eth0".to_string(),

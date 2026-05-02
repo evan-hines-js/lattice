@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use lattice_common::kube_utils::OwnerReference;
 use lattice_render::RenderedVariable;
 
 use crate::k8s::{ConfigMap, ConfigMapEnvSource, EnvFromSource, Secret, SecretEnvSource};
@@ -30,6 +31,7 @@ pub fn compile(
     container_name: &str,
     namespace: &str,
     variables: &BTreeMap<String, RenderedVariable>,
+    owner_refs: &[OwnerReference],
 ) -> CompiledEnv {
     let mut non_sensitive: BTreeMap<String, String> = BTreeMap::new();
     let mut sensitive: BTreeMap<String, String> = BTreeMap::new();
@@ -48,6 +50,7 @@ pub fn compile(
     if !non_sensitive.is_empty() {
         let cm_name = format!("{}-{}-env", service_name, container_name);
         let mut cm = ConfigMap::new(&cm_name, namespace);
+        cm.metadata.owner_references = owner_refs.to_vec();
         cm.data = non_sensitive;
         result.config_map = Some(cm);
         result.env_from.push(EnvFromSource {
@@ -60,6 +63,7 @@ pub fn compile(
     if !sensitive.is_empty() {
         let secret_name = format!("{}-{}-env-secret", service_name, container_name);
         let mut secret = Secret::new(&secret_name, namespace);
+        secret.metadata.owner_references = owner_refs.to_vec();
         secret.string_data = sensitive;
         result.secret = Some(secret);
         result.env_from.push(EnvFromSource {
@@ -81,7 +85,7 @@ mod tests {
         variables.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
         variables.insert("PORT".to_string(), RenderedVariable::plain("8080"));
 
-        let result = compile("api", "main", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables, &[]);
 
         assert!(result.config_map.is_some());
         assert!(result.secret.is_none());
@@ -104,7 +108,7 @@ mod tests {
             RenderedVariable::secret("secret123"),
         );
 
-        let result = compile("api", "main", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables, &[]);
 
         assert!(result.config_map.is_none());
         assert!(result.secret.is_some());
@@ -127,7 +131,7 @@ mod tests {
         variables.insert("HOST".to_string(), RenderedVariable::plain("localhost"));
         variables.insert("PASSWORD".to_string(), RenderedVariable::secret("secret"));
 
-        let result = compile("api", "main", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables, &[]);
 
         assert!(result.config_map.is_some());
         assert!(result.secret.is_some());
@@ -138,7 +142,7 @@ mod tests {
     fn test_compile_empty() {
         let variables = BTreeMap::new();
 
-        let result = compile("api", "main", "prod", &variables);
+        let result = compile("api", "main", "prod", &variables, &[]);
 
         assert!(result.config_map.is_none());
         assert!(result.secret.is_none());
@@ -150,8 +154,8 @@ mod tests {
         let mut vars = BTreeMap::new();
         vars.insert("KEY".to_string(), RenderedVariable::plain("value"));
 
-        let main = compile("api", "main", "prod", &vars);
-        let sidecar = compile("api", "sidecar", "prod", &vars);
+        let main = compile("api", "main", "prod", &vars, &[]);
+        let sidecar = compile("api", "sidecar", "prod", &vars, &[]);
 
         let main_cm = main.config_map.expect("main should have cm");
         let sidecar_cm = sidecar.config_map.expect("sidecar should have cm");

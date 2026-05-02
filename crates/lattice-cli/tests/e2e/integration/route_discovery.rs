@@ -107,7 +107,10 @@ fn build_advertised_service(
             workload: WorkloadSpec {
                 containers,
                 resources: BTreeMap::new(),
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
             },
             ingress: Some(IngressSpec {
                 gateway_class: None,

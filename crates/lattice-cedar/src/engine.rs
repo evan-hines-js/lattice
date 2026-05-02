@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 
 use std::fmt;
 
@@ -23,7 +23,7 @@ use cedar_policy::{
     Authorizer, Context, Decision, Entities, Entity, EntityUid, PolicySet, Request, Response,
 };
 use kube::{Api, Client};
-use tokio::sync::{watch, Mutex as AsyncMutex};
+use tokio::sync::watch;
 use tracing::{debug, info, instrument, warn};
 
 use crate::entities::{build_cluster_entity, build_entity_uid, build_user_entity};
@@ -158,7 +158,26 @@ pub struct PolicyEngine {
     /// concurrent reloads at one in-flight + one queued; the queued reload
     /// always re-fetches, so the trailing run sees every policy that arrived
     /// during the in-flight one.
-    reload_gate: AsyncMutex<u8>,
+    reload_gate: SyncMutex<u8>,
+}
+
+/// RAII guard that resets the reload gate to idle on drop, even if
+/// `reload` returns early via `?`. Without this, a transient apiserver
+/// failure during the `list+parse` step leaves the gate at 1 and every
+/// future caller bumps to 2 + bails — Cedar policy reloads silently
+/// stop until the operator restarts.
+struct ReloadGateGuard<'a> {
+    gate: &'a SyncMutex<u8>,
+}
+
+impl Drop for ReloadGateGuard<'_> {
+    fn drop(&mut self) {
+        // Always reset to idle. The success path also writes 0 before
+        // returning; this guard is the safety net for the error path.
+        if let Ok(mut g) = self.gate.lock() {
+            *g = 0;
+        }
+    }
 }
 
 impl PolicyEngine {
@@ -170,7 +189,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
-            reload_gate: AsyncMutex::new(0),
+            reload_gate: SyncMutex::new(0),
         }
     }
 
@@ -186,7 +205,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
-            reload_gate: AsyncMutex::new(0),
+            reload_gate: SyncMutex::new(0),
         })
     }
 
@@ -204,7 +223,7 @@ impl PolicyEngine {
             policy_tx: tx,
             policy_rx: rx,
             reload_epoch: AtomicU64::new(0),
-            reload_gate: AsyncMutex::new(0),
+            reload_gate: SyncMutex::new(0),
         })
     }
 
@@ -280,21 +299,35 @@ impl PolicyEngine {
         // `reload_gate` carries: 0 = idle, 1 = running, 2 = running + queued.
         // Bump-and-bail when someone else is already running; otherwise we
         // own the loop until we drain the queued follow-up.
+        //
+        // The owner MUST reset the gate to 0 before returning even on
+        // error, otherwise a single failed reload (transient apiserver
+        // hiccup, parse error, etc.) wedges the gate at 1 forever and
+        // every subsequent caller bumps to 2 + bails — Cedar policies
+        // stop reloading until the process restarts. The `Drop` guard
+        // below makes the reset unconditional.
         {
-            let mut gate = self.reload_gate.lock().await;
+            let mut gate = self.reload_gate.lock().expect("reload_gate poisoned");
             if *gate >= 1 {
                 *gate = 2;
                 return Ok(());
             }
             *gate = 1;
         }
+        let _guard = ReloadGateGuard {
+            gate: &self.reload_gate,
+        };
         loop {
             let new_policy_set = Self::load_policies_from_crds(client).await?;
             let _ = self.policy_tx.send(Arc::new(new_policy_set));
             self.reload_epoch.fetch_add(1, Ordering::Release);
             info!("Reloaded Cedar policies");
-            let mut gate = self.reload_gate.lock().await;
+            let mut gate = self.reload_gate.lock().expect("reload_gate poisoned");
             if *gate == 1 {
+                // The Drop guard would also set this to 0; leaving the
+                // explicit assignment so the success path matches the
+                // previous shape and the guard is a pure safety net for
+                // the error path.
                 *gate = 0;
                 return Ok(());
             }
@@ -1085,5 +1118,32 @@ mod tests {
             Error::Forbidden(msg) => assert!(msg.contains("forbidden")),
             _ => panic!("expected Forbidden"),
         }
+    }
+
+    /// Pin the bug where a failed `reload` left `reload_gate` stuck at
+    /// 1, causing every subsequent caller to bump to 2 and bail. The
+    /// gate must always return to idle (0) on any exit path.
+    #[test]
+    fn reload_gate_resets_on_simulated_failure() {
+        let engine = PolicyEngine::new();
+        // Take the lock and pretend we're the running owner.
+        {
+            let mut gate = engine.reload_gate.lock().unwrap();
+            *gate = 1;
+        }
+        // Simulate an early-return-on-error from inside `reload`: the
+        // RAII guard must drop and reset the gate even though we never
+        // wrote 0 explicitly.
+        {
+            let _guard = ReloadGateGuard {
+                gate: &engine.reload_gate,
+            };
+            // pretend `?` returned Err here.
+        }
+        let gate_after = *engine.reload_gate.lock().unwrap();
+        assert_eq!(
+            gate_after, 0,
+            "reload gate must be 0 after guard drops; saw {gate_after}"
+        );
     }
 }

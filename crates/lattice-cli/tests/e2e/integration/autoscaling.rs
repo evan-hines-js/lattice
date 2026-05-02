@@ -192,7 +192,10 @@ fn build_metrics_server_service() -> lattice_crd::crd::LatticeService {
 
     // Override the workload with our actual container and metrics port
     svc.spec.workload.containers = containers;
-    svc.spec.workload.service = Some(ServicePortsSpec { ports });
+    svc.spec.workload.service = Some(ServicePortsSpec {
+        ports,
+        ..Default::default()
+    });
 
     svc.spec.replicas = 1;
     svc.spec.autoscaling = Some(AutoscalingSpec {

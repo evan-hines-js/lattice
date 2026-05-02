@@ -251,6 +251,26 @@ impl<'a> ServiceCompiler<'a> {
             .as_deref()
             .ok_or(CompilationError::missing_metadata("namespace"))?;
 
+        // Build the LatticeService owner ref once and propagate to the
+        // workload compiler so every generated child resource (PVCs, env
+        // ConfigMaps/Secrets, file ConfigMaps/Secrets, ExternalSecrets,
+        // imagePullSecret ExternalSecrets) gets cascaded by K8s GC when
+        // the LatticeService is deleted.
+        let service_uid = {
+            use kube::ResourceExt;
+            service
+                .uid()
+                .ok_or(CompilationError::missing_metadata("uid"))?
+        };
+        let owner_ref = lattice_common::kube_utils::OwnerReference {
+            api_version: "lattice.dev/v1alpha1".to_string(),
+            kind: "LatticeService".to_string(),
+            name: name.to_string(),
+            uid: service_uid.clone(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        };
+
         let mut compiler = lattice_workload::WorkloadCompiler::new(
             name,
             namespace,
@@ -270,7 +290,8 @@ impl<'a> ServiceCompiler<'a> {
         .with_advertise(service.spec.advertise.clone())
         .with_eso_content_hash(self.eso_content_hash.clone())
         .with_image_providers(self.image_providers.clone())
-        .with_image_trust(self.image_trust.clone());
+        .with_image_trust(self.image_trust.clone())
+        .with_owner_references(vec![owner_ref]);
 
         if let Some(ref budget) = self.quota_budget {
             compiler = compiler.with_quota_budget(budget.clone(), service.spec.replicas);
@@ -281,15 +302,6 @@ impl<'a> ServiceCompiler<'a> {
         }
 
         let compiled = compiler.compile().await?;
-
-        // Stamp ownerReferences on the LatticeMeshMember so K8s GC
-        // cascade-deletes it when the LatticeService is deleted.
-        let service_uid = {
-            use kube::ResourceExt;
-            service
-                .uid()
-                .ok_or(CompilationError::missing_metadata("uid"))?
-        };
 
         let mesh_member = compiled.mesh_member.map(|mut mm| {
             mm.metadata.owner_references = Some(vec![
@@ -312,6 +324,7 @@ impl<'a> ServiceCompiler<'a> {
             namespace,
             compiled.pod_template,
             &self.monitoring,
+            self.provider_type,
         )?;
 
         // Populate config resources from the shared pipeline output
@@ -427,7 +440,10 @@ mod tests {
             spec: crate::crd::LatticeServiceSpec {
                 workload: WorkloadSpec {
                     containers,
-                    service: Some(ServicePortsSpec { ports }),
+                    service: Some(ServicePortsSpec {
+                        ports,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -508,7 +524,10 @@ mod tests {
             workload: WorkloadSpec {
                 containers,
                 resources,
-                service: Some(ServicePortsSpec { ports }),
+                service: Some(ServicePortsSpec {
+                    ports,
+                    ..Default::default()
+                }),
             },
             ..Default::default()
         }

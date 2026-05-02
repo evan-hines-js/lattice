@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use lattice_common::kube_utils::OwnerReference;
 use lattice_render::{FileSecretRef, RenderedFile};
 use lattice_secret_provider::eso::ExternalSecret;
 
@@ -41,6 +42,7 @@ pub fn compile(
     namespace: &str,
     files: &BTreeMap<String, RenderedFile>,
     secret_refs: &BTreeMap<String, SecretRef>,
+    owner_refs: &[OwnerReference],
 ) -> Result<CompiledFiles, CompilationError> {
     let mut text_files: BTreeMap<String, (String, String)> = BTreeMap::new();
     let mut binary_files: BTreeMap<String, (String, String)> = BTreeMap::new();
@@ -75,14 +77,21 @@ pub fn compile(
     let mut result = CompiledFiles::default();
     let base_name = format!("{}-{}", service_name, container_name);
 
-    compile_text_files(&base_name, namespace, &text_files, &mut result);
-    compile_binary_files(&base_name, namespace, &binary_files, &mut result);
+    compile_text_files(&base_name, namespace, &text_files, owner_refs, &mut result);
+    compile_binary_files(
+        &base_name,
+        namespace,
+        &binary_files,
+        owner_refs,
+        &mut result,
+    );
     compile_secret_files(
         service_name,
         &base_name,
         namespace,
         &secret_files,
         secret_refs,
+        owner_refs,
         &mut result,
     )?;
 
@@ -94,6 +103,7 @@ fn compile_text_files(
     base_name: &str,
     namespace: &str,
     text_files: &BTreeMap<String, (String, String)>,
+    owner_refs: &[OwnerReference],
     result: &mut CompiledFiles,
 ) {
     if text_files.is_empty() {
@@ -103,6 +113,7 @@ fn compile_text_files(
     let cm_name = format!("{}-files", base_name);
     let vol_name = cm_name.clone();
     let mut cm = ConfigMap::new(&cm_name, namespace);
+    cm.metadata.owner_references = owner_refs.to_vec();
 
     for (key, (content, _)) in text_files {
         cm.data.insert(key.clone(), content.clone());
@@ -127,6 +138,7 @@ fn compile_binary_files(
     base_name: &str,
     namespace: &str,
     binary_files: &BTreeMap<String, (String, String)>,
+    owner_refs: &[OwnerReference],
     result: &mut CompiledFiles,
 ) {
     if binary_files.is_empty() {
@@ -136,6 +148,7 @@ fn compile_binary_files(
     let secret_name = format!("{}-files-bin", base_name);
     let vol_name = secret_name.clone();
     let mut secret = Secret::new(&secret_name, namespace);
+    secret.metadata.owner_references = owner_refs.to_vec();
 
     for (key, (content, _)) in binary_files {
         secret.string_data.insert(key.clone(), content.clone());
@@ -166,6 +179,7 @@ fn compile_secret_files(
     namespace: &str,
     secret_files: &BTreeMap<String, (String, String, Vec<FileSecretRef>)>,
     secret_refs: &BTreeMap<String, SecretRef>,
+    owner_refs: &[OwnerReference],
     result: &mut CompiledFiles,
 ) -> Result<(), CompilationError> {
     for (key, (content, mount_path, file_refs)) in secret_files {
@@ -191,6 +205,9 @@ fn compile_secret_files(
             lattice_common::LABEL_SERVICE_OWNER.to_string(),
             service_name.to_string(),
         );
+        // Owner refs let K8s GC cascade-delete the ExternalSecret when the
+        // owning CR is deleted.
+        external_secret.metadata.owner_references = owner_refs.to_vec();
 
         result.file_external_secrets.push(external_secret);
 
@@ -239,7 +256,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs()).unwrap();
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]).unwrap();
 
         assert!(result.config_map.is_some());
         assert!(result.secret.is_none());
@@ -267,7 +284,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs()).unwrap();
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]).unwrap();
 
         assert!(result.config_map.is_none());
         assert!(result.secret.is_some());
@@ -304,7 +321,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs()).unwrap();
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]).unwrap();
 
         assert!(result.config_map.is_some());
         assert!(result.secret.is_some());
@@ -341,7 +358,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &secret_refs).unwrap();
+        let result = compile("api", "main", "prod", &files, &secret_refs, &[]).unwrap();
 
         // Should NOT create a plain ConfigMap (it has secret refs)
         assert!(result.config_map.is_none());
@@ -396,7 +413,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs());
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("nonexistent"));
     }
@@ -430,7 +447,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &secret_refs);
+        let result = compile("api", "main", "prod", &files, &secret_refs, &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("badkey"));
     }
@@ -459,7 +476,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs());
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -493,7 +510,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs());
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]);
         assert!(result.is_ok());
     }
 
@@ -516,7 +533,7 @@ mod tests {
     fn test_compile_empty() {
         let files = BTreeMap::new();
 
-        let result = compile("api", "main", "prod", &files, &empty_secret_refs()).unwrap();
+        let result = compile("api", "main", "prod", &files, &empty_secret_refs(), &[]).unwrap();
 
         assert!(result.config_map.is_none());
         assert!(result.secret.is_none());
@@ -577,7 +594,7 @@ mod tests {
             },
         );
 
-        let result = compile("api", "main", "prod", &files, &secret_refs).unwrap();
+        let result = compile("api", "main", "prod", &files, &secret_refs, &[]).unwrap();
 
         assert!(result.config_map.is_some());
         assert!(result.secret.is_some());

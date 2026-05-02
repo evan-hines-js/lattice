@@ -9,6 +9,7 @@ use tracing::debug;
 
 use kube::{Api, ResourceExt};
 
+use lattice_common::retry::{retry_with_backoff, RetryConfig};
 use lattice_common::ReconcileError;
 use lattice_crd::crd::{CredentialSpec, ImageProvider, InfraProvider};
 use lattice_render::extract_secret_refs;
@@ -116,13 +117,16 @@ pub async fn ensure_credentials(
     target_namespace: &str,
     field_manager: &str,
 ) -> Result<String, ReconcileError> {
-    lattice_common::kube_utils::ensure_namespace(client, target_namespace, None, field_manager)
-        .await
-        .map_err(|e| {
-            ReconcileError::Internal(format!(
-                "failed to ensure namespace '{target_namespace}': {e}"
-            ))
-        })?;
+    retry_with_backoff(&RetryConfig::install(), "ensure_namespace", || async {
+        lattice_common::kube_utils::ensure_namespace(client, target_namespace, None, field_manager)
+            .await
+    })
+    .await
+    .map_err(|e| {
+        ReconcileError::Internal(format!(
+            "failed to ensure namespace '{target_namespace}': {e}"
+        ))
+    })?;
 
     let secret_name = reconcile_credentials(
         client,

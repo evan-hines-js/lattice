@@ -438,7 +438,7 @@ mod tests {
     use super::*;
     use crate::crd::types::{
         BootstrapProvider, ControlPlaneSpec, KubernetesSpec, ProviderConfig, ServiceSpec,
-        WorkerPoolSpec,
+        ServiceType, WorkerPoolSpec,
     };
 
     // =========================================================================
@@ -479,7 +479,7 @@ mod tests {
             bootstrap_port: 8443,
             proxy_port: 8081,
             service: ServiceSpec {
-                type_: "LoadBalancer".to_string(),
+                type_: ServiceType::LoadBalancer,
             },
             cert_policy: None,
         }
@@ -814,7 +814,7 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
                 .expect("parent_config should be present")
                 .service
                 .type_,
-            "LoadBalancer"
+            ServiceType::LoadBalancer
         );
     }
 

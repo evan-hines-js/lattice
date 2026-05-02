@@ -186,9 +186,16 @@ pub async fn ensure_local_webhook_infrastructure(client: &Client) -> Result<(), 
     })?;
 
     let params = PatchParams::apply(FIELD_MANAGER).force();
-    css_api
-        .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
-        .await?;
+    retry_with_backoff(
+        &RetryConfig::install(),
+        "patch local ClusterSecretStore",
+        || async {
+            css_api
+                .patch(LOCAL_WEBHOOK_STORE_NAME, &params, &Patch::Apply(&css_obj))
+                .await
+        },
+    )
+    .await?;
 
     info!(
         "Local webhook ClusterSecretStore '{}' ensured",
@@ -680,24 +687,36 @@ fn build_webhook_provider() -> WebhookProvider {
     }
 }
 
-/// Ensure the `lattice-secrets` namespace exists for local secret sources
+/// Ensure the `lattice-secrets` namespace exists for local secret sources.
+///
+/// Goes through the canonical [`lattice_common::kube_utils::ensure_namespace`]
+/// so PSS audit/warn labels are applied uniformly with every other Lattice-managed
+/// namespace. Wrapped in install-grade retry because this runs once at controller
+/// startup, outside any reconcile-loop requeue.
 async fn ensure_local_secrets_namespace(client: &Client) -> Result<(), ReconcileError> {
-    let ns_api: Api<k8s_openapi::api::core::v1::Namespace> = Api::all(client.clone());
-    let ns = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": LOCAL_SECRETS_NAMESPACE,
-            "labels": {
-                (LABEL_MANAGED_BY): LABEL_MANAGED_BY_LATTICE
-            }
-        }
-    });
-
-    let params = PatchParams::apply(FIELD_MANAGER).force();
-    ns_api
-        .patch(LOCAL_SECRETS_NAMESPACE, &params, &Patch::Apply(&ns))
-        .await?;
+    let labels = BTreeMap::from([(
+        LABEL_MANAGED_BY.to_string(),
+        LABEL_MANAGED_BY_LATTICE.to_string(),
+    )]);
+    retry_with_backoff(
+        &RetryConfig::install(),
+        "ensure lattice-secrets namespace",
+        || async {
+            lattice_common::kube_utils::ensure_namespace(
+                client,
+                LOCAL_SECRETS_NAMESPACE,
+                Some(&labels),
+                FIELD_MANAGER,
+            )
+            .await
+        },
+    )
+    .await
+    .map_err(|e| {
+        ReconcileError::Internal(format!(
+            "failed to ensure namespace '{LOCAL_SECRETS_NAMESPACE}': {e}"
+        ))
+    })?;
 
     debug!("Ensured namespace {}", LOCAL_SECRETS_NAMESPACE);
     Ok(())
@@ -731,9 +750,16 @@ async fn ensure_webhook_service(client: &Client) -> Result<(), ReconcileError> {
     let svc_api: Api<k8s_openapi::api::core::v1::Service> =
         Api::namespaced(client.clone(), LATTICE_SYSTEM_NAMESPACE);
     let params = PatchParams::apply(FIELD_MANAGER).force();
-    svc_api
-        .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
-        .await?;
+    retry_with_backoff(
+        &RetryConfig::install(),
+        "patch local-secrets webhook service",
+        || async {
+            svc_api
+                .patch(LOCAL_SECRETS_SERVICE, &params, &Patch::Apply(&svc))
+                .await
+        },
+    )
+    .await?;
 
     debug!("Ensured webhook service {}", LOCAL_SECRETS_SERVICE);
     Ok(())
