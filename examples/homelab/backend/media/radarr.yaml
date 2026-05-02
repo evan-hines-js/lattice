@@ -56,6 +56,21 @@ spec:
       action == Lattice::Action::"AccessExternalEndpoint",
       resource == Lattice::ExternalEndpoint::"api.nzbgeek.info:443"
     );
+    permit(
+      principal == Lattice::Service::"media/radarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"radarr.servarr.com:443"
+    );
+    permit(
+      principal == Lattice::Service::"media/radarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"api.radarr.video:443"
+    );
+    permit(
+      principal == Lattice::Service::"media/radarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"image.tmdb.org:443"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -124,6 +139,19 @@ spec:
         params:
           endpoints:
             https: api.nzbgeek.info:443
+      radarr-cloud:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            services: radarr.servarr.com:443
+            metadata: api.radarr.video:443
+      tmdb-images:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            cdn: image.tmdb.org:443
   replicas: 1
   # Mesh-internal only: callers (e.g. jellyfin) reach radarr via the in-cluster
   # FQDN over Istio multicluster. No public hostname, no gateway, no edge proxy.

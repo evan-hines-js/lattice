@@ -84,11 +84,11 @@ fn build_args(mode: LbMode) -> Vec<String> {
     // a second pass.
     let mut args: Vec<String> = vec![
         "--set",
-        "hubble.enabled=false",
+        "hubble.enabled=true",
         "--set",
-        "hubble.relay.enabled=false",
+        "hubble.relay.enabled=true",
         "--set",
-        "hubble.ui.enabled=false",
+        "hubble.ui.enabled=true",
         "--set",
         "prometheus.enabled=false",
         "--set",

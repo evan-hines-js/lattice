@@ -56,6 +56,16 @@ spec:
       action == Lattice::Action::"AccessExternalEndpoint",
       resource == Lattice::ExternalEndpoint::"api.nzbgeek.info:443"
     );
+    permit(
+      principal == Lattice::Service::"media/prowlarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"prowlarr.servarr.com:443"
+    );
+    permit(
+      principal == Lattice::Service::"media/prowlarr",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"indexers.prowlarr.com:443"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -115,6 +125,13 @@ spec:
         params:
           endpoints:
             https: api.nzbgeek.info:443
+      prowlarr-cloud:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            servarr: prowlarr.servarr.com:443
+            indexers: indexers.prowlarr.com:443
   replicas: 1
   # Mesh-internal only: callers reach prowlarr via the in-cluster FQDN over
   # Istio multicluster. haproxy-fw fronts the public hostname (see service.hostnames).

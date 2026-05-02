@@ -99,7 +99,7 @@ spec:
         type: volume
         id: media-storage
         params:
-          size: 100Gi
+          size: 200Gi
           accessMode: ReadWriteOnce
           allowedConsumers:
             - sonarr
