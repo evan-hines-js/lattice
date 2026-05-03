@@ -62,7 +62,7 @@ export LATTICE_ENABLE_MESH_TEST=true
 export LATTICE_E2E_STORAGE="${LATTICE_E2E_STORAGE:-true}"
 
 # Dev services host (Vault, Keycloak, registry mirrors via nginx proxy on bastion)
-DEV_HOST="${LATTICE_DEV_HOST:-10.0.0.131}"
+DEV_HOST="${LATTICE_DEV_HOST:-10.0.0.17}"
 export LATTICE_VAULT_HOST_URL="http://${DEV_HOST}:8200"
 export LATTICE_VAULT_INTERNAL_URL="http://${DEV_HOST}:8200"
 export LATTICE_KEYCLOAK_HOST_URL="http://${DEV_HOST}:8080"

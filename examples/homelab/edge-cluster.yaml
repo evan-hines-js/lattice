@@ -26,9 +26,9 @@ spec:
         externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
-      mirror: "http://10.0.0.131:5555"
+      mirror: "http://10.0.0.17:5555"
     - upstream: ghcr.io
-      mirror: "http://10.0.0.131:5556"
+      mirror: "http://10.0.0.17:5556"
   nodes:
     controlPlane:
       replicas: 3

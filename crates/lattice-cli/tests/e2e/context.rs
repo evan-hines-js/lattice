@@ -178,7 +178,6 @@ impl InfraContext {
         {
             "aws" => InfraProvider::Aws,
             "proxmox" => InfraProvider::Proxmox,
-            "openstack" => InfraProvider::OpenStack,
             "basis" => InfraProvider::Basis,
             _ => InfraProvider::Docker,
         }

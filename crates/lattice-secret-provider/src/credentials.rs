@@ -265,24 +265,20 @@ mod tests {
     #[test]
     fn config_builds_templated_external_secret() {
         let creds = CredentialSpec {
-            id: "infra/openstack/creds".to_string(),
+            id: "infra/proxmox/creds".to_string(),
             provider: "vault-prod".to_string(),
-            keys: Some(vec![
-                "username".to_string(),
-                "password".to_string(),
-                "auth_url".to_string(),
-            ]),
+            keys: Some(vec!["username".to_string(), "password".to_string()]),
             ..Default::default()
         };
 
         let mut credential_data = BTreeMap::new();
         credential_data.insert(
-            "clouds.yaml".to_string(),
-            "auth:\n  username: \"${secret.credentials.username}\"\n  password: \"${secret.credentials.password}\"".to_string(),
+            "creds.yaml".to_string(),
+            "username: \"${secret.credentials.username}\"\npassword: \"${secret.credentials.password}\"".to_string(),
         );
 
         let config = ProviderCredentialConfig {
-            provider_name: "openstack-prod",
+            provider_name: "proxmox-prod",
             credentials: &creds,
             credential_data: Some(&credential_data),
             target_namespace: "lattice-system",
@@ -310,9 +306,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(es.metadata.name, "openstack-prod-credentials");
+        assert_eq!(es.metadata.name, "proxmox-prod-credentials");
         assert!(es.spec.target.template.is_some());
         let template = es.spec.target.template.as_ref().unwrap();
-        assert!(template.data.contains_key("clouds.yaml"));
+        assert!(template.data.contains_key("creds.yaml"));
     }
 }

@@ -124,7 +124,7 @@ fn build_dns01_solver(dp: &ResolvedDnsProvider<'_>) -> Result<Value, String> {
         DNSProviderType::Cloudflare => cloudflare_dns01_solver(dp),
         DNSProviderType::Google => google_dns01_solver(dp),
         DNSProviderType::Azure => azure_dns01_solver(dp),
-        DNSProviderType::Pihole | DNSProviderType::Designate => Err(format!(
+        DNSProviderType::Pihole => Err(format!(
             "{} DNS-01 challenges require a cert-manager webhook solver — not yet supported",
             dp.spec.provider_type
         )),

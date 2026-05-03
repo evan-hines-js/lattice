@@ -23,16 +23,15 @@
 //! let manifests = provider.generate_capi_manifests(&cluster).await?;
 //! ```
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use serde_json::json;
 
 use super::{
-    build_cert_sans, build_post_bootstrap_commands, control_plane_name, create_cluster_labels,
-    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
-    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix, CAPIManifest,
-    ClusterConfig, ControlPlaneConfig, InfrastructureRef, Provider, WorkerPoolConfig,
+    build_cert_sans, build_post_bootstrap_commands, build_template_manifest, control_plane_name,
+    create_cluster_labels, generate_bootstrap_config_template_for_pool, generate_cluster,
+    generate_control_plane, generate_machine_deployment_for_pool, get_cluster_name,
+    pool_resource_suffix, CAPIManifest, ClusterConfig, ControlPlaneConfig, InfrastructureRef,
+    Provider, WorkerPoolConfig,
 };
 use crate::constants::{
     DEFAULT_NAMESPACE, DOCKER_INFRASTRUCTURE_API_GROUP, DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1,
@@ -195,56 +194,18 @@ backend rke2-servers
         )
     }
 
-    /// Generate the DockerMachineTemplate for control plane nodes (Docker-specific)
-    fn generate_control_plane_machine_template(
-        &self,
-        cluster: &LatticeCluster,
-    ) -> Result<CAPIManifest> {
-        let name = get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = create_cluster_labels(name);
-        let template_name = control_plane_name(name);
-        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
-
-        Ok(Self::generate_docker_machine_template(
-            &template_name,
-            &namespace,
-            labels,
-            api_version,
-        ))
-    }
-
-    /// Generate the DockerMachineTemplate for a worker pool (Docker-specific)
-    fn generate_worker_machine_template_for_pool(
-        &self,
-        cluster: &LatticeCluster,
-        pool_id: &str,
-    ) -> Result<CAPIManifest> {
-        let name = get_cluster_name(cluster)?;
-        let namespace = self.get_namespace(cluster);
-        let labels = create_cluster_labels(name);
-        let suffix = pool_resource_suffix(pool_id);
-        let template_name = format!("{}-{}", name, suffix);
-        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
-
-        Ok(Self::generate_docker_machine_template(
-            &template_name,
-            &namespace,
-            labels,
-            api_version,
-        ))
-    }
-
-    /// Generate a DockerMachineTemplate with the standard Docker socket mount
-    ///
-    /// This is shared logic for both control plane and worker machine templates,
-    /// as they use identical specs with the Docker socket mount for CAPD.
+    /// Build a DockerMachineTemplate (CP or worker — they share the
+    /// same shape: just a docker.sock mount). Returns
+    /// `(name, manifest)`; content-hashed naming via
+    /// [`build_template_manifest`].
     fn generate_docker_machine_template(
-        name: &str,
+        cluster: &LatticeCluster,
         namespace: &str,
-        labels: BTreeMap<String, String>,
-        api_version: &str,
-    ) -> CAPIManifest {
+        prefix: &str,
+    ) -> Result<(String, CAPIManifest)> {
+        let name = get_cluster_name(cluster)?;
+        let labels = create_cluster_labels(name);
+        let api_version = Self::get_infra_api_version(&cluster.spec.provider.kubernetes.bootstrap);
         let spec = json!({
             "template": {
                 "spec": {
@@ -255,10 +216,14 @@ backend rke2-servers
                 }
             }
         });
-
-        CAPIManifest::new(api_version, "DockerMachineTemplate", name, namespace)
-            .with_labels(labels)
-            .with_spec(spec)
+        Ok(build_template_manifest(
+            api_version,
+            "DockerMachineTemplate",
+            prefix,
+            namespace,
+            labels,
+            spec,
+        ))
     }
 }
 
@@ -312,6 +277,11 @@ impl Provider for DockerProvider {
             machine_template_kind: "DockerMachineTemplate",
         };
 
+        let (cp_template_name, cp_template_manifest) = Self::generate_docker_machine_template(
+            cluster,
+            &namespace,
+            &control_plane_name(name),
+        )?;
         let cp_config = ControlPlaneConfig {
             replicas: bootstrap.cp_replicas,
             cert_sans,
@@ -319,6 +289,7 @@ impl Provider for DockerProvider {
             vip: None,
             ssh_authorized_keys: vec![],
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            infra_template_name: cp_template_name,
         };
 
         // Use shared functions for provider-agnostic resources
@@ -331,7 +302,7 @@ impl Provider for DockerProvider {
 
         manifests.push(self.generate_docker_cluster(cluster)?);
         manifests.push(generate_control_plane(&config, &infra, &cp_config)?);
-        manifests.push(self.generate_control_plane_machine_template(cluster)?);
+        manifests.push(cp_template_manifest);
 
         // Worker pool resources - generate MachineDeployment, MachineTemplate, ConfigTemplate per pool
         for (pool_id, pool_spec) in &cluster.spec.nodes.worker_pools {
@@ -339,16 +310,22 @@ impl Provider for DockerProvider {
                 pool_id,
                 spec: pool_spec,
             };
+            let (infra_tmpl_name, infra_tmpl) = Self::generate_docker_machine_template(
+                cluster,
+                &namespace,
+                &format!("{}-{}", name, pool_resource_suffix(pool_id)),
+            )?;
+            let (bootstrap_tmpl_name, bootstrap_tmpl) =
+                generate_bootstrap_config_template_for_pool(&config, &pool_config);
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
                 &pool_config,
+                &infra_tmpl_name,
+                &bootstrap_tmpl_name,
             ));
-            manifests.push(self.generate_worker_machine_template_for_pool(cluster, pool_id)?);
-            manifests.push(generate_bootstrap_config_template_for_pool(
-                &config,
-                &pool_config,
-            ));
+            manifests.push(infra_tmpl);
+            manifests.push(bootstrap_tmpl);
         }
 
         Ok(manifests)
@@ -744,7 +721,7 @@ mod tests {
 
             let cp_template = machine_templates
                 .iter()
-                .find(|m| m.metadata.name == "my-cluster-control-plane")
+                .find(|m| m.metadata.name.starts_with("my-cluster-control-plane-"))
                 .expect("should have control plane template");
             assert_eq!(
                 cp_template.api_version,
@@ -753,7 +730,7 @@ mod tests {
 
             let worker_template = machine_templates
                 .iter()
-                .find(|m| m.metadata.name == "my-cluster-pool-default")
+                .find(|m| m.metadata.name.starts_with("my-cluster-pool-default-"))
                 .expect("should have worker template");
             assert_eq!(
                 worker_template.api_version,
@@ -779,7 +756,14 @@ mod tests {
                 .expect("should have KubeadmConfigTemplate manifest");
 
             assert_eq!(config_template.api_version, CAPI_BOOTSTRAP_API_VERSION);
-            assert_eq!(config_template.metadata.name, "my-cluster-pool-default");
+            assert!(
+                config_template
+                    .metadata
+                    .name
+                    .starts_with("my-cluster-pool-default-"),
+                "name {:?} should be content-hashed off the cluster+pool stem",
+                config_template.metadata.name
+            );
         }
 
         /// Story: certSANs allow the API server certificate to be valid for

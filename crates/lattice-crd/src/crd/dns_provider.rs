@@ -93,10 +93,6 @@ pub struct DNSProviderSpec {
     /// Azure DNS-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureDnsConfig>,
-
-    /// OpenStack Designate-specific configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub designate: Option<DesignateConfig>,
 }
 
 /// Supported DNS provider types
@@ -114,8 +110,6 @@ pub enum DNSProviderType {
     Google,
     /// Azure DNS
     Azure,
-    /// OpenStack Designate DNS-as-a-Service
-    Designate,
 }
 
 impl std::fmt::Display for DNSProviderType {
@@ -126,7 +120,6 @@ impl std::fmt::Display for DNSProviderType {
             Self::Cloudflare => write!(f, "Cloudflare"),
             Self::Google => write!(f, "Google"),
             Self::Azure => write!(f, "Azure"),
-            Self::Designate => write!(f, "Designate"),
         }
     }
 }
@@ -178,19 +171,6 @@ pub struct AzureDnsConfig {
 
     /// Azure resource group containing the DNS zone
     pub resource_group: String,
-}
-
-/// OpenStack Designate-specific configuration
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct DesignateConfig {
-    /// Designate zone ID (if not provided, looked up by zone name)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub zone_id: Option<String>,
-
-    /// OpenStack region
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
 }
 
 /// DNSProvider status
@@ -267,13 +247,6 @@ impl DNSProviderSpec {
                     ));
                 }
             }
-            DNSProviderType::Designate => {
-                if self.designate.is_none() {
-                    return Err(crate::ValidationError::new(
-                        "designate config required when type is designate",
-                    ));
-                }
-            }
             // Route53 and Cloudflare provider-specific configs are optional
             DNSProviderType::Route53 | DNSProviderType::Cloudflare => {}
         }
@@ -306,7 +279,6 @@ impl DNSProviderSpec {
             cloudflare: None,
             google: None,
             azure: None,
-            designate: None,
         }
     }
 }
@@ -485,28 +457,6 @@ spec:
     }
 
     #[test]
-    fn designate_requires_config() {
-        let spec = DNSProviderSpec {
-            resolver: Some("10.0.0.53:53".to_string()),
-            ..DNSProviderSpec::new(DNSProviderType::Designate, "internal.cloud")
-        };
-        assert!(spec.validate().is_err());
-    }
-
-    #[test]
-    fn designate_with_config_valid() {
-        let spec = DNSProviderSpec {
-            resolver: Some("10.0.0.53:53".to_string()),
-            designate: Some(DesignateConfig {
-                zone_id: Some("zone-123".to_string()),
-                region: Some("RegionOne".to_string()),
-            }),
-            ..DNSProviderSpec::new(DNSProviderType::Designate, "internal.cloud")
-        };
-        assert!(spec.validate().is_ok());
-    }
-
-    #[test]
     fn k8s_secret_ref_with_credentials() {
         let provider = DNSProvider::new(
             "route53-prod",
@@ -544,24 +494,23 @@ spec:
 apiVersion: lattice.dev/v1alpha1
 kind: DNSProvider
 metadata:
-  name: designate-prod
+  name: route53-prod
   namespace: lattice-system
 spec:
-  type: designate
-  zone: internal.cloud
+  type: route53
+  zone: example.com
   credentials:
-    id: dns/openstack/prod
+    id: dns/aws/prod
     provider: vault-prod
     keys:
-      - username
-      - password
-      - auth_url
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
   credentialData:
-    openstack-env: |
-      OS_USERNAME="${secret.credentials.username}"
-      OS_PASSWORD="${secret.credentials.password}"
-  designate:
-    region: RegionOne
+    aws-env: |
+      AWS_ACCESS_KEY_ID="${secret.credentials.AWS_ACCESS_KEY_ID}"
+      AWS_SECRET_ACCESS_KEY="${secret.credentials.AWS_SECRET_ACCESS_KEY}"
+  route53:
+    region: us-east-1
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let provider: DNSProvider = serde_json::from_value(value).expect("parse");
@@ -569,7 +518,7 @@ spec:
         assert!(provider.spec.credentials.is_some());
         assert!(provider.spec.credential_data.is_some());
         let data = provider.spec.credential_data.as_ref().unwrap();
-        assert!(data.contains_key("openstack-env"));
-        assert!(data["openstack-env"].contains("${secret.credentials.username}"));
+        assert!(data.contains_key("aws-env"));
+        assert!(data["aws-env"].contains("${secret.credentials.AWS_ACCESS_KEY_ID}"));
     }
 }

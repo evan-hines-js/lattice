@@ -227,10 +227,6 @@ const KIND_PLURALS: &[(&str, &str)] = &[
     ("proxmoxcluster", "proxmoxclusters"),
     ("proxmoxmachine", "proxmoxmachines"),
     ("proxmoxmachinetemplate", "proxmoxmachinetemplates"),
-    // OpenStack provider
-    ("openstackcluster", "openstackclusters"),
-    ("openstackmachine", "openstackmachines"),
-    ("openstackmachinetemplate", "openstackmachinetemplates"),
     // IPAM
     ("ipaddress", "ipaddresses"),
     ("ipaddressclaim", "ipaddressclaims"),

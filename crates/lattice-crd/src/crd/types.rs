@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::LATTICE_SYSTEM_NAMESPACE;
 
 use super::cluster::MonitoringConfig;
-use super::providers::{AwsConfig, BasisConfig, DockerConfig, OpenStackConfig, ProxmoxConfig};
+use super::providers::{AwsConfig, BasisConfig, DockerConfig, ProxmoxConfig};
 
 // =============================================================================
 // Cluster Config
@@ -38,8 +38,6 @@ pub enum ProviderType {
     Docker,
     /// Proxmox VE - on-premises virtualization
     Proxmox,
-    /// OpenStack - private cloud
-    OpenStack,
     /// Amazon Web Services
     Aws,
     /// Google Cloud Platform
@@ -53,10 +51,7 @@ pub enum ProviderType {
 impl ProviderType {
     /// Returns true if this provider is for on-premises infrastructure
     pub fn is_on_prem(&self) -> bool {
-        matches!(
-            self,
-            Self::Docker | Self::Proxmox | Self::OpenStack | Self::Basis
-        )
+        matches!(self, Self::Docker | Self::Proxmox | Self::Basis)
     }
 
     /// Returns true if this provider is for public cloud
@@ -87,7 +82,7 @@ impl ProviderType {
             Self::Azure => {
                 // Azure uses Standard LB by default, no special annotations needed
             }
-            Self::Docker | Self::Proxmox | Self::OpenStack | Self::Basis => {
+            Self::Docker | Self::Proxmox | Self::Basis => {
                 // On-prem uses Cilium L2 announcements, no cloud LB annotations
             }
         }
@@ -98,11 +93,11 @@ impl ProviderType {
     ///
     /// Cloud providers automatically set `topology.kubernetes.io/zone` on nodes.
     /// Bare-metal providers (Docker, Proxmox, Basis) don't have zones, so we
-    /// spread by hostname. OpenStack supports availability zones like cloud providers.
+    /// spread by hostname.
     pub fn topology_spread_key(&self) -> &'static str {
         match self {
             Self::Docker | Self::Proxmox | Self::Basis => "kubernetes.io/hostname",
-            Self::Aws | Self::Gcp | Self::Azure | Self::OpenStack => "topology.kubernetes.io/zone",
+            Self::Aws | Self::Gcp | Self::Azure => "topology.kubernetes.io/zone",
         }
     }
 }
@@ -114,13 +109,12 @@ impl std::str::FromStr for ProviderType {
         match s.to_lowercase().as_str() {
             "docker" => Ok(Self::Docker),
             "proxmox" => Ok(Self::Proxmox),
-            "openstack" => Ok(Self::OpenStack),
             "aws" => Ok(Self::Aws),
             "gcp" => Ok(Self::Gcp),
             "azure" => Ok(Self::Azure),
             "basis" => Ok(Self::Basis),
             _ => Err(crate::ValidationError::new(format!(
-                "invalid provider type: {s}, expected one of: docker, proxmox, openstack, aws, gcp, azure, basis"
+                "invalid provider type: {s}, expected one of: docker, proxmox, aws, gcp, azure, basis"
             ))),
         }
     }
@@ -131,7 +125,6 @@ impl std::fmt::Display for ProviderType {
         match self {
             Self::Docker => write!(f, "docker"),
             Self::Proxmox => write!(f, "proxmox"),
-            Self::OpenStack => write!(f, "openstack"),
             Self::Aws => write!(f, "aws"),
             Self::Gcp => write!(f, "gcp"),
             Self::Azure => write!(f, "azure"),
@@ -202,9 +195,6 @@ pub struct ProviderConfig {
     /// Docker/Kind for local development
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker: Option<DockerConfig>,
-    /// OpenStack private/public cloud
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openstack: Option<OpenStackConfig>,
     /// Proxmox VE on-premises virtualization
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxConfig>,
@@ -226,14 +216,6 @@ impl ProviderConfig {
     pub fn docker() -> Self {
         Self {
             docker: Some(DockerConfig::default()),
-            ..Default::default()
-        }
-    }
-
-    /// Create an OpenStack provider config
-    pub fn openstack(config: OpenStackConfig) -> Self {
-        Self {
-            openstack: Some(config),
             ..Default::default()
         }
     }
@@ -265,8 +247,6 @@ impl ProviderConfig {
     pub fn provider_type(&self) -> ProviderType {
         if self.aws.is_some() {
             ProviderType::Aws
-        } else if self.openstack.is_some() {
-            ProviderType::OpenStack
         } else if self.proxmox.is_some() {
             ProviderType::Proxmox
         } else if self.basis.is_some() {
@@ -294,7 +274,6 @@ impl ProviderConfig {
         let set_variants = [
             self.aws.is_some(),
             self.docker.is_some(),
-            self.openstack.is_some(),
             self.proxmox.is_some(),
             self.basis.is_some(),
         ];
@@ -302,7 +281,7 @@ impl ProviderConfig {
 
         if count == 0 {
             return Err(crate::ValidationError::new(
-                "provider config must specify exactly one provider (aws, docker, openstack, proxmox, or basis)",
+                "provider config must specify exactly one provider (aws, docker, proxmox, or basis)",
             ));
         }
         if count > 1 {
@@ -528,7 +507,7 @@ pub struct GpuCapacity {
     pub memory_gib: Option<u32>,
 }
 
-/// Instance type specification — either a named type (AWS/OpenStack) or explicit resources (Proxmox)
+/// Instance type specification — either a named type (AWS) or explicit resources (Proxmox)
 ///
 /// YAML examples:
 /// - `instanceType: { name: m5.xlarge }` → named cloud instance
@@ -1472,10 +1451,6 @@ mod tests {
                 ProviderType::Azure.topology_spread_key(),
                 "topology.kubernetes.io/zone"
             );
-            assert_eq!(
-                ProviderType::OpenStack.topology_spread_key(),
-                "topology.kubernetes.io/zone"
-            );
         }
 
         #[test]
@@ -1483,7 +1458,6 @@ mod tests {
             // On-prem providers
             assert!(ProviderType::Docker.is_on_prem());
             assert!(ProviderType::Proxmox.is_on_prem());
-            assert!(ProviderType::OpenStack.is_on_prem());
 
             // Cloud providers are NOT on-prem
             assert!(!ProviderType::Aws.is_on_prem());
@@ -1501,7 +1475,6 @@ mod tests {
             // On-prem providers are NOT cloud
             assert!(!ProviderType::Docker.is_cloud());
             assert!(!ProviderType::Proxmox.is_cloud());
-            assert!(!ProviderType::OpenStack.is_cloud());
         }
 
         #[test]
@@ -1531,9 +1504,6 @@ mod tests {
             // On-prem providers use Cilium L2, no cloud LB annotations
             assert!(ProviderType::Docker.load_balancer_annotations().is_empty());
             assert!(ProviderType::Proxmox.load_balancer_annotations().is_empty());
-            assert!(ProviderType::OpenStack
-                .load_balancer_annotations()
-                .is_empty());
         }
     }
 
@@ -2244,19 +2214,6 @@ mod tests {
             assert!(config.validate().is_ok());
         }
 
-        #[test]
-        fn test_openstack_config() {
-            let openstack = OpenStackConfig {
-                external_network: "ext-net".to_string(),
-                image_name: "Ubuntu 22.04".to_string(),
-                ssh_key_name: "lattice-key".to_string(),
-                ..Default::default()
-            };
-            let config = ProviderConfig::openstack(openstack);
-            assert!(config.openstack.is_some());
-            assert_eq!(config.provider_type(), ProviderType::OpenStack);
-            assert!(config.validate().is_ok());
-        }
     }
 
     mod dns_label_validation {

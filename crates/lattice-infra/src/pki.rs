@@ -220,7 +220,7 @@ pub fn root_ca_der(pem_data: &str) -> std::result::Result<Vec<u8>, PkiError> {
         0 => Err(PkiError::ParseError(
             "no self-signed root certificate found in PEM bundle".to_string(),
         )),
-        1 => Ok(roots.pop().unwrap()),
+        1 => Ok(roots.pop().expect("len == 1 verified by match arm")),
         n => Err(PkiError::ParseError(format!(
             "{n} self-signed roots in PEM bundle; ambiguous trust anchor"
         ))),

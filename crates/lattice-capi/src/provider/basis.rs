@@ -21,11 +21,11 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_bootstrap_commands, create_cluster_labels,
-    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
-    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
-    validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
-    InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
+    build_cert_sans, build_post_bootstrap_commands, build_template_manifest,
+    create_cluster_labels, generate_bootstrap_config_template_for_pool, generate_cluster,
+    generate_control_plane, generate_machine_deployment_for_pool, get_cluster_name,
+    pool_resource_suffix, validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig,
+    ControlPlaneConfig, InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
 use crate::constants::{BASIS_API_VERSION, BASIS_VIP_INTERFACE, INFRASTRUCTURE_API_GROUP};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
@@ -180,6 +180,8 @@ impl BasisProvider {
     /// the per-cluster VXLAN overlay; the host-side BGP reflector
     /// advertises VIPs and LB /32s with itself as next-hop, so the
     /// guest doesn't need a LAN NIC.
+    /// Render a `BasisMachineTemplate`. Returns `(name, manifest)`;
+    /// content-hashed naming is owned by [`build_template_manifest`].
     fn generate_machine_template(
         &self,
         cluster_name: &str,
@@ -187,15 +189,15 @@ impl BasisProvider {
         image: &str,
         suffix: &str,
         placement: Option<&PlacementSpec>,
-    ) -> CAPIManifest {
-        let mut spec = serde_json::json!({
+    ) -> (String, CAPIManifest) {
+        let mut inner = serde_json::json!({
             "cpu": sizing.cpu,
             "memoryMib": sizing.memory_mib,
             "diskGib": sizing.disk_gib,
             "image": image,
         });
         if !sizing.data_disks.is_empty() {
-            spec["storageDisks"] = serde_json::Value::Array(
+            inner["storageDisks"] = serde_json::Value::Array(
                 sizing
                     .data_disks
                     .iter()
@@ -218,16 +220,17 @@ impl BasisProvider {
             // BasisMachine's, so a direct serde round-trip is the
             // canonical mapping — no per-field copy that would drift
             // when basis adds an op-type or weight knob.
-            spec["placement"] =
+            inner["placement"] =
                 serde_json::to_value(p).expect("PlacementSpec serializes to JSON infallibly");
         }
-        CAPIManifest::new(
+        build_template_manifest(
             BASIS_API_VERSION,
             "BasisMachineTemplate",
-            format!("{}-{}", cluster_name, suffix),
+            &format!("{}-{}", cluster_name, suffix),
             &self.namespace,
+            std::collections::BTreeMap::new(),
+            serde_json::json!({ "template": { "spec": inner } }),
         )
-        .with_spec(serde_json::json!({ "template": { "spec": spec } }))
     }
 }
 
@@ -262,16 +265,17 @@ impl Provider for BasisProvider {
         // Pre-control-plane manifests — safe to apply without the VIP.
         // Applying `BasisCluster` is what triggers basis-capi-provider
         // to call `Basis.CreateCluster`, which allocates the VIP.
+        let (cp_template_name, cp_template_manifest) = self.generate_machine_template(
+            name,
+            cp_sizing,
+            &image,
+            "control-plane",
+            spec.nodes.control_plane.placement.as_ref(),
+        );
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_basis_cluster(cluster)?,
-            self.generate_machine_template(
-                name,
-                cp_sizing,
-                &image,
-                "control-plane",
-                spec.nodes.control_plane.placement.as_ref(),
-            ),
+            cp_template_manifest,
         ];
 
         // KubeadmControlPlane carries kube-vip's static pod manifest
@@ -310,6 +314,7 @@ impl Provider for BasisProvider {
                 // expose an ssh-keys field.
                 ssh_authorized_keys: vec![DEBUG_SSH_KEY.to_string()],
                 registry_mirrors: bootstrap.registry_mirrors.clone(),
+                infra_template_name: cp_template_name,
             };
             manifests.push(generate_control_plane(&config, &infra, &cp_config)?);
         }
@@ -322,22 +327,25 @@ impl Provider for BasisProvider {
             let suffix = pool_resource_suffix(pool_id);
             let worker_sizing = MachineSizing::from_instance_type(&pool_spec.instance_type, 80);
 
-            manifests.push(generate_machine_deployment_for_pool(
-                &config,
-                &infra,
-                &pool_config,
-            ));
-            manifests.push(self.generate_machine_template(
+            let (infra_tmpl_name, infra_tmpl) = self.generate_machine_template(
                 name,
                 worker_sizing,
                 &image,
                 &suffix,
                 pool_spec.placement.as_ref(),
-            ));
-            let mut wp_template =
+            );
+            let (bootstrap_tmpl_name, mut bootstrap_tmpl) =
                 generate_bootstrap_config_template_for_pool(&config, &pool_config);
-            inject_debug_post_commands(&mut wp_template, &spec.provider.kubernetes.bootstrap);
-            manifests.push(wp_template);
+            inject_debug_post_commands(&mut bootstrap_tmpl, &spec.provider.kubernetes.bootstrap);
+            manifests.push(generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool_config,
+                &infra_tmpl_name,
+                &bootstrap_tmpl_name,
+            ));
+            manifests.push(infra_tmpl);
+            manifests.push(bootstrap_tmpl);
         }
 
         Ok(manifests)

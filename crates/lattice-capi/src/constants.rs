@@ -22,14 +22,11 @@ pub const DOCKER_INFRASTRUCTURE_API_VERSION_V1BETA1: &str =
 /// Proxmox infrastructure API version
 pub const PROXMOX_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
 
-/// OpenStack infrastructure API version
-pub const OPENSTACK_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta1";
-
 /// AWS infrastructure API version
 pub const AWS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1beta2";
 
 /// Basis infrastructure API version — uses the standard CAPI infrastructure
-/// group like every other provider (CAPMOX, CAPA, CAPO). The group is
+/// group like every other provider (CAPMOX, CAPA). The group is
 /// `INFRASTRUCTURE_API_GROUP` below; this constant just bakes in the
 /// version string used in manifests.
 pub const BASIS_API_VERSION: &str = "infrastructure.cluster.x-k8s.io/v1alpha1";
@@ -52,9 +49,6 @@ pub const DEFAULT_VIP_INTERFACE_PROXMOX: &str = "ens18";
 /// (basis-side gobgp); VMs reach it via the tree's per-host gateway
 /// → MASQUERADE on the host → underlay LAN. No edge NIC required.
 pub const BASIS_VIP_INTERFACE: &str = "ens3";
-
-/// Default node CIDR for OpenStack
-pub const DEFAULT_NODE_CIDR_OPENSTACK: &str = "10.6.0.0/24";
 
 /// Default network interface for VIP configuration (generic)
 pub const DEFAULT_NETWORK_INTERFACE: &str = "eth0";

@@ -99,10 +99,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         versions.providers["infrastructure-aws"].version
     );
     println!(
-        "cargo:rustc-env=CAPO_VERSION={}",
-        versions.providers["infrastructure-openstack"].version
-    );
-    println!(
         "cargo:rustc-env=CAPMOX_VERSION={}",
         versions.providers["infrastructure-proxmox"].version
     );

@@ -56,7 +56,7 @@ spec:
         type: volume
         id: media-storage
         params:
-          size: 1Ti
+          size: 10Gi
           accessMode: ReadWriteOnce
           allowedConsumers:
             - sonarr

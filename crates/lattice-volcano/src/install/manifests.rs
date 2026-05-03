@@ -107,12 +107,12 @@ data:
 
 /// Auto-configure label tiers from the cloud provider.
 ///
-/// Cloud providers (AWS, GCP, Azure, OpenStack) get zone + hostname tiers.
+/// Cloud providers (AWS, GCP, Azure) get zone + hostname tiers.
 /// Local providers (Docker, Proxmox) get hostname only. No region tier —
 /// K8s clusters are almost never multi-region.
 fn auto_label_tiers(provider: ProviderType) -> String {
     match provider {
-        ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure | ProviderType::OpenStack => [
+        ProviderType::Aws | ProviderType::Gcp | ProviderType::Azure => [
             "    - nodeLabel: \"topology.kubernetes.io/zone\"",
             "    - nodeLabel: \"kubernetes.io/hostname\"",
         ]

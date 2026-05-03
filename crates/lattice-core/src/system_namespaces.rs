@@ -19,8 +19,6 @@ use crate::EXTERNAL_DNS_NAMESPACE;
 pub const CAPA_NAMESPACE: &str = "capa-system";
 /// CAPI provider namespace for Proxmox
 pub const CAPMOX_NAMESPACE: &str = "capmox-system";
-/// CAPI provider namespace for OpenStack
-pub const CAPO_NAMESPACE: &str = "capo-system";
 /// CAPI provider namespace for Basis
 pub const CAPI_BASIS_NAMESPACE: &str = "capi-basis-system";
 /// Velero backup namespace
@@ -48,7 +46,6 @@ pub const CAPI: &[&str] = &[
     "rke2-bootstrap-system",
     "rke2-control-plane-system",
     "capd-system",
-    CAPO_NAMESPACE,
     CAPA_NAMESPACE,
     CAPMOX_NAMESPACE,
     CAPI_BASIS_NAMESPACE,
@@ -132,7 +129,6 @@ mod tests {
     fn capi_includes_all_providers() {
         assert!(CAPI.contains(&"capd-system"));
         assert!(CAPI.contains(&CAPA_NAMESPACE));
-        assert!(CAPI.contains(&CAPO_NAMESPACE));
         assert!(CAPI.contains(&CAPMOX_NAMESPACE));
     }
 

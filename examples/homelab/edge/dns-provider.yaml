@@ -28,11 +28,11 @@ spec:
   zone: home.arpa
   # CoreDNS forwards `home.arpa` queries here so in-cluster pods can
   # resolve sibling services by their published hostnames.
-  resolver: "10.0.0.131:53"
+  resolver: "10.0.0.17:53"
   credentials:
     id: pihole-credentials
     provider: lattice-local
     keys:
       - EXTERNAL_DNS_PIHOLE_PASSWORD
   pihole:
-    url: "http://10.0.0.131:8053"
+    url: "http://10.0.0.17:8053"

@@ -129,7 +129,6 @@ mod tests {
             InfraProviderType::Docker => ("docker", None),
             InfraProviderType::AWS => ("aws-prod", Some("us-east-1")),
             InfraProviderType::Proxmox => ("proxmox-homelab", None),
-            InfraProviderType::OpenStack => ("openstack-prod", Some("RegionOne")),
             _ => ("unknown", None),
         };
 
@@ -151,7 +150,6 @@ mod tests {
                 credential_data: None,
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -189,7 +187,6 @@ mod tests {
                 credential_data: Some(data),
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -224,29 +221,24 @@ mod tests {
     async fn templated_mode_builds_external_secret() {
         let mut credential_data = BTreeMap::new();
         credential_data.insert(
-            "clouds.yaml".to_string(),
-            "auth:\n  username: \"${secret.credentials.username}\"\n  password: \"${secret.credentials.password}\"".to_string(),
+            "creds.yaml".to_string(),
+            "username: \"${secret.credentials.username}\"\npassword: \"${secret.credentials.password}\"".to_string(),
         );
 
         let cp = InfraProvider::new(
-            "openstack-test",
+            "proxmox-test",
             InfraProviderSpec {
-                provider_type: InfraProviderType::OpenStack,
+                provider_type: InfraProviderType::Proxmox,
                 region: None,
                 credentials: Some(CredentialSpec {
-                    id: "infrastructure/openstack/creds".to_string(),
+                    id: "infrastructure/proxmox/creds".to_string(),
                     provider: "vault-prod".to_string(),
-                    keys: Some(vec![
-                        "username".to_string(),
-                        "password".to_string(),
-                        "auth_url".to_string(),
-                    ]),
+                    keys: Some(vec!["username".to_string(), "password".to_string()]),
                     ..Default::default()
                 }),
                 credential_data: Some(credential_data.clone()),
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -275,11 +267,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(es.metadata.name, "openstack-test-credentials");
+        assert_eq!(es.metadata.name, "proxmox-test-credentials");
         assert!(es.spec.target.template.is_some());
         let template = es.spec.target.template.as_ref().unwrap();
-        assert!(template.data.contains_key("clouds.yaml"));
-        assert!(template.data["clouds.yaml"].contains("{{ .credentials_username }}"));
+        assert!(template.data.contains_key("creds.yaml"));
+        assert!(template.data["creds.yaml"].contains("{{ .credentials_username }}"));
         assert_eq!(es.spec.data.len(), 2);
     }
 
@@ -294,7 +286,6 @@ mod tests {
                 credential_data: None,
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -346,7 +337,6 @@ mod tests {
             InfraProviderType::Docker,
             InfraProviderType::AWS,
             InfraProviderType::Proxmox,
-            InfraProviderType::OpenStack,
         ] {
             let cp = sample_provider(provider_type);
             assert_eq!(cp.spec.provider_type, provider_type);

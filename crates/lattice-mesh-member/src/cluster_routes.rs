@@ -355,6 +355,11 @@ async fn ensure_route_egress_policies(
                 },
                 "spec": {
                     "endpointSelector": endpoint_selector,
+                    // Additive: don't flip matched pods into egress default-deny.
+                    // Wildcard callers use endpointSelector:{} (every pod), and
+                    // Cilium's default behavior would deny all other egress for
+                    // those pods — starving ztunnel/istiod of DNS + XDS + API.
+                    "enableDefaultDeny": { "egress": false, "ingress": false },
                     "egress": [{
                         "toCIDR": [format!("{}/32", route.address)],
                         "toPorts": [{

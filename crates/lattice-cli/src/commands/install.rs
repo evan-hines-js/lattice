@@ -38,7 +38,7 @@ use lattice_cell::bootstrap::{
     generate_bootstrap_bundle, BootstrapBundleConfig, ClusterFacts, DefaultManifestGenerator,
 };
 use lattice_common::credentials::{
-    AwsCredentials, BasisCredentials, CredentialProvider, OpenStackCredentials, ProxmoxCredentials,
+    AwsCredentials, BasisCredentials, CredentialProvider, ProxmoxCredentials,
 };
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::{capi_namespace, kubeconfig_secret_name, OPERATOR_NAME};
@@ -973,15 +973,6 @@ impl Installer {
                 let creds =
                     AwsCredentials::from_env().map_err(|e| Error::validation(e.to_string()))?;
                 info!("Seeding AWS credentials (region: {})", creds.region);
-                Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
-            }
-            ProviderType::OpenStack => {
-                let creds = OpenStackCredentials::from_env()
-                    .map_err(|e| Error::validation(e.to_string()))?;
-                info!(
-                    "Seeding OpenStack credentials (cloud: {})",
-                    creds.cloud_name
-                );
                 Self::apply_seed_secret(client, &creds.to_k8s_secret()).await
             }
             ProviderType::Basis => {

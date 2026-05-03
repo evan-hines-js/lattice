@@ -24,9 +24,9 @@ spec:
         externalIpPool: cell-public
   registryMirrors:
     - upstream: docker.io
-      mirror: "http://10.0.0.131:5555"
+      mirror: "http://10.0.0.17:5555"
     - upstream: ghcr.io
-      mirror: "http://10.0.0.131:5556"
+      mirror: "http://10.0.0.17:5556"
   nodes:
     controlPlane:
       replicas: 1
@@ -47,11 +47,12 @@ spec:
           cores: 16
           memoryGib: 32
           diskGib: 100
-        # Hard tier requirement: workers must land on `tier=slow`
-        # hosts so they don't compete with etcd for fast-disk IOPS.
+        # Soft tier preference: workers prefer `tier=bulk` hosts so
+        # they don't compete with etcd for fast-disk IOPS, but fall
+        # back to other tiers when bulk capacity is full.
         placement:
-          requires:
-            - { key: tier, values: [slow] }
+          prefers:
+            - { key: tier, value: bulk, weight: 100 }
   parentConfig:
     grpcPort: 50051
     bootstrapPort: 8443

@@ -6,7 +6,7 @@ Lattice is a Kubernetes operator for multi-cluster lifecycle management. It prov
 
 - `docker` installed and running
 - The `lattice` CLI binary
-- Cloud provider credentials (for AWS, Proxmox, OpenStack clusters)
+- Cloud provider credentials (for AWS, Proxmox clusters)
 
 You do **not** need a pre-existing Kubernetes cluster. The `lattice install` command bootstraps everything from scratch — it creates a temporary Kind cluster, provisions your real cluster (on any supported provider), pivots it to self-managing, and deletes the temporary cluster.
 
@@ -97,7 +97,7 @@ This single command:
 - Pivots CAPI resources so the cluster is fully self-managing
 - Deletes the temporary bootstrap cluster
 
-The process works the same regardless of provider — Docker for development, AWS/Proxmox/OpenStack for production.
+The process works the same regardless of provider — Docker for development, AWS/Proxmox for production.
 
 **CLI options:**
 

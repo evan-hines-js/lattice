@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_bootstrap_commands, create_cluster_labels,
+    build_cert_sans, build_post_bootstrap_commands, build_template_manifest, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
@@ -149,14 +149,16 @@ impl ProxmoxProvider {
         )
     }
 
-    /// Generate ProxmoxMachineTemplate (shared logic for CP and workers)
+    /// Generate ProxmoxMachineTemplate (shared logic for CP and workers).
+    /// Returns `(name, manifest)`; content-hashed naming via
+    /// [`build_template_manifest`].
     fn generate_machine_template(
         &self,
         name: &str,
         cfg: &ProxmoxConfig,
         sizing: MachineSizing,
         suffix: &str,
-    ) -> CAPIManifest {
+    ) -> (String, CAPIManifest) {
         let bridge = cfg.bridge.clone().unwrap_or_else(|| "vmbr0".to_string());
         let network_model = cfg
             .network_model
@@ -271,13 +273,14 @@ impl ProxmoxProvider {
             }
         }
 
-        CAPIManifest::new(
+        build_template_manifest(
             PROXMOX_API_VERSION,
             "ProxmoxMachineTemplate",
-            format!("{}-{}", name, suffix),
+            &format!("{}-{}", name, suffix),
             &self.namespace,
+            std::collections::BTreeMap::new(),
+            serde_json::json!({ "template": { "spec": spec } }),
         )
-        .with_spec(serde_json::json!({ "template": { "spec": spec } }))
     }
 
     /// Generate shared InClusterIPPool resources for additional networks.
@@ -362,6 +365,12 @@ impl Provider for ProxmoxProvider {
             cfg.kube_vip_image.clone(),
         ));
 
+        let infra = self.infra_ref();
+        let cp_sizing =
+            MachineSizing::from_instance_type(&spec.nodes.control_plane.instance_type, 50);
+        let (cp_template_name, cp_template_manifest) =
+            self.generate_machine_template(name, cfg, cp_sizing, "control-plane");
+
         let cp_config = ControlPlaneConfig {
             replicas: bootstrap.cp_replicas,
             cert_sans,
@@ -369,18 +378,14 @@ impl Provider for ProxmoxProvider {
             vip,
             ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
             registry_mirrors: bootstrap.registry_mirrors.clone(),
+            infra_template_name: cp_template_name,
         };
-
-        let infra = self.infra_ref();
-
-        let cp_sizing =
-            MachineSizing::from_instance_type(&spec.nodes.control_plane.instance_type, 50);
 
         let mut manifests = vec![
             generate_cluster(&config, &infra),
             self.generate_proxmox_cluster(cluster, bootstrap)?,
             generate_control_plane(&config, &infra, &cp_config)?,
-            self.generate_machine_template(name, cfg, cp_sizing, "control-plane"),
+            cp_template_manifest,
         ];
 
         // Generate shared InClusterIPPool resources for additional networks (one
@@ -397,16 +402,19 @@ impl Provider for ProxmoxProvider {
 
             let worker_sizing = MachineSizing::from_instance_type(&pool_spec.instance_type, 100);
 
+            let (infra_tmpl_name, infra_tmpl) =
+                self.generate_machine_template(name, cfg, worker_sizing, &suffix);
+            let (bootstrap_tmpl_name, bootstrap_tmpl) =
+                generate_bootstrap_config_template_for_pool(&config, &pool_config);
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
                 &pool_config,
+                &infra_tmpl_name,
+                &bootstrap_tmpl_name,
             ));
-            manifests.push(self.generate_machine_template(name, cfg, worker_sizing, &suffix));
-            manifests.push(generate_bootstrap_config_template_for_pool(
-                &config,
-                &pool_config,
-            ));
+            manifests.push(infra_tmpl);
+            manifests.push(bootstrap_tmpl);
         }
 
         Ok(manifests)

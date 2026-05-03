@@ -70,10 +70,6 @@ pub struct InfraProviderSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxmox: Option<ProxmoxProviderConfig>,
 
-    /// OpenStack-specific configuration
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openstack: Option<OpenStackProviderConfig>,
-
     /// Basis-specific configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<BasisProviderConfig>,
@@ -110,8 +106,6 @@ pub enum InfraProviderType {
     AWS,
     /// Proxmox VE (on-premises)
     Proxmox,
-    /// OpenStack (private cloud)
-    OpenStack,
     /// Docker/Kind (local development)
     Docker,
     /// Basis (minimal bare-metal VM scheduler)
@@ -123,7 +117,6 @@ impl std::fmt::Display for InfraProviderType {
         match self {
             Self::AWS => write!(f, "AWS"),
             Self::Proxmox => write!(f, "Proxmox"),
-            Self::OpenStack => write!(f, "OpenStack"),
             Self::Docker => write!(f, "Docker"),
             Self::Basis => write!(f, "Basis"),
         }
@@ -165,22 +158,6 @@ pub struct ProxmoxProviderConfig {
     /// Storage pool for VM disks
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<String>,
-}
-
-/// OpenStack-specific provider configuration
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct OpenStackProviderConfig {
-    /// OpenStack auth URL
-    pub auth_url: String,
-
-    /// Existing network ID (BYOI)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_id: Option<String>,
-
-    /// Floating IP pool for external access
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub floating_ip_pool: Option<String>,
 }
 
 /// Basis-specific provider configuration.
@@ -280,21 +257,6 @@ impl InfraProviderSpec {
                 if proxmox.server_url.is_empty() {
                     return Err(crate::ValidationError::new(
                         "proxmox.serverUrl cannot be empty",
-                    ));
-                }
-            }
-            InfraProviderType::OpenStack => {
-                if self.credentials.is_none() {
-                    return Err(crate::ValidationError::new(
-                        "OpenStack provider requires credentials",
-                    ));
-                }
-                let openstack = self.openstack.as_ref().ok_or_else(|| {
-                    crate::ValidationError::new("openstack config required when type is openstack")
-                })?;
-                if openstack.auth_url.is_empty() {
-                    return Err(crate::ValidationError::new(
-                        "openstack.authUrl cannot be empty",
                     ));
                 }
             }
@@ -428,7 +390,6 @@ spec:
                 credential_data: None,
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -450,7 +411,6 @@ spec:
                 credential_data: None,
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),
@@ -510,40 +470,34 @@ spec:
 apiVersion: lattice.dev/v1alpha1
 kind: InfraProvider
 metadata:
-  name: openstack-prod
+  name: proxmox-prod
 spec:
-  type: openstack
+  type: proxmox
   credentials:
-    id: infrastructure/openstack/credentials
+    id: infrastructure/proxmox/credentials
     provider: vault-prod
     keys:
       - username
       - password
-      - auth_url
   credentialData:
-    clouds.yaml: |
-      clouds:
-        openstack:
-          auth:
-            username: "${secret.credentials.username}"
-            password: "${secret.credentials.password}"
-            auth_url: "${secret.credentials.auth_url}"
-  openstack:
-    authUrl: https://openstack.example.com:5000/v3
+    creds.yaml: |
+      username: "${secret.credentials.username}"
+      password: "${secret.credentials.password}"
+  proxmox:
+    serverUrl: https://pve.local:8006
 "#;
         let value = crate::yaml::parse_yaml(yaml).expect("parse yaml");
         let provider: InfraProvider = serde_json::from_value(value).expect("parse");
 
-        assert_eq!(provider.spec.provider_type, InfraProviderType::OpenStack);
+        assert_eq!(provider.spec.provider_type, InfraProviderType::Proxmox);
         assert!(provider.spec.credentials.is_some());
         assert!(provider.spec.credential_data.is_some());
 
-        assert!(provider.spec.credentials.is_some());
         let data = provider.spec.credential_data.as_ref().unwrap();
-        assert!(data.contains_key("clouds.yaml"));
-        assert!(data["clouds.yaml"].contains("${secret.credentials.username}"));
+        assert!(data.contains_key("creds.yaml"));
+        assert!(data["creds.yaml"].contains("${secret.credentials.username}"));
 
         let name = provider.credential_secret_name().unwrap();
-        assert_eq!(name, "openstack-prod-credentials");
+        assert_eq!(name, "proxmox-prod-credentials");
     }
 }

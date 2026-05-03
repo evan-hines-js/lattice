@@ -305,7 +305,6 @@ fn provider_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> Pr
         DNSProviderType::Cloudflare => cloudflare_config(spec, secret_ref),
         DNSProviderType::Google => google_config(spec, secret_ref),
         DNSProviderType::Azure => azure_config(spec, secret_ref),
-        DNSProviderType::Designate => designate_config(spec, secret_ref),
         _ => fallback_config(spec),
     }
 }
@@ -445,34 +444,6 @@ fn azure_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> Provi
     }
 }
 
-fn designate_config(spec: &DNSProviderSpec, secret_ref: Option<&SecretRef>) -> ProviderConfig {
-    let env = secret_ref
-        .map(|sr| {
-            [
-                "OS_AUTH_URL",
-                "OS_USERNAME",
-                "OS_PASSWORD",
-                "OS_PROJECT_NAME",
-                "OS_USER_DOMAIN_NAME",
-                "OS_PROJECT_DOMAIN_NAME",
-            ]
-            .iter()
-            .map(|key| secret_env(key, &sr.name, key))
-            .collect()
-        })
-        .unwrap_or_default();
-
-    ProviderConfig {
-        args: vec![
-            "--provider=designate".to_string(),
-            format!("--domain-filter={}", spec.zone),
-        ],
-        env,
-        volume_mounts: Vec::new(),
-        volumes: Vec::new(),
-    }
-}
-
 /// Fallback for future provider types.
 fn fallback_config(spec: &DNSProviderSpec) -> ProviderConfig {
     ProviderConfig {
@@ -553,9 +524,7 @@ fn build_deployment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_crd::crd::{
-        AzureDnsConfig, CloudflareConfig, DesignateConfig, GoogleDnsConfig, PiholeConfig,
-    };
+    use lattice_crd::crd::{AzureDnsConfig, CloudflareConfig, GoogleDnsConfig, PiholeConfig};
 
     fn test_secret_ref() -> SecretRef {
         SecretRef {
@@ -734,33 +703,6 @@ mod tests {
         let vol_mounts = &dep["spec"]["template"]["spec"]["containers"][0]["volumeMounts"];
         assert!(vol_mounts.is_array());
         assert_eq!(vol_mounts[0]["mountPath"], "/etc/kubernetes");
-    }
-
-    #[test]
-    fn designate_manifests() {
-        let spec = DNSProviderSpec {
-            designate: Some(DesignateConfig {
-                zone_id: Some("zone-abc".to_string()),
-                region: Some("RegionOne".to_string()),
-            }),
-            ..make_spec(DNSProviderType::Designate, "internal.cloud")
-        };
-        let sr = test_secret_ref();
-        let manifests =
-            build_external_dns_manifests(&spec, "designate-prod", "prod-cluster", Some(&sr));
-
-        let dep = find_deployment(&manifests);
-        let args = deployment_args(dep);
-        assert!(args.contains(&"--provider=designate"));
-        assert!(args.contains(&"--domain-filter=internal.cloud"));
-
-        let env_names = deployment_env(dep);
-        assert!(env_names.contains(&"OS_AUTH_URL"));
-        assert!(env_names.contains(&"OS_USERNAME"));
-        assert!(env_names.contains(&"OS_PASSWORD"));
-        assert!(env_names.contains(&"OS_PROJECT_NAME"));
-        assert!(env_names.contains(&"OS_USER_DOMAIN_NAME"));
-        assert!(env_names.contains(&"OS_PROJECT_DOMAIN_NAME"));
     }
 
     #[test]
@@ -975,40 +917,6 @@ mod tests {
         // GOOGLE_APPLICATION_CREDENTIALS points to the mount
         let env_names = deployment_env(dep);
         assert!(env_names.contains(&"GOOGLE_APPLICATION_CREDENTIALS"));
-    }
-
-    #[test]
-    fn designate_eso_keys_match_deployment() {
-        let eso_keys = vec![
-            "OS_AUTH_URL",
-            "OS_USERNAME",
-            "OS_PASSWORD",
-            "OS_PROJECT_NAME",
-            "OS_USER_DOMAIN_NAME",
-            "OS_PROJECT_DOMAIN_NAME",
-        ];
-
-        let sr = SecretRef {
-            name: "designate-prod-credentials".to_string(),
-            namespace: "external-dns".to_string(),
-        };
-        let spec = DNSProviderSpec {
-            designate: Some(DesignateConfig {
-                zone_id: Some("zone-abc".to_string()),
-                region: Some("RegionOne".to_string()),
-            }),
-            ..make_spec(DNSProviderType::Designate, "internal.cloud")
-        };
-        let manifests = build_external_dns_manifests(&spec, "designate-prod", "cluster", Some(&sr));
-        let dep = find_deployment(&manifests);
-
-        let dep_keys = env_secret_keys(dep);
-        for key in &eso_keys {
-            assert!(
-                dep_keys.contains(&key.to_string()),
-                "deployment expects key '{key}' from ESO secret"
-            );
-        }
     }
 
     #[test]

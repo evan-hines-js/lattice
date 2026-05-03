@@ -289,7 +289,6 @@ mod tests {
                 credential_data: None,
                 aws: None,
                 proxmox: None,
-                openstack: None,
                 basis: None,
                 image_pull_secrets: Vec::new(),
                 labels: Default::default(),

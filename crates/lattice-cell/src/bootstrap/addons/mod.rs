@@ -61,11 +61,7 @@ mod tests {
 
     #[test]
     fn non_aws_providers_generate_local_path_provisioner() {
-        for provider in [
-            ProviderType::Docker,
-            ProviderType::Proxmox,
-            ProviderType::OpenStack,
-        ] {
+        for provider in [ProviderType::Docker, ProviderType::Proxmox] {
             let manifests = generate_for_provider(provider, "1.32.0", "test", false);
             let combined = manifests.join("\n");
             assert!(

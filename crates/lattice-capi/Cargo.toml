@@ -55,6 +55,10 @@ rand = { workspace = true }
 # Security
 zeroize = { workspace = true }
 
+# SHA-256 used to derive deterministic CAPI template names
+# (see provider::template_name_hash).
+aws-lc-rs = { workspace = true }
+
 [build-dependencies]
 toml.workspace = true
 serde = { version = "1.0", features = ["derive"] }

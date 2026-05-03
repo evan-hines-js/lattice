@@ -49,25 +49,6 @@ spec:
     storage: local-lvm
 ```
 
-**OpenStack:**
-
-```yaml
-apiVersion: lattice.dev/v1alpha1
-kind: InfraProvider
-metadata:
-  name: openstack-prod
-  namespace: lattice-system
-spec:
-  type: OpenStack
-  credentialsSecretRef:
-    name: openstack-credentials
-    namespace: lattice-system
-  openstack:
-    authUrl: https://identity.cloud.example.com/v3
-    networkId: abc123-network-id         # optional: existing network
-    floatingIpPool: external             # optional: floating IP pool
-```
-
 **Docker (development):**
 
 ```yaml

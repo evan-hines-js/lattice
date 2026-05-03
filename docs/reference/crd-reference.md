@@ -16,7 +16,6 @@ Defines a Kubernetes cluster provisioned and managed by Lattice.
 | `spec.provider.kubernetes.certSANs` | []string | Additional API server SANs |
 | `spec.provider.config.aws` | object | AWS-specific config (instanceType, sshKeyName) |
 | `spec.provider.config.proxmox` | object | Proxmox-specific config |
-| `spec.provider.config.openstack` | object | OpenStack-specific config |
 | `spec.provider.config.docker` | object | Docker/CAPD config (empty for defaults) |
 | `spec.nodes.controlPlane.replicas` | int | Control plane node count (must be odd) |
 | `spec.nodes.controlPlane.instanceType.name` | string | Instance type for control plane |
@@ -57,8 +56,8 @@ Holds cloud provider credentials for cluster provisioning.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `spec.type` | enum | `AWS`, `Proxmox`, `OpenStack`, `Docker` |
-| `spec.region` | string | Cloud region (AWS, OpenStack) |
+| `spec.type` | enum | `AWS`, `Proxmox`, `Docker` |
+| `spec.region` | string | Cloud region (AWS) |
 | `spec.credentialsSecretRef.name` | string | Secret name with credentials |
 | `spec.credentialsSecretRef.namespace` | string | Secret namespace |
 | `spec.aws.sshKeyName` | string | EC2 SSH key pair name |
@@ -68,9 +67,6 @@ Holds cloud provider credentials for cluster provisioning.
 | `spec.proxmox.serverUrl` | string | Proxmox API URL |
 | `spec.proxmox.node` | string | Proxmox node name |
 | `spec.proxmox.storage` | string | Storage pool name |
-| `spec.openstack.authUrl` | string | Keystone auth URL |
-| `spec.openstack.networkId` | string | Existing network ID (optional) |
-| `spec.openstack.floatingIpPool` | string | Floating IP pool (optional) |
 
 **Status Phases:** `Pending` → `Ready` / `Failed`
 
@@ -417,7 +413,7 @@ DNS provider credentials for external-dns and cert-manager ACME DNS-01 challenge
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `spec.type` | enum | `pihole`, `route53`, `cloudflare`, `google`, `azure`, `designate` |
+| `spec.type` | enum | `pihole`, `route53`, `cloudflare`, `google`, `azure` |
 | `spec.zone` | string | DNS zone to manage (e.g., `example.com`) |
 | `spec.resolver` | string | DNS resolver for private zone forwarding (optional) |
 | `spec.credentials` | CredentialSpec | ESO-managed credential source (optional) |
@@ -429,8 +425,6 @@ DNS provider credentials for external-dns and cert-manager ACME DNS-01 challenge
 | `spec.google.project` | string | GCP project ID |
 | `spec.azure.subscriptionId` | string | Azure subscription ID |
 | `spec.azure.resourceGroup` | string | Azure resource group |
-| `spec.designate.zoneId` | string | Designate zone ID (optional) |
-| `spec.designate.region` | string | OpenStack region (optional) |
 
 **Status Phases:** `Pending` → `Ready` / `Failed`
 

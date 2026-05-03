@@ -48,8 +48,7 @@ pub use cluster_routes::{
 };
 pub use dns_provider::{
     AzureDnsConfig, CloudflareConfig, DNSProvider, DNSProviderPhase, DNSProviderSpec,
-    DNSProviderStatus, DNSProviderType, DesignateConfig, GoogleDnsConfig, PiholeConfig,
-    Route53Config,
+    DNSProviderStatus, DNSProviderType, GoogleDnsConfig, PiholeConfig, Route53Config,
 };
 pub use external_endpoint::{ParsedEndpoint, Resolution};
 pub use image_provider::{
@@ -58,8 +57,7 @@ pub use image_provider::{
 };
 pub use infra_provider::{
     AwsProviderConfig, BasisProviderConfig, ImagePullSecretRef, InfraProvider, InfraProviderPhase,
-    InfraProviderSpec, InfraProviderStatus, InfraProviderType, OpenStackProviderConfig,
-    ProxmoxProviderConfig,
+    InfraProviderSpec, InfraProviderStatus, InfraProviderType, ProxmoxProviderConfig,
 };
 pub use install::cert_manager::{CertManagerInstall, CertManagerInstallSpec};
 pub use install::cilium::{CiliumInstall, CiliumInstallSpec};
@@ -113,7 +111,7 @@ pub use package::{
 };
 pub use providers::{
     AdditionalNetwork, AwsConfig, BasisConfig, DockerConfig, Ipv4PoolConfig, Ipv6PoolConfig,
-    OpenStackConfig, ProxmoxConfig,
+    ProxmoxConfig,
 };
 pub use quota::{
     LatticeQuota, LatticeQuotaPhase, LatticeQuotaSpec, LatticeQuotaStatus, QuotaPrincipal,

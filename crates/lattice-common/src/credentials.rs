@@ -12,12 +12,10 @@ use std::collections::{BTreeMap, HashMap};
 use k8s_openapi::api::core::v1::Secret;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use thiserror::Error;
-use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::{
-    AWS_CREDENTIALS_SECRET, BASIS_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROVIDER_LABEL,
-    PROXMOX_CREDENTIALS_SECRET,
+    AWS_CREDENTIALS_SECRET, BASIS_CREDENTIALS_SECRET, PROVIDER_LABEL, PROXMOX_CREDENTIALS_SECRET,
 };
 
 /// Errors when loading credentials
@@ -34,7 +32,7 @@ pub enum CredentialError {
 
 /// Trait for credential types that can be loaded from environment or K8s secrets.
 ///
-/// All cloud provider credential types (AWS, Proxmox, OpenStack) implement this trait
+/// All cloud provider credential types (AWS, Proxmox) implement this trait
 /// to provide a consistent interface for credential management.
 ///
 /// # Example
@@ -51,7 +49,7 @@ pub enum CredentialError {
 /// let restored = AwsCredentials::from_secret(&secret_data)?;
 /// ```
 pub trait CredentialProvider: Sized {
-    /// The provider identifier used in labels (e.g., "aws", "proxmox", "openstack")
+    /// The provider identifier used in labels (e.g., "aws", "proxmox")
     const PROVIDER_TYPE: &'static str;
     /// The default secret name for this credential type
     const SECRET_NAME: &'static str;
@@ -317,119 +315,6 @@ impl CredentialProvider for BasisCredentials {
     }
 }
 
-/// OpenStack credentials for CAPO provider
-#[derive(Debug, Clone)]
-pub struct OpenStackCredentials {
-    /// Full clouds.yaml file content (contains passwords, zeroized on drop)
-    pub clouds_yaml: Zeroizing<String>,
-    /// Cloud name within clouds.yaml (default: "openstack")
-    pub cloud_name: String,
-    /// Optional CA certificate for self-signed endpoints
-    pub cacert: Option<String>,
-}
-
-impl CredentialProvider for OpenStackCredentials {
-    const PROVIDER_TYPE: &'static str = "openstack";
-    const SECRET_NAME: &'static str = OPENSTACK_CREDENTIALS_SECRET;
-
-    fn from_env() -> Result<Self, CredentialError> {
-        let clouds_yaml =
-            Zeroizing::new(if let Ok(path) = std::env::var("OPENSTACK_CLOUD_CONFIG") {
-                std::fs::read_to_string(&path).map_err(|_| {
-                    CredentialError::EnvVarNotSet("OPENSTACK_CLOUD_CONFIG (file not readable)")
-                })?
-            } else {
-                Self::build_clouds_yaml_from_env()?
-            });
-
-        let cloud_name = std::env::var("OS_CLOUD").unwrap_or_else(|_| "openstack".to_string());
-
-        // Load CA cert with proper error logging instead of silently ignoring failures
-        let cacert = match std::env::var("OPENSTACK_CACERT") {
-            Ok(path) => match std::fs::read_to_string(&path) {
-                Ok(content) => Some(content),
-                Err(e) => {
-                    warn!(
-                        path = %path,
-                        error = %e,
-                        "Failed to read OpenStack CA certificate file"
-                    );
-                    None
-                }
-            },
-            Err(_) => None,
-        };
-
-        Ok(Self {
-            clouds_yaml,
-            cloud_name,
-            cacert,
-        })
-    }
-
-    fn from_secret(data: &HashMap<String, String>) -> Result<Self, CredentialError> {
-        Ok(Self {
-            clouds_yaml: Zeroizing::new(
-                data.get("clouds.yaml")
-                    .cloned()
-                    .ok_or(CredentialError::MissingField("clouds.yaml"))?,
-            ),
-            cloud_name: data
-                .get("cloud")
-                .cloned()
-                .unwrap_or_else(|| "openstack".to_string()),
-            cacert: data.get("cacert").cloned(),
-        })
-    }
-
-    fn to_k8s_secret(&self) -> Secret {
-        let mut string_data = BTreeMap::new();
-        string_data.insert("clouds.yaml".to_string(), (*self.clouds_yaml).clone());
-        string_data.insert("cloud".to_string(), self.cloud_name.clone());
-        if let Some(ref cacert) = self.cacert {
-            string_data.insert("cacert".to_string(), cacert.clone());
-        }
-
-        build_credential_secret(Self::SECRET_NAME, Self::PROVIDER_TYPE, string_data)
-    }
-}
-
-impl OpenStackCredentials {
-    /// Build a clouds.yaml from individual OS_* environment variables
-    fn build_clouds_yaml_from_env() -> Result<String, CredentialError> {
-        let auth_url = std::env::var("OS_AUTH_URL")
-            .map_err(|_| CredentialError::EnvVarNotSet("OPENSTACK_CLOUD_CONFIG or OS_AUTH_URL"))?;
-        let username = std::env::var("OS_USERNAME")
-            .map_err(|_| CredentialError::EnvVarNotSet("OS_USERNAME"))?;
-        let password = std::env::var("OS_PASSWORD")
-            .map_err(|_| CredentialError::EnvVarNotSet("OS_PASSWORD"))?;
-        // Support both OS_PROJECT_NAME (v3) and OS_TENANT_NAME (v2, legacy)
-        let project_name = std::env::var("OS_PROJECT_NAME")
-            .or_else(|_| std::env::var("OS_TENANT_NAME"))
-            .map_err(|_| CredentialError::EnvVarNotSet("OS_PROJECT_NAME or OS_TENANT_NAME"))?;
-        let user_domain =
-            std::env::var("OS_USER_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
-        let project_domain =
-            std::env::var("OS_PROJECT_DOMAIN_NAME").unwrap_or_else(|_| "Default".to_string());
-        let region = std::env::var("OS_REGION_NAME").unwrap_or_else(|_| "RegionOne".to_string());
-
-        Ok(format!(
-            r#"clouds:
-  openstack:
-    auth:
-      auth_url: {auth_url}
-      username: {username}
-      password: {password}
-      project_name: {project_name}
-      user_domain_name: {user_domain}
-      project_domain_name: {project_domain}
-    region_name: {region}
-    interface: public
-    identity_api_version: 3"#
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,99 +558,4 @@ mod tests {
         assert_eq!(data.get("secret"), Some(&"secret-value".to_string()));
     }
 
-    #[test]
-    fn test_openstack_credentials_from_secret() {
-        let mut secret = HashMap::new();
-        secret.insert(
-            "clouds.yaml".to_string(),
-            "clouds:\n  openstack:\n    auth:\n      auth_url: https://keystone.example.com"
-                .to_string(),
-        );
-        secret.insert("cloud".to_string(), "mycloud".to_string());
-
-        let creds = OpenStackCredentials::from_secret(&secret).unwrap();
-        assert!(creds.clouds_yaml.contains("keystone.example.com"));
-        assert_eq!(creds.cloud_name, "mycloud");
-        assert!(creds.cacert.is_none());
-    }
-
-    #[test]
-    fn test_openstack_credentials_from_secret_with_cacert() {
-        let mut secret = HashMap::new();
-        secret.insert("clouds.yaml".to_string(), "clouds: {}".to_string());
-        secret.insert(
-            "cacert".to_string(),
-            "-----BEGIN CERTIFICATE-----".to_string(),
-        );
-
-        let creds = OpenStackCredentials::from_secret(&secret).unwrap();
-        assert_eq!(
-            creds.cacert,
-            Some("-----BEGIN CERTIFICATE-----".to_string())
-        );
-    }
-
-    #[test]
-    fn test_openstack_credentials_from_secret_default_cloud_name() {
-        let mut secret = HashMap::new();
-        secret.insert("clouds.yaml".to_string(), "clouds: {}".to_string());
-
-        let creds = OpenStackCredentials::from_secret(&secret).unwrap();
-        assert_eq!(creds.cloud_name, "openstack");
-    }
-
-    #[test]
-    fn test_openstack_credentials_from_secret_missing_clouds_yaml() {
-        let mut secret = HashMap::new();
-        secret.insert("cloud".to_string(), "mycloud".to_string());
-
-        let err = OpenStackCredentials::from_secret(&secret).unwrap_err();
-        assert!(matches!(err, CredentialError::MissingField("clouds.yaml")));
-    }
-
-    #[test]
-    fn test_openstack_credentials_to_k8s_secret() {
-        let creds = OpenStackCredentials {
-            clouds_yaml: Zeroizing::new("clouds:\n  mycloud:\n    auth: {}".to_string()),
-            cloud_name: "mycloud".to_string(),
-            cacert: None,
-        };
-
-        let secret = creds.to_k8s_secret();
-        assert_eq!(
-            secret.metadata.name,
-            Some(OPENSTACK_CREDENTIALS_SECRET.to_string())
-        );
-        assert_eq!(
-            secret.metadata.namespace,
-            Some(crate::LOCAL_SECRETS_NAMESPACE.to_string())
-        );
-
-        let labels = secret.metadata.labels.unwrap();
-        assert_eq!(labels.get(PROVIDER_LABEL), Some(&"openstack".to_string()));
-
-        let data = secret.string_data.unwrap();
-        assert_eq!(
-            data.get("clouds.yaml"),
-            Some(&"clouds:\n  mycloud:\n    auth: {}".to_string())
-        );
-        assert_eq!(data.get("cloud"), Some(&"mycloud".to_string()));
-        assert!(!data.contains_key("cacert"));
-    }
-
-    #[test]
-    fn test_openstack_credentials_to_k8s_secret_with_cacert() {
-        let creds = OpenStackCredentials {
-            clouds_yaml: Zeroizing::new("clouds: {}".to_string()),
-            cloud_name: "openstack".to_string(),
-            cacert: Some("-----BEGIN CERTIFICATE-----".to_string()),
-        };
-
-        let secret = creds.to_k8s_secret();
-        let data = secret.string_data.unwrap();
-        assert_eq!(
-            data.get("cacert"),
-            Some(&"-----BEGIN CERTIFICATE-----".to_string())
-        );
-    }
 }

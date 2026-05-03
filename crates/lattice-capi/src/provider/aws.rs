@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_bootstrap_commands, create_cluster_labels,
+    build_cert_sans, build_post_bootstrap_commands, build_template_manifest, create_cluster_labels,
     generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
     generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
     validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
@@ -118,27 +118,28 @@ impl AwsProvider {
         Ok(CAPIManifest::new(AWS_API_VERSION, "AWSCluster", name, &self.namespace).with_spec(spec))
     }
 
-    /// Generate AWSMachineTemplate manifest
-    fn generate_machine_template(&self, cfg: MachineTemplateConfig<'_>) -> CAPIManifest {
-        let mut spec = serde_json::json!({
+    /// Generate AWSMachineTemplate manifest. Returns `(name, manifest)`;
+    /// content-hashed naming via [`build_template_manifest`].
+    fn generate_machine_template(&self, cfg: MachineTemplateConfig<'_>) -> (String, CAPIManifest) {
+        let mut inner = serde_json::json!({
             "instanceType": cfg.instance_type,
             "sshKeyName": &cfg.aws_cfg.ssh_key_name
         });
 
         // IAM instance profile
         if let Some(profile) = cfg.iam_profile {
-            spec["iamInstanceProfile"] = serde_json::json!(profile);
+            inner["iamInstanceProfile"] = serde_json::json!(profile);
         }
 
         // AMI configuration
         if let Some(ref ami_id) = cfg.aws_cfg.ami_id {
-            spec["ami"] = serde_json::json!({ "id": ami_id });
+            inner["ami"] = serde_json::json!({ "id": ami_id });
         }
 
         // Root volume configuration
         let volume_size = cfg.root_volume_size.unwrap_or(80);
         let volume_type = cfg.root_volume_type.unwrap_or("gp3");
-        spec["rootVolume"] = serde_json::json!({
+        inner["rootVolume"] = serde_json::json!({
             "size": volume_size,
             "type": volume_type
         });
@@ -146,19 +147,20 @@ impl AwsProvider {
         // SSH authorized keys for cloud-init
         if let Some(keys) = &cfg.aws_cfg.ssh_authorized_keys {
             if !keys.is_empty() {
-                spec["cloudInit"] = serde_json::json!({
+                inner["cloudInit"] = serde_json::json!({
                     "insecureSkipSecretsManager": true
                 });
             }
         }
 
-        CAPIManifest::new(
+        build_template_manifest(
             AWS_API_VERSION,
             "AWSMachineTemplate",
-            format!("{}-{}", cfg.name, cfg.suffix),
+            &format!("{}-{}", cfg.name, cfg.suffix),
             &self.namespace,
+            std::collections::BTreeMap::new(),
+            serde_json::json!({ "template": { "spec": inner } }),
         )
-        .with_spec(serde_json::json!({ "template": { "spec": spec } }))
     }
 }
 
@@ -189,16 +191,6 @@ impl Provider for AwsProvider {
             provider_type: ProviderType::Aws,
             registry_mirrors: bootstrap.registry_mirrors.clone(),
             cluster_network: spec.provider.kubernetes.cluster_network.clone(),
-        };
-
-        // No kube-vip for AWS - we use NLB
-        let cp_config = ControlPlaneConfig {
-            replicas: bootstrap.cp_replicas,
-            cert_sans: build_cert_sans(cluster),
-            post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
-            vip: None,
-            ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
-            registry_mirrors: bootstrap.registry_mirrors.clone(),
         };
 
         let infra = self.infra_ref();
@@ -234,10 +226,7 @@ impl Provider for AwsProvider {
             .as_ref()
             .and_then(|v| v.type_.as_deref());
 
-        let mut manifests = vec![
-            generate_cluster(&config, &infra),
-            self.generate_aws_cluster(cluster)?,
-            generate_control_plane(&config, &infra, &cp_config)?,
+        let (cp_template_name, cp_template_manifest) =
             self.generate_machine_template(MachineTemplateConfig {
                 name,
                 aws_cfg: cfg,
@@ -246,7 +235,24 @@ impl Provider for AwsProvider {
                 root_volume_size: cp_root_volume_size,
                 root_volume_type: cp_root_volume_type,
                 suffix: "control-plane",
-            }),
+            });
+
+        // No kube-vip for AWS - we use NLB
+        let cp_config = ControlPlaneConfig {
+            replicas: bootstrap.cp_replicas,
+            cert_sans: build_cert_sans(cluster),
+            post_bootstrap_commands: build_post_bootstrap_commands(name, bootstrap)?,
+            vip: None,
+            ssh_authorized_keys: cfg.ssh_authorized_keys.clone().unwrap_or_default(),
+            registry_mirrors: bootstrap.registry_mirrors.clone(),
+            infra_template_name: cp_template_name,
+        };
+
+        let mut manifests = vec![
+            generate_cluster(&config, &infra),
+            self.generate_aws_cluster(cluster)?,
+            generate_control_plane(&config, &infra, &cp_config)?,
+            cp_template_manifest,
         ];
 
         // Generate worker pool resources
@@ -269,24 +275,27 @@ impl Provider for AwsProvider {
                 .as_ref()
                 .and_then(|v| v.type_.as_deref());
 
+            let (infra_tmpl_name, infra_tmpl) =
+                self.generate_machine_template(MachineTemplateConfig {
+                    name,
+                    aws_cfg: cfg,
+                    instance_type: worker_instance_type,
+                    iam_profile: Some(worker_iam),
+                    root_volume_size: worker_root_volume_size,
+                    root_volume_type: worker_root_volume_type,
+                    suffix: &suffix,
+                });
+            let (bootstrap_tmpl_name, bootstrap_tmpl) =
+                generate_bootstrap_config_template_for_pool(&config, &pool_config);
             manifests.push(generate_machine_deployment_for_pool(
                 &config,
                 &infra,
                 &pool_config,
+                &infra_tmpl_name,
+                &bootstrap_tmpl_name,
             ));
-            manifests.push(self.generate_machine_template(MachineTemplateConfig {
-                name,
-                aws_cfg: cfg,
-                instance_type: worker_instance_type,
-                iam_profile: Some(worker_iam),
-                root_volume_size: worker_root_volume_size,
-                root_volume_type: worker_root_volume_type,
-                suffix: &suffix,
-            }));
-            manifests.push(generate_bootstrap_config_template_for_pool(
-                &config,
-                &pool_config,
-            ));
+            manifests.push(infra_tmpl);
+            manifests.push(bootstrap_tmpl);
         }
 
         Ok(manifests)

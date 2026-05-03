@@ -3218,6 +3218,7 @@ name = "lattice-capi"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "futures",
  "k8s-openapi",
  "kube",

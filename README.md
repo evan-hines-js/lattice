@@ -29,7 +29,7 @@ Lattice is a Kubernetes operator for multi-cluster lifecycle management. It prov
 | **LatticePackage** | Declarative Helm chart management with secret injection and mesh integration |
 | **LatticeMeshMember** | Mesh policy for workloads (auto-generated or manual) |
 | **LatticeQuota** | Per-principal resource consumption limits (CPU, memory, GPU) |
-| **InfraProvider** | Cloud credentials (AWS, Proxmox, OpenStack, Docker) |
+| **InfraProvider** | Cloud credentials (AWS, Proxmox, Docker) |
 | **ImageProvider** | Container registry credentials (GHCR, ECR, DockerHub, Harbor, etc.) |
 | **SecretProvider** | External secret backends (Vault, AWS Secrets Manager, webhook) |
 | **CedarPolicy** | Authorization policies (secrets, mesh wildcards, security overrides) |

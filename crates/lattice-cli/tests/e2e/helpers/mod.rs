@@ -55,7 +55,7 @@ pub fn dev_service_url(env_var: &str) -> String {
     std::env::var(env_var).unwrap_or_else(|_| {
         panic!(
             "{env_var} is not set. Set it to the address reachable from both \
-             the test runner and cluster pods (e.g. http://10.0.0.131:PORT). \
+             the test runner and cluster pods (e.g. http://10.0.0.17:PORT). \
              See .env.example for all required variables."
         )
     })

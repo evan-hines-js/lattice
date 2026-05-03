@@ -23,12 +23,8 @@ use tracing::{debug, info, warn};
 use lattice_common::credentials::{AwsCredentials, CredentialProvider};
 use lattice_common::kube_utils::{self, ApplyOptions};
 use lattice_common::retry::RetryConfig;
-use lattice_common::{
-    Error, AWS_CAPA_CREDENTIALS_SECRET, OPENSTACK_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET,
-};
-use lattice_core::system_namespaces::{
-    CAPA_NAMESPACE, CAPI_BASIS_NAMESPACE, CAPMOX_NAMESPACE, CAPO_NAMESPACE,
-};
+use lattice_common::{Error, AWS_CAPA_CREDENTIALS_SECRET, PROXMOX_CREDENTIALS_SECRET};
+use lattice_core::system_namespaces::{CAPA_NAMESPACE, CAPI_BASIS_NAMESPACE, CAPMOX_NAMESPACE};
 use lattice_crd::crd::{InfraProvider, ProviderType};
 
 /// Timeout for waiting on cert-manager and provider deployments
@@ -49,7 +45,6 @@ fn provider_dir_name(name: &str, provider_type: CapiProviderType) -> &'static st
         ("docker", CapiProviderType::Infrastructure) => "infrastructure-docker",
         ("proxmox", CapiProviderType::Infrastructure) => "infrastructure-proxmox",
         ("aws", CapiProviderType::Infrastructure) => "infrastructure-aws",
-        ("openstack", CapiProviderType::Infrastructure) => "infrastructure-openstack",
         ("basis", CapiProviderType::Infrastructure) => "infrastructure-basis",
         ("in-cluster", _) => "ipam-in-cluster",
         _ => "unknown",
@@ -67,7 +62,6 @@ fn provider_namespace(name: &str, provider_type: CapiProviderType) -> Option<&'s
         ("docker", CapiProviderType::Infrastructure) => Some("capd-system"),
         ("proxmox", CapiProviderType::Infrastructure) => Some(CAPMOX_NAMESPACE),
         ("aws", CapiProviderType::Infrastructure) => Some(CAPA_NAMESPACE),
-        ("openstack", CapiProviderType::Infrastructure) => Some(CAPO_NAMESPACE),
         ("basis", CapiProviderType::Infrastructure) => Some(CAPI_BASIS_NAMESPACE),
         ("in-cluster", _) => Some("capi-ipam-in-cluster-system"),
         _ => None,
@@ -90,7 +84,6 @@ fn provider_component_files(
         }
         ("proxmox", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("aws", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
-        ("openstack", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("basis", CapiProviderType::Infrastructure) => &["infrastructure-components.yaml"],
         ("in-cluster", _) => &["ipam-components.yaml"],
         _ => &[],
@@ -262,7 +255,6 @@ const KNOWN_PROVIDERS: &[(&str, CapiProviderType)] = &[
     ("rke2", CapiProviderType::ControlPlane),
     ("docker", CapiProviderType::Infrastructure),
     ("proxmox", CapiProviderType::Infrastructure),
-    ("openstack", CapiProviderType::Infrastructure),
     ("aws", CapiProviderType::Infrastructure),
     ("basis", CapiProviderType::Infrastructure),
     ("in-cluster", CapiProviderType::Infrastructure),
@@ -398,7 +390,6 @@ pub fn infra_provider_namespace(provider: ProviderType) -> Option<&'static str> 
     match provider {
         ProviderType::Aws => Some(CAPA_NAMESPACE),
         ProviderType::Proxmox => Some(CAPMOX_NAMESPACE),
-        ProviderType::OpenStack => Some(CAPO_NAMESPACE),
         ProviderType::Basis => Some(CAPI_BASIS_NAMESPACE),
         _ => None,
     }
@@ -583,13 +574,6 @@ impl InfraProviderInfo {
                 credentials_env_map: &[],
                 needs_ipam: false,
             }),
-            ProviderType::OpenStack => Ok(Self {
-                name: "openstack",
-                version: env!("CAPO_VERSION").to_string(),
-                credentials_secret: Some((CAPO_NAMESPACE, OPENSTACK_CREDENTIALS_SECRET)),
-                credentials_env_map: &[],
-                needs_ipam: false,
-            }),
             ProviderType::Proxmox => Ok(Self {
                 name: "proxmox",
                 version: env!("CAPMOX_VERSION").to_string(),
@@ -681,7 +665,6 @@ impl CapiProviderConfig {
         let name = match infrastructure {
             ProviderType::Aws => "aws",
             ProviderType::Docker => "docker",
-            ProviderType::OpenStack => "openstack",
             ProviderType::Proxmox => "proxmox",
             ProviderType::Basis => "basis",
             ProviderType::Gcp | ProviderType::Azure | _ => {
@@ -1358,7 +1341,6 @@ mod tests {
         for (provider, expected) in [
             (ProviderType::Aws, "aws"),
             (ProviderType::Docker, "docker"),
-            (ProviderType::OpenStack, "openstack"),
             (ProviderType::Proxmox, "proxmox"),
         ] {
             let config = CapiProviderConfig::with_versions(

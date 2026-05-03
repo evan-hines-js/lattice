@@ -23,23 +23,13 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod};
 use kube::api::{Api, ListParams};
+use lattice_rook::install::manifests::BLOCK_POOL_NAME;
 use tracing::info;
 
 use super::super::helpers::{
     client_from_kubeconfig, create_with_retry, delete_namespace, ensure_namespace, list_with_retry,
     run_kubectl, wait_for_condition, wait_for_pod_running, POLL_INTERVAL,
 };
-
-/// Wait budget for the post-Rook-Ready PVC drain.
-///
-/// The CSI external-provisioner's exponential-backoff retry caps at
-/// roughly 5 minutes per claim, so a Pending PVC stuck behind an
-/// "infeasible" failure naturally re-enters its work queue within that
-/// window once Rook has finished writing `rook-ceph-csi-config`. 15
-/// minutes gives ~3x headroom over that natural reconcile so the test
-/// only fails when something is genuinely broken, not when Rook + CSI
-/// just need a bit longer to settle.
-const PVC_DRAIN_TIMEOUT: Duration = Duration::from_secs(900);
 
 const NAMESPACE: &str = "storage-test";
 const PVC_NAME: &str = "storage-test-pvc";
@@ -61,7 +51,7 @@ const INSTALL_READY_TIMEOUT: Duration = Duration::from_secs(1200);
 /// Rook needs at least one raw block device per worker that ceph-osd can
 /// claim — `dataDisks` on a worker pool surfaces them. Only fixtures
 /// that wire that up should run this test (basis today; proxmox VMs come
-/// up with a single root disk, AWS/OpenStack rely on managed CSI). Gate
+/// up with a single root disk, AWS relies on managed CSI). Gate
 /// via env var so the test runner opts in explicitly per fixture rather
 /// than entangling the test list with `InfraProvider` enum values.
 pub fn storage_tests_enabled() -> bool {
@@ -169,128 +159,81 @@ pub async fn wait_for_storage_ready(kubeconfig: &str) -> Result<(), String> {
     .await?;
     info!("[Storage] RookInstall is Ready");
 
-    // Wake any PVCs created before Rook had finished writing the
-    // `rook-ceph-csi-config` ConfigMap: the CSI external-provisioner
-    // sidecar caches the resulting "config.json: no such file" failure as
-    // an *infeasible* error and stops retrying. Restarting the ctrlplugin
-    // doesn't help (the cache key is per-PVC, the sidecar still sees the
-    // same PVC UID); only deleting the consumer pod re-triggers a
-    // provisioning attempt by giving the PVC a new `selected-node`.
-    drain_pending_pvcs(kubeconfig).await?;
+    nudge_pending_pvcs(kubeconfig).await?;
 
     Ok(())
 }
 
-/// Find every Pending PVC and nudge it two ways at once:
+/// Re-trigger the external CSI provisioner for any PVC stuck in Pending,
+/// then keep nudging on each poll until none remain.
 ///
-/// 1. Patch the PVC itself with a fresh `lattice.dev/storage-nudge`
-///    annotation. Bumping any PVC field changes its `resourceVersion`,
-///    which fires the external-provisioner's informer and bypasses the
-///    in-memory backoff for that PVC. A label edit is what unstuck this
-///    manually in practice.
-/// 2. Delete every consumer Pod that references the PVC. The owning
-///    controller (Deployment / StatefulSet / VMSingle / etc.) recreates
-///    the Pod, the new Pod gets re-scheduled, and re-scheduling stamps a
-///    fresh `volume.kubernetes.io/selected-node` on the PVC — a second
-///    independent provisioner trigger.
-///
-/// Either nudge alone has been observed to fail intermittently against
-/// the same PVC; firing both in the same pass makes the drain
-/// deterministic.
-async fn drain_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
+/// Why: PVCs created before `rook-ceph-block` existed get a single
+/// `ProvisioningFailed` event and then back off for minutes. Annotating
+/// the PVC bumps its resourceVersion, which makes the external
+/// provisioner re-evaluate the claim. A single nudge isn't always
+/// enough — the provisioner can still race CephBlockPool readiness on
+/// the first retry — so we re-sweep until the cluster is clean.
+async fn nudge_pending_pvcs(kubeconfig: &str) -> Result<(), String> {
     let client = client_from_kubeconfig(kubeconfig).await?;
-    let pvc_api: Api<PersistentVolumeClaim> = Api::all(client.clone());
-
-    let pvcs = list_with_retry(&pvc_api, &ListParams::default()).await?;
-    let pending: Vec<(String, String)> = pvcs
-        .items
-        .into_iter()
-        .filter(|pvc| pvc.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Pending"))
-        .filter_map(|pvc| Some((pvc.metadata.namespace?, pvc.metadata.name?)))
-        .collect();
-
-    if pending.is_empty() {
-        return Ok(());
-    }
-
-    info!(
-        "[Storage] {} Pending PVC(s) after Rook is Ready; nudging via annotation patch + consumer-pod delete: {}",
-        pending.len(),
-        pending
-            .iter()
-            .map(|(ns, n)| format!("{ns}/{n}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-
-    let stamp = chrono::Utc::now().to_rfc3339();
-    let pvc_patch = serde_json::json!({
-        "metadata": {
-            "annotations": { "lattice.dev/storage-nudge": stamp }
-        }
-    });
-    let params = kube::api::PatchParams::default();
-
-    for (ns, pvc_name) in &pending {
-        let scoped: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), ns);
-        match scoped
-            .patch(pvc_name, &params, &kube::api::Patch::Merge(&pvc_patch))
-            .await
-        {
-            Ok(_) => info!("[Storage] Annotated PVC {ns}/{pvc_name}"),
-            Err(e) => info!("[Storage] PVC annotation patch failed for {ns}/{pvc_name}: {e}"),
-        }
-
-        let pod_api: Api<Pod> = Api::namespaced(client.clone(), ns);
-        let pods = list_with_retry(&pod_api, &ListParams::default()).await?;
-        let consumers: Vec<String> = pods
-            .items
-            .iter()
-            .filter(|p| pod_mounts_pvc(p, pvc_name))
-            .filter_map(|p| p.metadata.name.clone())
-            .collect();
-        if consumers.is_empty() {
-            continue;
-        }
-        for pod_name in &consumers {
-            match pod_api.delete(pod_name, &Default::default()).await {
-                Ok(_) => info!("[Storage] Deleted consumer pod {ns}/{pod_name} for PVC {pvc_name}"),
-                Err(kube::Error::Api(ref e)) if e.code == 404 => {}
-                Err(e) => info!("[Storage] Failed to delete {ns}/{pod_name}: {e}"),
-            }
-        }
-    }
+    let pvcs: Api<PersistentVolumeClaim> = Api::all(client);
 
     wait_for_condition(
-        "all PVCs to leave Pending after nudge",
-        PVC_DRAIN_TIMEOUT,
-        POLL_INTERVAL,
-        || {
-            let pvc_api = pvc_api.clone();
-            async move {
-                let pvcs = list_with_retry(&pvc_api, &ListParams::default()).await?;
-                Ok(pvcs.items.iter().all(|pvc| {
-                    pvc.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Pending")
-                }))
+        "all PVCs out of Pending",
+        Duration::from_secs(300),
+        Duration::from_secs(10),
+        || async {
+            let list = pvcs
+                .list(&ListParams::default())
+                .await
+                .map_err(|e| format!("list PVCs: {e}"))?;
+
+            let pending: Vec<_> = list
+                .items
+                .iter()
+                .filter(|p| {
+                    p.status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_deref())
+                        .map(|phase| phase == "Pending")
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if pending.is_empty() {
+                return Ok(true);
             }
+
+            let retry_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            for pvc in &pending {
+                let (Some(ns), Some(name)) = (
+                    pvc.metadata.namespace.as_deref(),
+                    pvc.metadata.name.as_deref(),
+                ) else {
+                    continue;
+                };
+                info!("[Storage] Nudging pending PVC {ns}/{name}");
+                run_kubectl(&[
+                    "--kubeconfig",
+                    kubeconfig,
+                    "annotate",
+                    "pvc",
+                    "-n",
+                    ns,
+                    name,
+                    &format!("retry-at={retry_at}"),
+                    "--overwrite",
+                ])
+                .await?;
+            }
+            Ok(false)
         },
     )
-    .await
-}
-
-fn pod_mounts_pvc(pod: &Pod, pvc_name: &str) -> bool {
-    pod.spec
-        .as_ref()
-        .and_then(|s| s.volumes.as_ref())
-        .map(|vols| {
-            vols.iter().any(|v| {
-                v.persistent_volume_claim
-                    .as_ref()
-                    .map(|c| c.claim_name == pvc_name)
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    .await?;
+    Ok(())
 }
 
 async fn create_pvc(client: &kube::Client) -> Result<(), String> {
@@ -300,7 +243,7 @@ async fn create_pvc(client: &kube::Client) -> Result<(), String> {
         "metadata": { "name": PVC_NAME, "namespace": NAMESPACE },
         "spec": {
             "accessModes": ["ReadWriteOnce"],
-            "storageClassName": "rook-ceph-block",
+            "storageClassName": BLOCK_POOL_NAME,
             "resources": { "requests": { "storage": "1Gi" } }
         }
     }))

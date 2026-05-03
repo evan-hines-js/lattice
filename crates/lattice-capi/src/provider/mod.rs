@@ -20,14 +20,12 @@ mod aws;
 mod basis;
 mod docker;
 mod kube_vip;
-mod openstack;
 mod proxmox;
 pub mod registry;
 
 pub use aws::AwsProvider;
 pub use basis::BasisProvider;
 pub use docker::DockerProvider;
-pub use openstack::OpenStackProvider;
 pub use proxmox::ProxmoxProvider;
 
 use async_trait::async_trait;
@@ -349,6 +347,14 @@ pub struct ControlPlaneConfig {
     pub ssh_authorized_keys: Vec<String>,
     /// Resolved registry mirror configs (upstream → mirror host, optional credentials content)
     pub registry_mirrors: Vec<registry::ResolvedMirror>,
+    /// Name of the infrastructure machine template referenced by
+    /// `KubeadmControlPlane.machineTemplate.spec.infrastructureRef`.
+    /// CAPI infra machine templates are immutable by contract, so
+    /// every provider must compute this name as a function of the
+    /// template's spec content (see `template_name_hash`). When the
+    /// spec changes, the name changes, CAPI rolls a new MachineSet,
+    /// and the old template is left for GC.
+    pub infra_template_name: String,
 }
 
 /// Virtual IP configuration for kube-vip.
@@ -412,6 +418,44 @@ pub fn control_plane_name(cluster_name: &str) -> String {
     format!("{}-control-plane", cluster_name)
 }
 
+/// Build a content-hashed CAPI template manifest.
+///
+/// CAPI infrastructure and bootstrap machine templates are immutable
+/// by contract — to update a pool's spec, the controller must produce
+/// a *new* template with a *new* name and re-point the
+/// MachineDeployment / KubeadmControlPlane at it; in-place edits don't
+/// re-roll. This helper centralizes the immutability-aware naming so
+/// each provider just supplies its provider-specific `spec` and gets
+/// back the hashed name plus a fully-formed manifest.
+///
+/// `prefix` is the cluster-and-pool-scoped stem
+/// (e.g. `homelab-pool-default` or `homelab-control-plane`). The hash
+/// is a 10-char hex prefix of SHA-256 over the JSON-canonical form of
+/// `spec` — short enough to fit DNS-label budgets, long enough that
+/// collisions within a cluster's resource namespace are vanishingly
+/// unlikely. Determinism comes from `serde_json`'s map-key sort order.
+pub fn build_template_manifest(
+    api_version: &str,
+    kind: &str,
+    prefix: &str,
+    namespace: &str,
+    labels: std::collections::BTreeMap<String, String>,
+    spec: serde_json::Value,
+) -> (String, CAPIManifest) {
+    use aws_lc_rs::digest::{digest, SHA256};
+    let bytes = serde_json::to_vec(&spec).expect("serde_json::Value serializes infallibly");
+    let d = digest(&SHA256, &bytes);
+    let mut hash = String::with_capacity(10);
+    for b in &d.as_ref()[..5] {
+        hash.push_str(&format!("{:02x}", b));
+    }
+    let name = format!("{}-{}", prefix, hash);
+    let manifest = CAPIManifest::new(api_version, kind, &name, namespace)
+        .with_labels(labels)
+        .with_spec(spec);
+    (name, manifest)
+}
+
 /// Format a Kubernetes version string for CAPI resources.
 ///
 /// Normalizes the version with a `v` prefix and appends the appropriate suffix
@@ -432,7 +476,13 @@ pub fn format_capi_version(
 
 use lattice_common::resources::{AUTOSCALER_MAX_SIZE, AUTOSCALER_MIN_SIZE};
 
-/// Generate a MachineDeployment manifest for a worker pool
+/// Generate a MachineDeployment manifest for a worker pool.
+///
+/// `infra_template_name` and `bootstrap_template_name` are the
+/// already-computed (typically content-hashed) names of the
+/// per-pool `*MachineTemplate` and `KubeadmConfigTemplate` /
+/// `RKE2ConfigTemplate`. Caller owns choosing the names so spec
+/// changes propagate through the immutable-template contract.
 ///
 /// MachineDeployment is created with replicas=0 during initial provisioning.
 /// After pivot, the cluster's local controller scales up (or autoscaler manages it).
@@ -440,6 +490,8 @@ pub fn generate_machine_deployment_for_pool(
     config: &ClusterConfig,
     infra: &InfrastructureRef,
     pool: &WorkerPoolConfig,
+    infra_template_name: &str,
+    bootstrap_template_name: &str,
 ) -> CAPIManifest {
     use lattice_crd::crd::BootstrapProvider;
 
@@ -471,13 +523,13 @@ pub fn generate_machine_deployment_for_pool(
                     "configRef": {
                         "apiGroup": "bootstrap.cluster.x-k8s.io",
                         "kind": bootstrap_config_kind,
-                        "name": format!("{}-{}", config.name, suffix)
+                        "name": bootstrap_template_name,
                     }
                 },
                 "infrastructureRef": {
                     "apiGroup": infra.api_group,
                     "kind": infra.machine_template_kind,
-                    "name": format!("{}-{}", config.name, suffix)
+                    "name": infra_template_name,
                 }
             }
         }
@@ -596,18 +648,20 @@ pub fn generate_machine_deployment_for_pool(
     manifest
 }
 
-/// Generate bootstrap config template for a worker pool
+/// Generate the bootstrap config template for a worker pool.
 ///
-/// This dispatches to the appropriate config template generator based on the
-/// bootstrap provider configured in the ClusterConfig.
+/// Returns `(name, manifest)` — the name is hashed off the spec via
+/// [`template_name_hash`] so a pool-spec change (labels, taints,
+/// registries, …) yields a new template name and CAPI rolls a new
+/// MachineSet. Caller wires `name` into
+/// `MachineDeployment.spec.template.spec.bootstrap.configRef.name`.
 pub fn generate_bootstrap_config_template_for_pool(
     config: &ClusterConfig,
     pool: &WorkerPoolConfig,
-) -> CAPIManifest {
+) -> (String, CAPIManifest) {
     use lattice_crd::crd::BootstrapProvider;
 
     match config.bootstrap {
-        BootstrapProvider::Kubeadm => generate_kubeadm_config_template_for_pool(config, pool),
         BootstrapProvider::Rke2 => generate_rke2_config_template_for_pool(config, pool),
         _ => generate_kubeadm_config_template_for_pool(config, pool),
     }
@@ -761,13 +815,13 @@ fn build_node_registration(
     reg
 }
 
-/// Generate KubeadmConfigTemplate manifest for a worker pool
+/// Generate KubeadmConfigTemplate manifest for a worker pool.
+/// Returns `(name, manifest)`; name is content-hashed.
 fn generate_kubeadm_config_template_for_pool(
     config: &ClusterConfig,
     pool: &WorkerPoolConfig,
-) -> CAPIManifest {
+) -> (String, CAPIManifest) {
     let suffix = pool_resource_suffix(pool.pool_id);
-    let template_name = format!("{}-{}", config.name, suffix);
 
     // Build kubelet extra args using the shared function - keep as mutable Vec
     let mut kubelet_extra_args = build_kubelet_extra_args(config.provider_type);
@@ -829,23 +883,23 @@ fn generate_kubeadm_config_template_for_pool(
         spec["template"]["spec"]["preKubeadmCommands"] = serde_json::json!(mirror_commands);
     }
 
-    CAPIManifest::new(
+    build_template_manifest(
         CAPI_BOOTSTRAP_API_VERSION,
         "KubeadmConfigTemplate",
-        &template_name,
+        &format!("{}-{}", config.name, suffix),
         config.namespace,
+        config.labels.clone(),
+        spec,
     )
-    .with_labels(config.labels.clone())
-    .with_spec(spec)
 }
 
-/// Generate RKE2ConfigTemplate manifest for a worker pool
+/// Generate RKE2ConfigTemplate manifest for a worker pool.
+/// Returns `(name, manifest)`; name is content-hashed.
 fn generate_rke2_config_template_for_pool(
     config: &ClusterConfig,
     pool: &WorkerPoolConfig,
-) -> CAPIManifest {
+) -> (String, CAPIManifest) {
     let suffix = pool_resource_suffix(pool.pool_id);
-    let template_name = format!("{}-{}", config.name, suffix);
 
     // Build kubelet extra args using the shared function
     let mut kubelet_extra_args = build_rke2_kubelet_extra_args(config.provider_type);
@@ -895,14 +949,14 @@ fn generate_rke2_config_template_for_pool(
         spec["template"]["spec"]["files"] = serde_json::json!([file]);
     }
 
-    CAPIManifest::new(
+    build_template_manifest(
         RKE2_BOOTSTRAP_API_VERSION,
         "RKE2ConfigTemplate",
-        &template_name,
+        &format!("{}-{}", config.name, suffix),
         config.namespace,
+        config.labels.clone(),
+        spec,
     )
-    .with_labels(config.labels.clone())
-    .with_spec(spec)
 }
 
 /// Generate the main CAPI Cluster resource
@@ -1074,7 +1128,7 @@ fn generate_kubeadm_control_plane(
                 "infrastructureRef": {
                     "apiGroup": infra.api_group,
                     "kind": infra.machine_template_kind,
-                    "name": control_plane_name(config.name)
+                    "name": cp_config.infra_template_name,
                 }
             }
         },
@@ -1163,7 +1217,7 @@ fn generate_rke2_control_plane(
                 "infrastructureRef": {
                     "apiGroup": infra.api_group,
                     "kind": infra.machine_template_kind,
-                    "name": control_plane_name(config.name)
+                    "name": cp_config.infra_template_name,
                 }
             }
         },
@@ -1404,7 +1458,6 @@ pub fn create_provider(provider_type: ProviderType, namespace: &str) -> Result<B
         ProviderType::Aws => Ok(Box::new(AwsProvider::with_namespace(namespace))),
         ProviderType::Basis => Ok(Box::new(BasisProvider::with_namespace(namespace))),
         ProviderType::Docker => Ok(Box::new(DockerProvider::with_namespace(namespace))),
-        ProviderType::OpenStack => Ok(Box::new(OpenStackProvider::with_namespace(namespace))),
         ProviderType::Proxmox => Ok(Box::new(ProxmoxProvider::with_namespace(namespace))),
         ProviderType::Gcp => Err(Error::provider(
             "GCP provider not yet implemented".to_string(),
@@ -1537,6 +1590,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1557,6 +1611,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1584,11 +1639,15 @@ mod tests {
             let config = test_config(BootstrapProvider::Kubeadm);
             let pool = test_pool();
 
-            let manifest = generate_bootstrap_config_template_for_pool(&config, &pool);
+            let (name, manifest) = generate_bootstrap_config_template_for_pool(&config, &pool);
 
             assert_eq!(manifest.kind, "KubeadmConfigTemplate");
             assert_eq!(manifest.api_version, CAPI_BOOTSTRAP_API_VERSION);
-            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
+            assert!(
+                name.starts_with("test-cluster-pool-default-"),
+                "name {name:?} should be content-hashed off the cluster+pool stem"
+            );
+            assert_eq!(manifest.metadata.name, name);
         }
 
         #[test]
@@ -1596,11 +1655,15 @@ mod tests {
             let config = test_config(BootstrapProvider::Rke2);
             let pool = test_pool();
 
-            let manifest = generate_bootstrap_config_template_for_pool(&config, &pool);
+            let (name, manifest) = generate_bootstrap_config_template_for_pool(&config, &pool);
 
             assert_eq!(manifest.kind, "RKE2ConfigTemplate");
             assert_eq!(manifest.api_version, RKE2_BOOTSTRAP_API_VERSION);
-            assert_eq!(manifest.metadata.name, "test-cluster-pool-default");
+            assert!(
+                name.starts_with("test-cluster-pool-default-"),
+                "name {name:?} should be content-hashed off the cluster+pool stem"
+            );
+            assert_eq!(manifest.metadata.name, name);
         }
 
         #[test]
@@ -1641,7 +1704,7 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool();
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1659,7 +1722,7 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool();
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1688,7 +1751,7 @@ mod tests {
                 spec,
             };
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
 
             let annotations = manifest
                 .metadata
@@ -1707,7 +1770,7 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool(); // No min/max set
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool);
+            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
 
             assert!(
                 manifest.metadata.annotations.is_none(),
@@ -1726,6 +1789,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1758,6 +1822,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1787,6 +1852,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1880,6 +1946,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1912,6 +1979,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2002,6 +2070,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2032,6 +2101,7 @@ mod tests {
                     "ssh-rsa AAAAB3... other@host".to_string(),
                 ],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2075,6 +2145,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
                 registry_mirrors: vec![],
+            infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2189,7 +2260,6 @@ mod tests {
             assert!(uses_external_cloud_provider(ProviderType::Aws));
             assert!(!uses_external_cloud_provider(ProviderType::Docker));
             assert!(!uses_external_cloud_provider(ProviderType::Proxmox));
-            assert!(!uses_external_cloud_provider(ProviderType::OpenStack));
         }
 
         #[test]
@@ -2199,7 +2269,6 @@ mod tests {
             assert!(!needs_manual_provider_id(ProviderType::Aws));
             // Other providers do
             assert!(needs_manual_provider_id(ProviderType::Proxmox));
-            assert!(needs_manual_provider_id(ProviderType::OpenStack));
         }
 
         #[test]
@@ -2212,7 +2281,6 @@ mod tests {
             // Other providers don't
             assert_eq!(get_node_name_template(ProviderType::Docker), None);
             assert_eq!(get_node_name_template(ProviderType::Proxmox), None);
-            assert_eq!(get_node_name_template(ProviderType::OpenStack), None);
         }
 
         #[test]
@@ -2440,12 +2508,6 @@ mod tests {
         #[test]
         fn test_create_provider_docker() {
             let provider = create_provider(ProviderType::Docker, "capi-system");
-            assert!(provider.is_ok());
-        }
-
-        #[test]
-        fn test_create_provider_openstack() {
-            let provider = create_provider(ProviderType::OpenStack, "capi-system");
             assert!(provider.is_ok());
         }
 

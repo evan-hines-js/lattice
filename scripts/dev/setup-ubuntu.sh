@@ -52,14 +52,19 @@ if ! command -v docker &>/dev/null; then
 else
     echo "Docker already installed: $(docker --version)"
 fi
-usermod -aG docker "$REAL_USER"
+if id -nG "$REAL_USER" | grep -qw docker; then
+    echo "User $REAL_USER already in docker group."
+else
+    usermod -aG docker "$REAL_USER"
+    NEED_DOCKER_RELOGIN=1
+fi
 
 # Configure Docker DNS and insecure registries for local testing
 mkdir -p /etc/docker
 cat > /etc/docker/daemon.json <<'EOF'
 {
   "dns": ["8.8.8.8", "1.1.1.1"],
-  "insecure-registries": ["10.0.0.131:5555", "10.0.0.131:5556", "10.0.0.131:5557"]
+  "insecure-registries": ["10.0.0.17:5555", "10.0.0.17:5556", "10.0.0.17:5557"]
 }
 EOF
 systemctl restart docker
@@ -133,12 +138,36 @@ else
     echo "clusterctl already installed: $(clusterctl version -o short 2>/dev/null || echo 'installed')"
 fi
 
-curl -fsSL https://claude.ai/install.sh | bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+# ---- cosign ----
+# Required by the image signature e2e test, which shells out to
+# `cosign generate-key-pair` / `cosign sign` against the local registry.
+echo "=== Installing cosign ==="
+if ! command -v cosign &>/dev/null; then
+    ARCH=$(dpkg --print-architecture)
+    COSIGN_VERSION=$(curl -fsSL https://api.github.com/repos/sigstore/cosign/releases/latest | jq -r .tag_name)
+    curl -fsSL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${ARCH}" \
+        -o /usr/local/bin/cosign
+    chmod +x /usr/local/bin/cosign
+else
+    echo "cosign already installed: $(cosign version 2>/dev/null | head -1 || echo 'installed')"
+fi
+
+# ---- Claude CLI ----
+# Install as the real user, not root, so the binary lands in their
+# ~/.local/bin and the PATH export goes into their ~/.bashrc. Running
+# this as root previously sourced /root/.bashrc under `set -u` and
+# tripped on PS1 being unset in a non-interactive shell.
+echo "=== Installing Claude CLI ==="
+sudo -u "$REAL_USER" bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
+USER_BASHRC="$REAL_HOME/.bashrc"
+if ! grep -q 'HOME/.local/bin' "$USER_BASHRC" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$USER_BASHRC"
+    chown "$REAL_USER:$REAL_USER" "$USER_BASHRC"
+fi
 
 # ---- DNS resolver for e2e.internal zone ----
 echo "=== Configuring DNS resolver for e2e.internal ==="
-PIHOLE_IP="${LATTICE_PIHOLE_RESOLVER:-10.0.0.131:5353}"
+PIHOLE_IP="${LATTICE_PIHOLE_RESOLVER:-10.0.0.17:53}"
 mkdir -p /etc/systemd/resolved.conf.d
 cat > /etc/systemd/resolved.conf.d/pihole.conf <<EOF
 [Resolve]
@@ -161,7 +190,13 @@ kubectl version --client 2>/dev/null || true
 helm version --short 2>/dev/null || true
 kind version 2>/dev/null || true
 clusterctl version 2>/dev/null || true
+cosign version 2>/dev/null | head -1 || true
 claude --version || true
 echo
-echo ">>> Log out and back in (or run 'newgrp docker') for docker group to take effect."
+if [ "${NEED_DOCKER_RELOGIN:-0}" = "1" ]; then
+    printf '\033[1;33m%s\033[0m\n' '!!! ACTION REQUIRED !!!'
+    printf '\033[1;33m%s\033[0m\n' "User $REAL_USER was just added to the docker group."
+    printf '\033[1;33m%s\033[0m\n' "Run \`newgrp docker\` (or log out and back in) before using docker."
+    echo
+fi
 echo ">>> Then run: ./scripts/dev/test-docker.sh"

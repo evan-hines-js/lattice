@@ -272,8 +272,6 @@ impl ParentConnectionConfig {
 pub const PROXMOX_CREDENTIALS_SECRET: &str = "proxmox-credentials";
 /// Secret name for AWS credentials (source secret)
 pub const AWS_CREDENTIALS_SECRET: &str = "aws-credentials";
-/// Secret name for OpenStack credentials
-pub const OPENSTACK_CREDENTIALS_SECRET: &str = "openstack-cloud-config";
 /// Secret name for Basis mTLS credentials (cert/key/ca PEMs + serverUrl)
 pub const BASIS_CREDENTIALS_SECRET: &str = "basis-credentials";
 

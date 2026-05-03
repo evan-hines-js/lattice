@@ -77,10 +77,6 @@ fn main() {
         versions.providers["infrastructure-aws"].version
     );
     println!(
-        "cargo:rustc-env=CAPO_VERSION={}",
-        versions.providers["infrastructure-openstack"].version
-    );
-    println!(
         "cargo:rustc-env=CAPI_BASIS_VERSION={}",
         versions.providers["infrastructure-basis"].version
     );

@@ -273,7 +273,7 @@ async fn ensure_registry_egress_lmm(
     Ok(())
 }
 
-/// Parse a registry string (e.g., "ghcr.io", "10.0.0.131:5557") into host and port.
+/// Parse a registry string (e.g., "ghcr.io", "10.0.0.17:5557") into host and port.
 ///
 /// The `insecure` flag from the ImageProvider spec determines the protocol:
 /// insecure=true → HTTP (default port 80), insecure=false → HTTPS (default port 443).
@@ -322,8 +322,8 @@ mod tests {
 
     #[test]
     fn parse_registry_ip_with_port_insecure() {
-        let ep = super::parse_registry_endpoint("10.0.0.131:5557", true);
-        assert_eq!(ep.host, "10.0.0.131");
+        let ep = super::parse_registry_endpoint("10.0.0.17:5557", true);
+        assert_eq!(ep.host, "10.0.0.17");
         assert_eq!(ep.port, 5557);
         assert_eq!(ep.protocol, "http");
     }

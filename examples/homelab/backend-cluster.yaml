@@ -27,9 +27,9 @@ spec:
         externalIpPool: cell-internal
   registryMirrors:
     - upstream: docker.io
-      mirror: "http://10.0.0.131:5555"
+      mirror: "http://10.0.0.17:5555"
     - upstream: ghcr.io
-      mirror: "http://10.0.0.131:5556"
+      mirror: "http://10.0.0.17:5556"
   nodes:
     controlPlane:
       replicas: 3
@@ -46,24 +46,30 @@ spec:
         diskGib: 50
     workerPools:
       default:
-        replicas: 3
-        # Workers prefer the cheaper-disk host so the CP host doesn't
-        # get crowded out under churn.
-        placement:
-          prefers:
-            - key: tier
-              value: slow
-              weight: 100
+        # Two workers, both pinned to tier=fast storage. Until the
+        # incoming 800 GB drives are installed, only node-2 has a
+        # tier=fast data pool (`basis-fast-pve`, 340 GiB), so both
+        # OSDs land on that one device. Ceph runs size=2 min_size=1;
+        # CRUSH `failure-domain: osd` is required (host fd would
+        # refuse to place two OSDs on the one host). The 150 GiB disk
+        # size leaves 40 GiB headroom on the 340 GiB device after
+        # both reservations (2×150=300). Bump back to 175 GiB and
+        # add `node-3` (or split fast across multiple devices) once
+        # the new drives land.
+        replicas: 2
         instanceType:
           cores: 12
           memoryGib: 64
           diskGib: 250
-          # 175 GiB raw block device per worker, presented as /dev/vdc
-          # by Basis. Rook's CephCluster claims it via the deviceFilter
-          # `^vd[c-z]$`, so each worker contributes one OSD.
-          # purpose=replicated activates basis's same-cluster anti-
-          # affinity so Ceph replicas land on different drives.
+          # Raw block device for the OSD, presented as /dev/vdc.
+          # Rook's CephCluster claims it via deviceFilter `^vd[c-z]$`.
+          # selector pins to tier=fast pools, which today exists only
+          # on node-2 — that's the host the workers end up on.
           dataDisks:
-            - sizeGib: 175
+            - sizeGib: 150
               purpose: replicated
+              selector:
+                requires:
+                  - key: tier
+                    values: [fast]
   services: true

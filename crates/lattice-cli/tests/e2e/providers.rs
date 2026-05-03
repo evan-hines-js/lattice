@@ -14,7 +14,6 @@ use lattice_crd::crd::ProviderType;
 pub enum InfraProvider {
     Docker,
     Aws,
-    OpenStack,
     Proxmox,
     Basis,
 }
@@ -24,7 +23,6 @@ impl From<ProviderType> for InfraProvider {
         match pt {
             ProviderType::Docker => Self::Docker,
             ProviderType::Aws => Self::Aws,
-            ProviderType::OpenStack => Self::OpenStack,
             ProviderType::Proxmox => Self::Proxmox,
             ProviderType::Basis => Self::Basis,
             // Cloud-shaped providers without a dedicated e2e variant
@@ -41,7 +39,6 @@ impl std::fmt::Display for InfraProvider {
         let name = match self {
             Self::Docker => "docker",
             Self::Aws => "aws",
-            Self::OpenStack => "openstack",
             Self::Proxmox => "proxmox",
             Self::Basis => "basis",
         };

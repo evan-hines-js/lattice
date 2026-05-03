@@ -341,9 +341,19 @@ pub async fn generate_capi_manifests(
         .ok_or_else(|| Error::validation("cluster must have a name"))?;
     let capi_ns = capi_namespace(cluster_name);
 
-    // Build bootstrap info - if parent_servers is running, we're a cell provisioning a cluster
-    // that needs to connect back to us. Bootstrap clusters skip this since they don't provision children.
-    let running_parent_servers = if lattice_common::is_bootstrap_cluster() {
+    // Build bootstrap info — only needed when provisioning a NEW child cluster
+    // (the kubeadm webhook needs an endpoint + token to phone home for pivot).
+    // Self-cluster reconcile post-pivot doesn't need it: new pool nodes
+    // kubeadm-join the local control plane directly, and the agent is already
+    // running cluster-wide. Threading bootstrap info in anyway either fails
+    // (no parent_config / no cell LB ingress on a leaf cluster) or — if both
+    // happen to be set — emits a KubeadmConfigTemplate whose postKubeadmCommands
+    // POST to *this* cluster's own bootstrap webhook for nodes that already
+    // joined, which is wrong. Bootstrap clusters also skip — they don't
+    // provision children.
+    let is_self =
+        crate::controller::is_self_cluster(cluster_name, ctx.self_cluster_name.as_deref());
+    let running_parent_servers = if lattice_common::is_bootstrap_cluster() || is_self {
         None
     } else {
         ctx.parent_servers.as_ref().filter(|s| s.is_running())

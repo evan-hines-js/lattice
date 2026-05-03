@@ -1,7 +1,7 @@
 //! Local-path-provisioner addon manifests
 //!
 //! Generates local-path-provisioner for clusters without a built-in CSI driver
-//! (Docker, Proxmox, OpenStack, etc.) using typed k8s_openapi structs.
+//! (Docker, Proxmox, etc.) using typed k8s_openapi structs.
 
 use std::collections::BTreeMap;
 

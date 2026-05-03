@@ -79,7 +79,7 @@ reconciler skeleton.
 - `lattice-common::install` — install reconcile runner +
   `spec.requires` semver gating.
 - `lattice-common::credentials` — provider credential plumbing
-  (Proxmox, AWS, OpenStack, Basis).
+  (Proxmox, AWS, Basis).
 - `lattice-common::leader_election` — controller leader election.
 - `lattice-cedar` — sub-engines per resource (mesh, secret, image,
   external endpoint, security, volume).

@@ -20,7 +20,7 @@ The following namespaces are excluded from default-deny to avoid breaking infras
 - `cilium-system`
 - `istio-system`
 - `cert-manager`
-- All CAPI namespaces (`capi-system`, `capd-system`, `capa-system`, `capo-system`, `capmox-system`, etc.)
+- All CAPI namespaces (`capi-system`, `capd-system`, `capa-system`, `capmox-system`, etc.)
 
 These are excluded because they have circular dependencies on the policy infrastructure itself — Cilium can't enforce policies on its own control plane.
 

@@ -6,7 +6,7 @@
 //!
 //! ## Prerequisites
 //!
-//! - PiHole running at 10.0.0.131 (docker-compose `lattice-pihole`, password: "lattice")
+//! - PiHole running at 10.0.0.17 (docker-compose `lattice-pihole`, password: "lattice")
 //! - cert-manager installed on the cluster
 //! - Lattice operator running
 //!
