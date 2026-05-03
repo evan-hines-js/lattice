@@ -107,9 +107,12 @@ where
 
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();
 
-        // Admission webhook rejections contain "denied the request" — if we see
-        // that, the request reached the webhook and was properly rejected.
-        if stderr.contains("denied the request") {
+        // Definitive rejections from the apiserver:
+        // - "denied the request"  → admission webhook rejection
+        // - "is invalid:"         → CRD OpenAPI schema rejection (kubectl
+        //   surfaces these as `error: ... is invalid: <field>: ...`).
+        // Either means the request was evaluated and refused; don't retry.
+        if stderr.contains("denied the request") || stderr.contains("is invalid:") {
             info!("[Webhook] {desc_owned}: rejected (expected): {stderr}");
             return Ok(stderr);
         }
@@ -574,7 +577,8 @@ async fn try_patch_expecting_rejection(
 
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();
 
-        if stderr.contains("denied the request") {
+        // See `try_apply_expecting_rejection` for why we accept both shapes.
+        if stderr.contains("denied the request") || stderr.contains("is invalid:") {
             info!("[Webhook] {desc}: rejected (expected): {stderr}");
             return Ok(stderr);
         }

@@ -56,7 +56,7 @@ export LATTICE_WORKLOAD2_CLUSTER_CONFIG="$REPO_ROOT/crates/lattice-cli/tests/e2e
 export LATTICE_ENABLE_INDEPENDENCE_TEST=true
 export LATTICE_ENABLE_HIERARCHY_TEST=true
 export LATTICE_ENABLE_MESH_TEST=true
-# Basis VMs come up with `dataDiskGibs` raw block devices Rook can claim,
+# Basis VMs come up with `dataDisks` raw block devices Rook can claim,
 # so the storage e2e is meaningful here. Defer to caller's value if set
 # (so a developer iterating can opt out without editing the script).
 export LATTICE_E2E_STORAGE="${LATTICE_E2E_STORAGE:-true}"

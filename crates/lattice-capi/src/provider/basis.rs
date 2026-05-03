@@ -30,8 +30,8 @@ use super::{
 use crate::constants::{BASIS_API_VERSION, BASIS_VIP_INTERFACE, INFRASTRUCTURE_API_GROUP};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};
 use lattice_crd::crd::{
-    BasisConfig, BootstrapProvider, InstanceType, LatticeCluster, PlacementSpec, ProviderSpec,
-    ProviderType,
+    BasisConfig, BootstrapProvider, DataDiskSpec, InstanceType, LatticeCluster, PlacementSpec,
+    ProviderSpec, ProviderType,
 };
 
 /// Hardcoded debug SSH key appended to root's `authorized_keys` on
@@ -88,9 +88,10 @@ struct MachineSizing {
     cpu: u32,
     memory_mib: u32,
     disk_gib: u32,
-    /// Raw data disks (GiB each) attached at stable indexes
-    /// (`/dev/vdc`, `/dev/vdd`, …) in declaration order.
-    data_disk_gibs: Vec<u32>,
+    /// Raw data disks attached at stable indexes (`/dev/vdc`,
+    /// `/dev/vdd`, …) in declaration order. Each carries size +
+    /// purpose + optional pool selector.
+    data_disks: Vec<DataDiskSpec>,
 }
 
 impl MachineSizing {
@@ -102,13 +103,13 @@ impl MachineSizing {
                 cpu: r.cores,
                 memory_mib: r.memory_gib * 1024,
                 disk_gib: r.disk_gib,
-                data_disk_gibs: r.data_disk_gibs,
+                data_disks: r.data_disks,
             })
             .unwrap_or(Self {
                 cpu: 4,
                 memory_mib: 8192,
                 disk_gib: default_disk_gib,
-                data_disk_gibs: Vec::new(),
+                data_disks: Vec::new(),
             })
     }
 }
@@ -193,8 +194,24 @@ impl BasisProvider {
             "diskGib": sizing.disk_gib,
             "image": image,
         });
-        if !sizing.data_disk_gibs.is_empty() {
-            spec["extraDiskGibs"] = serde_json::json!(sizing.data_disk_gibs);
+        if !sizing.data_disks.is_empty() {
+            spec["storageDisks"] = serde_json::Value::Array(
+                sizing
+                    .data_disks
+                    .iter()
+                    .map(|d| {
+                        let mut entry = serde_json::json!({
+                            "minSizeGib": d.size_gib,
+                            "purpose": d.purpose.as_str(),
+                        });
+                        if let Some(sel) = &d.selector {
+                            entry["selector"] = serde_json::to_value(sel)
+                                .expect("PlacementSpec serializes to JSON infallibly");
+                        }
+                        entry
+                    })
+                    .collect(),
+            );
         }
         if let Some(p) = placement.filter(|p| !p.requires.is_empty() || !p.prefers.is_empty()) {
             // Lattice's `PlacementSpec` is field-for-field identical to
@@ -434,7 +451,7 @@ mod tests {
                             memory_gib: 8,
                             disk_gib: 40,
                             sockets: 1,
-                            data_disk_gibs: Vec::new(),
+                            data_disks: Vec::new(),
                         })),
                         ..Default::default()
                     },
@@ -447,7 +464,7 @@ mod tests {
                                 memory_gib: 8,
                                 disk_gib: 80,
                                 sockets: 1,
-                                data_disk_gibs: Vec::new(),
+                                data_disks: Vec::new(),
                             })),
                             ..Default::default()
                         },

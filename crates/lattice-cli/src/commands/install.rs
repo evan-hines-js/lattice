@@ -712,17 +712,26 @@ impl Installer {
         // the one place we resolve the endpoint without a CAPI Cluster CR.
         // Anything else (host kubeconfig, Docker port-forward) is wrong
         // for Cilium agents running inside the cluster.
-        let api_server_endpoint =
-            lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client)
-                .await
-                .map_err(|e| Error::command_failed(e.to_string()))?
-                .ok_or_else(|| {
-                    Error::command_failed(
-                        "kube-system/kubeadm-config has no controlPlaneEndpoint — \
-                     the management cluster must be kubeadm-bootstrapped (kind)"
-                            .to_string(),
-                    )
-                })?;
+        //
+        // Retry on transient apiserver errors: `wait_for_api_server` only
+        // proves a single namespace list succeeded; a fresh kind apiserver
+        // can still drop the very next connection while it's stabilising.
+        let api_server_endpoint = retry_with_backoff(
+            &RetryConfig::install(),
+            "from_kubeadm_config",
+            || async {
+                lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client).await
+            },
+        )
+        .await
+        .map_err(|e| Error::command_failed(e.to_string()))?
+        .ok_or_else(|| {
+            Error::command_failed(
+                "kube-system/kubeadm-config has no controlPlaneEndpoint — \
+                 the management cluster must be kubeadm-bootstrapped (kind)"
+                    .to_string(),
+            )
+        })?;
         let config = BootstrapBundleConfig {
             facts: &facts,
             image: &self.image,
@@ -902,15 +911,23 @@ impl Installer {
         let provider_ref = &self.cluster.spec.provider_ref;
         let cps: Api<InfraProvider> =
             Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
-        let cp = match cps.get(provider_ref).await {
-            Ok(cp) => Some(cp),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => None,
-            Err(e) => {
-                return Err(Error::command_failed(format!(
-                    "failed to read InfraProvider '{provider_ref}': {e}"
-                )));
-            }
-        };
+        // Retry transient apiserver errors against the freshly-pivoted mgmt
+        // cluster; preserve 404 (= "no InfraProvider yet, fall back to defaults").
+        let cp = retry_with_backoff(
+            &RetryConfig::install(),
+            "get InfraProvider",
+            || async {
+                match cps.get(provider_ref).await {
+                    Ok(cp) => Ok(Some(cp)),
+                    Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+                    Err(e) => Err(e),
+                }
+            },
+        )
+        .await
+        .map_err(|e| {
+            Error::command_failed(format!("failed to read InfraProvider '{provider_ref}': {e}"))
+        })?;
 
         ensure_capi_providers_for(
             mgmt_client,
@@ -1255,9 +1272,13 @@ impl Installer {
     async fn setup_admin_access(&self) -> Result<()> {
         use k8s_openapi::api::core::v1::{Secret, ServiceAccount};
         use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleRef, Subject};
-        use kube::api::{Api, ObjectMeta, PostParams};
+        use kube::api::{Api, ObjectMeta, Patch, PatchParams};
 
         let mgmt_client = self.management_client().await?;
+        // Server-side apply with a stable field manager — idempotent so the
+        // retry below is safe across transient apiserver disconnects on the
+        // freshly-pivoted control plane.
+        let apply_params = PatchParams::apply("lattice-cli").force();
 
         // Create lattice-admin ServiceAccount
         let sa_api: Api<ServiceAccount> =
@@ -1270,13 +1291,14 @@ impl Installer {
             },
             ..Default::default()
         };
-        sa_api
-            .create(&PostParams::default(), &sa)
-            .await
-            .map_err(|e| {
-                Error::command_failed(format!("failed to create lattice-admin SA: {}", e))
-            })?;
-        info!("Created lattice-admin ServiceAccount");
+        retry_with_backoff(&RetryConfig::install(), "apply lattice-admin SA", || async {
+            sa_api
+                .patch("lattice-admin", &apply_params, &Patch::Apply(&sa))
+                .await
+        })
+        .await
+        .map_err(|e| Error::command_failed(format!("failed to apply lattice-admin SA: {}", e)))?;
+        info!("Applied lattice-admin ServiceAccount");
 
         // Bind lattice-admin to cluster-admin for full K8s RBAC access
         let crb_api: Api<ClusterRoleBinding> = Api::all(mgmt_client.clone());
@@ -1297,16 +1319,23 @@ impl Installer {
                 ..Default::default()
             }]),
         };
-        crb_api
-            .create(&PostParams::default(), &crb)
-            .await
-            .map_err(|e| {
-                Error::command_failed(format!(
-                    "failed to create lattice-admin ClusterRoleBinding: {}",
-                    e
-                ))
-            })?;
-        info!("Created lattice-admin ClusterRoleBinding");
+        retry_with_backoff(
+            &RetryConfig::install(),
+            "apply lattice-admin CRB",
+            || async {
+                crb_api
+                    .patch("lattice-admin-binding", &apply_params, &Patch::Apply(&crb))
+                    .await
+            },
+        )
+        .await
+        .map_err(|e| {
+            Error::command_failed(format!(
+                "failed to apply lattice-admin ClusterRoleBinding: {}",
+                e
+            ))
+        })?;
+        info!("Applied lattice-admin ClusterRoleBinding");
 
         // Create break-glass long-lived SA token (no expiration)
         let secret_api: Api<Secret> =
@@ -1327,16 +1356,27 @@ impl Installer {
             type_: Some(SECRET_TYPE_SA_TOKEN.to_string()),
             ..Default::default()
         };
-        secret_api
-            .create(&PostParams::default(), &token_secret)
-            .await
-            .map_err(|e| {
-                Error::command_failed(format!(
-                    "failed to create lattice-admin-token Secret: {}",
-                    e
-                ))
-            })?;
-        info!("Created lattice-admin-token Secret");
+        retry_with_backoff(
+            &RetryConfig::install(),
+            "apply lattice-admin-token",
+            || async {
+                secret_api
+                    .patch(
+                        "lattice-admin-token",
+                        &apply_params,
+                        &Patch::Apply(&token_secret),
+                    )
+                    .await
+            },
+        )
+        .await
+        .map_err(|e| {
+            Error::command_failed(format!(
+                "failed to apply lattice-admin-token Secret: {}",
+                e
+            ))
+        })?;
+        info!("Applied lattice-admin-token Secret");
 
         // Create Cedar policies for admin and istiod proxy access
         let admin_policy = lattice_infra::bootstrap::generate_admin_access_cedar_policy();

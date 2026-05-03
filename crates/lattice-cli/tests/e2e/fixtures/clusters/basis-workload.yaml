@@ -51,7 +51,12 @@ spec:
           # One raw 50 GiB data disk per worker, consumed by the Rook
           # install test as OSD-backed storage. Basis attaches it as
           # /dev/vdc; rook-ceph claims it via the cluster's deviceFilter.
-          dataDiskGibs: [50]
+          # purpose=replicated activates basis's hierarchical
+          # same-cluster anti-affinity (host-spread first, then device-
+          # spread on the same host) — required for Ceph durability.
+          dataDisks:
+            - sizeGib: 50
+              purpose: replicated
         placement:
           requires:
             - { key: tier, values: [slow] }

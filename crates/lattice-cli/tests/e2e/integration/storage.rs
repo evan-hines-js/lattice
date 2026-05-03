@@ -59,7 +59,7 @@ const INSTALL_READY_TIMEOUT: Duration = Duration::from_secs(1200);
 /// Whether the storage e2e should run against the active fixture.
 ///
 /// Rook needs at least one raw block device per worker that ceph-osd can
-/// claim — `dataDiskGibs` on a worker pool surfaces them. Only fixtures
+/// claim — `dataDisks` on a worker pool surfaces them. Only fixtures
 /// that wire that up should run this test (basis today; proxmox VMs come
 /// up with a single root disk, AWS/OpenStack rely on managed CSI). Gate
 /// via env var so the test runner opts in explicitly per fixture rather

@@ -108,7 +108,7 @@ curl http://sonarr.home.arpa/          # via haproxy → ztunnel → multicluste
 - **Restrict cross-cluster callers** — `advertise.allowedServices: ["*"]` →
   `["edge/haproxy-fw"]` to only allow haproxy-fw to reach the service
 - **Storage sizes** — `size` on volume resources; OSD disks via
-  `dataDiskGibs` on the backend worker pool
+  `dataDisks` on the backend worker pool
 - **Smaller backend** — 2 workers → operator auto-tunes RookInstall to
   mon=1, replication=2; 1 worker drops to osd failure domain (dev only)
 - **Add a wedge-prone service** — copy jellyfin's pattern: `serviceType:

@@ -130,11 +130,11 @@ pub use topology::{
 };
 pub use types::{
     credential_secret_name, BootstrapProvider, CertPolicy, ClusterConfig, ClusterNetworkSpec,
-    ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, CredentialSpec, EndpointsSpec,
-    GpuCapacity, InstanceType, KubernetesSpec, NodeCapacityHint, NodeResourceSpec, NodeSpec,
-    NodeTaint, PlacementPreference, PlacementRequirement, PlacementSpec, ProviderConfig,
-    ProviderSpec, ProviderType, RegistryMirror, RootVolume, SecretRef, ServiceRef, ServiceSpec,
-    ServiceType, TaintEffect, WorkerPoolSpec,
+    ClusterPhase, Condition, ConditionStatus, ControlPlaneSpec, CredentialSpec, DataDiskPurpose,
+    DataDiskSpec, EndpointsSpec, GpuCapacity, InstanceType, KubernetesSpec, NodeCapacityHint,
+    NodeResourceSpec, NodeSpec, NodeTaint, PlacementPreference, PlacementRequirement,
+    PlacementSpec, ProviderConfig, ProviderSpec, ProviderType, RegistryMirror, RootVolume,
+    SecretRef, ServiceRef, ServiceSpec, ServiceType, TaintEffect, WorkerPoolSpec,
 };
 pub use workload::backup::{
     BackupHook, BackupHooksSpec, HookErrorAction, ServiceBackupSpec, VolumeBackupDefault,

@@ -459,11 +459,46 @@ pub struct NodeResourceSpec {
     )]
     pub sockets: u32,
 
-    /// Raw (unformatted) data disks in GiB, attached in allocation order
-    /// alongside the rootfs. Providers that don't support additional
-    /// disks ignore this field.
+    /// Raw (unformatted) data disks attached in allocation order
+    /// alongside the rootfs. Each entry carries size + workload
+    /// purpose + optional pool selector. Providers that don't support
+    /// additional disks ignore this field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub data_disk_gibs: Vec<u32>,
+    pub data_disks: Vec<DataDiskSpec>,
+}
+
+/// One raw block device requested for a machine. Maps to a
+/// BasisMachine `storageDisks[]` entry; other providers consume only
+/// `sizeGib`.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDiskSpec {
+    pub size_gib: u32,
+    /// Workload role. `replicated` activates basis's hierarchical
+    /// same-cluster anti-affinity (Rook OSDs, Longhorn replicas, etc).
+    /// `genericData` skips it.
+    #[serde(default)]
+    pub purpose: DataDiskPurpose,
+    /// Optional pool label selector. Empty = any matching pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<PlacementSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DataDiskPurpose {
+    #[default]
+    Replicated,
+    GenericData,
+}
+
+impl DataDiskPurpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Replicated => "replicated",
+            Self::GenericData => "generic-data",
+        }
+    }
 }
 
 fn default_sockets() -> u32 {
@@ -522,9 +557,9 @@ pub struct InstanceType {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sockets: Option<u32>,
 
-    /// Additional raw data disks (GiB each). See `NodeResourceSpec::data_disk_gibs`.
+    /// Additional raw data disks. See `NodeResourceSpec::data_disks`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub data_disk_gibs: Vec<u32>,
+    pub data_disks: Vec<DataDiskSpec>,
 
     /// GPU capacity for this machine type
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -547,7 +582,7 @@ impl InstanceType {
             memory_gib: Some(spec.memory_gib),
             disk_gib: Some(spec.disk_gib),
             sockets: Some(spec.sockets),
-            data_disk_gibs: spec.data_disk_gibs,
+            data_disks: spec.data_disks,
             ..Default::default()
         }
     }
@@ -565,7 +600,7 @@ impl InstanceType {
                 memory_gib,
                 disk_gib,
                 sockets: self.sockets.unwrap_or(1),
-                data_disk_gibs: self.data_disk_gibs.clone(),
+                data_disks: self.data_disks.clone(),
             }),
             _ => None,
         }
@@ -1650,7 +1685,7 @@ mod tests {
                 memory_gib: 32,
                 disk_gib: 50,
                 sockets: 1,
-                data_disk_gibs: Vec::new(),
+                data_disks: Vec::new(),
             });
             let json = serde_json::to_string(&it).unwrap();
             let parsed: InstanceType = serde_json::from_str(&json).unwrap();
@@ -1660,7 +1695,7 @@ mod tests {
             assert_eq!(res.memory_gib, 32);
             assert_eq!(res.disk_gib, 50);
             assert_eq!(res.sockets, 1);
-            assert!(res.data_disk_gibs.is_empty());
+            assert!(res.data_disks.is_empty());
         }
 
         #[test]
@@ -1670,13 +1705,28 @@ mod tests {
                 memory_gib: 16,
                 disk_gib: 80,
                 sockets: 1,
-                data_disk_gibs: vec![500, 500],
+                data_disks: vec![
+                    DataDiskSpec {
+                        size_gib: 500,
+                        purpose: DataDiskPurpose::Replicated,
+                        selector: None,
+                    },
+                    DataDiskSpec {
+                        size_gib: 500,
+                        purpose: DataDiskPurpose::Replicated,
+                        selector: None,
+                    },
+                ],
             });
             let json = serde_json::to_string(&it).unwrap();
-            assert!(json.contains("\"dataDiskGibs\":[500,500]"));
+            assert!(json.contains("\"dataDisks\""));
+            assert!(json.contains("\"sizeGib\":500"));
+            assert!(json.contains("\"purpose\":\"replicated\""));
             let parsed: InstanceType = serde_json::from_str(&json).unwrap();
             let res = parsed.as_resources().unwrap();
-            assert_eq!(res.data_disk_gibs, vec![500, 500]);
+            assert_eq!(res.data_disks.len(), 2);
+            assert_eq!(res.data_disks[0].size_gib, 500);
+            assert_eq!(res.data_disks[0].purpose, DataDiskPurpose::Replicated);
         }
 
         #[test]
@@ -1686,12 +1736,12 @@ mod tests {
                 memory_gib: 8,
                 disk_gib: 40,
                 sockets: 1,
-                data_disk_gibs: Vec::new(),
+                data_disks: Vec::new(),
             });
             let json = serde_json::to_string(&it).unwrap();
             assert!(
-                !json.contains("dataDiskGibs"),
-                "empty data_disk_gibs must be omitted from serialized output"
+                !json.contains("dataDisks"),
+                "empty data_disks must be omitted from serialized output"
             );
         }
 
@@ -1870,7 +1920,7 @@ mod tests {
                     memory_gib: 512,
                     disk_gib: 200,
                     sockets: 2,
-                    data_disk_gibs: Vec::new(),
+                    data_disks: Vec::new(),
                 })),
                 ..Default::default()
             };

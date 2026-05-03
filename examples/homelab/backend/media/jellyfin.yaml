@@ -36,6 +36,11 @@ spec:
       action == Lattice::Action::"AccessExternalEndpoint",
       resource == Lattice::ExternalEndpoint::"www.omdbapi.com:443"
     );
+    permit(
+      principal == Lattice::Service::"media/jellyfin",
+      action == Lattice::Action::"AccessExternalEndpoint",
+      resource == Lattice::ExternalEndpoint::"repo.jellyfin.org:443"
+    );
 ---
 apiVersion: lattice.dev/v1alpha1
 kind: LatticeService
@@ -113,6 +118,12 @@ spec:
             tmdb-api: api.themoviedb.org:443
             tmdb-images: image.tmdb.org:443
             omdb: www.omdbapi.com:443
+      plugin-repo:
+        type: external-service
+        direction: outbound
+        params:
+          endpoints:
+            jellyfin-plugins: repo.jellyfin.org:443
   replicas: 1
   advertise:
     allowedServices: ["*"]

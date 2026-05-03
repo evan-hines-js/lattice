@@ -501,7 +501,7 @@ async fn run_full_e2e() -> Result<(), String> {
 
     // Storage: Rook-Ceph install, PVC provisioning, persistence-through-pod-restart.
     // Opt-in via `LATTICE_E2E_STORAGE=1` because Rook needs raw block
-    // devices Ceph can claim — only fixtures that declare `dataDiskGibs`
+    // devices Ceph can claim — only fixtures that declare `dataDisks`
     // on a worker pool surface them (basis today; proxmox VMs only get
     // a root disk, cloud providers rely on managed CSI).
     if integration::storage::storage_tests_enabled() {

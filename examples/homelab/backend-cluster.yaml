@@ -61,5 +61,9 @@ spec:
           # 175 GiB raw block device per worker, presented as /dev/vdc
           # by Basis. Rook's CephCluster claims it via the deviceFilter
           # `^vd[c-z]$`, so each worker contributes one OSD.
-          dataDiskGibs: [175]
+          # purpose=replicated activates basis's same-cluster anti-
+          # affinity so Ceph replicas land on different drives.
+          dataDisks:
+            - sizeGib: 175
+              purpose: replicated
   services: true
