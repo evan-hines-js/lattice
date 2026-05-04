@@ -34,7 +34,6 @@ use crate::error::Error;
 use crate::routing::{parse_cluster_path, strip_cluster_prefix};
 use crate::server::AppState;
 use lattice_common::routing::split_first_hop;
-use lattice_proto::is_watch_query;
 
 // ============================================================================
 // Constants
@@ -88,18 +87,11 @@ impl TokenReader for FileTokenReader {
     }
 }
 
-/// HTTP response from K8s API (non-streaming)
-#[derive(Debug)]
-pub struct HttpResponse {
-    /// HTTP status code
-    pub status: u16,
-    /// Content-Type header value
-    pub content_type: String,
-    /// Response body bytes
-    pub body: Vec<u8>,
-}
-
-/// Streaming HTTP response for watch/follow queries
+/// Streaming HTTP response from the K8s API.
+///
+/// All responses stream — buffering adds wall-clock latency proportional to
+/// upstream read time and body size for zero benefit (we don't transform the
+/// body). Chunked transfer encoding works fine for tiny responses too.
 pub struct StreamingHttpResponse {
     /// HTTP status code
     pub status: u16,
@@ -134,11 +126,8 @@ pub struct K8sHttpRequest {
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait K8sHttpClient: Send + Sync {
-    /// Make a non-streaming HTTP request
-    async fn request(&self, req: K8sHttpRequest) -> Result<HttpResponse, Error>;
-
-    /// Make a streaming HTTP request (for watch/follow queries)
-    async fn request_streaming(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error>;
+    /// Issue the request and return a streaming response.
+    async fn request(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error>;
 }
 
 /// Default K8sHttpClient using reqwest with in-cluster TLS
@@ -188,31 +177,7 @@ impl ReqwestK8sClient {
 
 #[async_trait]
 impl K8sHttpClient for ReqwestK8sClient {
-    async fn request(&self, req: K8sHttpRequest) -> Result<HttpResponse, Error> {
-        let http_request = self.build_request(&req)?;
-
-        let response = self
-            .client
-            .execute(http_request)
-            .await
-            .map_err(|e| Error::Proxy(format!("Failed to proxy to K8s API: {}", e)))?;
-
-        let status = response.status().as_u16();
-        let content_type = extract_content_type(&response);
-
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|e| Error::Proxy(format!("Failed to read K8s API response: {}", e)))?;
-
-        Ok(HttpResponse {
-            status,
-            content_type,
-            body: body_bytes.to_vec(),
-        })
-    }
-
-    async fn request_streaming(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error> {
+    async fn request(&self, req: K8sHttpRequest) -> Result<StreamingHttpResponse, Error> {
         let http_request = self.build_request(&req)?;
 
         let response = self
@@ -391,7 +356,6 @@ async fn forward_to_k8s_api(
         ))
     })?;
     let query = uri.query();
-    let query_str = query.unwrap_or("");
 
     debug!(
         method = %method,
@@ -440,13 +404,8 @@ async fn forward_to_k8s_api(
         body: body.to_vec(),
     };
 
-    if is_watch_query(query_str) {
-        let streaming = deps.http_client.request_streaming(http_req).await?;
-        return build_streaming_response(streaming);
-    }
-
-    let http_response = deps.http_client.request(http_req).await?;
-    build_buffered_response(http_response)
+    let streaming = deps.http_client.request(http_req).await?;
+    build_streaming_response(streaming)
 }
 
 // ============================================================================
@@ -521,31 +480,17 @@ fn build_response_base(status: u16, content_type: String) -> axum::http::respons
         .header("Content-Type", content_type)
 }
 
-/// Build a streaming response for watch/follow queries.
-///
-/// The stream runs until the upstream closes it (K8s API servers periodically
-/// close watches and clients reconnect with resourceVersion). No artificial
-/// deadline — adding one causes silent EOF that clients interpret as
-/// authoritative empty state.
+/// Build a streaming response. Used for every K8s API forward — the stream
+/// runs until the upstream closes it (watches close periodically and clients
+/// reconnect with resourceVersion; one-shot requests close after the body).
+/// No artificial deadline — adding one causes silent EOF that clients
+/// interpret as authoritative empty state.
 fn build_streaming_response(response: StreamingHttpResponse) -> Result<Response<Body>, Error> {
     debug!(status = response.status, "Starting streaming response");
 
     build_response_base(response.status, response.content_type)
         .body(Body::from_stream(response.stream))
         .map_err(|e| Error::Internal(format!("Failed to build streaming response: {}", e)))
-}
-
-/// Build a buffered response for regular (non-streaming) requests
-fn build_buffered_response(response: HttpResponse) -> Result<Response<Body>, Error> {
-    debug!(
-        status = response.status,
-        body_len = response.body.len(),
-        "Received response from K8s API"
-    );
-
-    build_response_base(response.status, response.content_type)
-        .body(Body::from(response.body))
-        .map_err(|e| Error::Internal(format!("Failed to build response: {}", e)))
 }
 
 // ============================================================================

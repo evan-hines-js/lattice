@@ -15,6 +15,16 @@ fn test_identity() -> UserIdentity {
     }
 }
 
+fn streaming_response(status: u16, content_type: &str, body: &[u8]) -> StreamingHttpResponse {
+    let chunk: Result<axum::body::Bytes, std::io::Error> =
+        Ok(axum::body::Bytes::copy_from_slice(body));
+    StreamingHttpResponse {
+        status,
+        content_type: content_type.to_string(),
+        stream: Box::pin(futures::stream::once(async move { chunk })),
+    }
+}
+
 // ========================================================================
 // Impersonation Header Stripping Tests
 // ========================================================================
@@ -138,11 +148,11 @@ async fn test_forward_to_k8s_api_success() {
         assert_eq!(req.identity.username, "test-user");
         assert!(req.identity.groups.contains(&"developers".to_string()));
 
-        Ok(HttpResponse {
-            status: 200,
-            content_type: "application/json".to_string(),
-            body: br#"{"items":[]}"#.to_vec(),
-        })
+        Ok(streaming_response(
+            200,
+            "application/json",
+            br#"{"items":[]}"#,
+        ))
     });
 
     let deps = ForwarderDeps {
@@ -252,11 +262,11 @@ async fn test_forward_to_k8s_api_with_query_params() {
         // Verify query params are preserved
         assert!(req.url.contains("labelSelector=app%3Dnginx"));
 
-        Ok(HttpResponse {
-            status: 200,
-            content_type: "application/json".to_string(),
-            body: br#"{"items":[]}"#.to_vec(),
-        })
+        Ok(streaming_response(
+            200,
+            "application/json",
+            br#"{"items":[]}"#,
+        ))
     });
 
     let deps = ForwarderDeps {
@@ -298,11 +308,11 @@ async fn test_forward_to_k8s_api_with_body() {
         let body_str = String::from_utf8(req.body).unwrap();
         assert!(body_str.contains("my-pod"));
 
-        Ok(HttpResponse {
-            status: 201,
-            content_type: "application/json".to_string(),
-            body: br#"{"metadata":{"name":"my-pod"}}"#.to_vec(),
-        })
+        Ok(streaming_response(
+            201,
+            "application/json",
+            br#"{"metadata":{"name":"my-pod"}}"#,
+        ))
     });
 
     let deps = ForwarderDeps {
@@ -340,11 +350,11 @@ async fn test_forward_to_k8s_api_403_forbidden() {
         .returning(|| Ok("token".to_string()));
 
     mock_http.expect_request().returning(|_| {
-        Ok(HttpResponse {
-            status: 403,
-            content_type: "application/json".to_string(),
-            body: br#"{"message":"forbidden"}"#.to_vec(),
-        })
+        Ok(streaming_response(
+            403,
+            "application/json",
+            br#"{"message":"forbidden"}"#,
+        ))
     });
 
     let deps = ForwarderDeps {
@@ -376,14 +386,10 @@ async fn test_forward_to_k8s_api_403_forbidden() {
 // ========================================================================
 
 #[test]
-fn test_build_buffered_response_200() {
-    let http_response = HttpResponse {
-        status: 200,
-        content_type: "application/json".to_string(),
-        body: br#"{"items":[]}"#.to_vec(),
-    };
-
-    let response = build_buffered_response(http_response).unwrap();
+fn test_build_streaming_response_200() {
+    let response =
+        build_streaming_response(streaming_response(200, "application/json", br#"{"items":[]}"#))
+            .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("Content-Type").unwrap(),
@@ -392,27 +398,20 @@ fn test_build_buffered_response_200() {
 }
 
 #[test]
-fn test_build_buffered_response_404() {
-    let http_response = HttpResponse {
-        status: 404,
-        content_type: "application/json".to_string(),
-        body: br#"{"message":"not found"}"#.to_vec(),
-    };
-
-    let response = build_buffered_response(http_response).unwrap();
+fn test_build_streaming_response_404() {
+    let response = build_streaming_response(streaming_response(
+        404,
+        "application/json",
+        br#"{"message":"not found"}"#,
+    ))
+    .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]
-fn test_build_buffered_response_invalid_status_code() {
+fn test_build_streaming_response_invalid_status_code() {
     // Status codes must be 100-999; 99 is invalid
-    let http_response = HttpResponse {
-        status: 99,
-        content_type: "application/json".to_string(),
-        body: vec![],
-    };
-
-    let response = build_buffered_response(http_response).unwrap();
+    let response = build_streaming_response(streaming_response(99, "application/json", b"")).unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
