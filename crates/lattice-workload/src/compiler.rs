@@ -811,6 +811,17 @@ impl<'a> WorkloadCompiler<'a> {
             .service
             .as_ref()
             .map(|s| {
+                // External-typed Services (NodePort / LoadBalancer) accept traffic
+                // from outside the mesh — those packets arrive at ztunnel without a
+                // SPIFFE identity and STRICT mTLS would deny them. Force PERMISSIVE
+                // on every published port so the LB-direct path actually reaches the
+                // pod. Cilium L4 still applies; only ztunnel's mTLS gate is opted
+                // out. Same trigger as ServiceNode::port_peer_auth in lattice-graph.
+                let port_peer_auth = if s.service_type.is_external() {
+                    PeerAuth::Permissive
+                } else {
+                    PeerAuth::Strict
+                };
                 s.ports
                     .iter()
                     .map(|(port_name, ps)| MeshMemberPort {
@@ -821,7 +832,7 @@ impl<'a> WorkloadCompiler<'a> {
                             None
                         },
                         name: port_name.clone(),
-                        peer_auth: PeerAuth::Strict,
+                        peer_auth: port_peer_auth,
                     })
                     .collect()
             })

@@ -732,6 +732,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn loadbalancer_service_emits_permissive_mesh_member_ports() {
+        use lattice_crd::crd::{PeerAuth, ServiceType};
+        let (graph, cedar) = test_setup();
+        let spec = make_service_spec_for_graph(vec![], vec![]);
+        graph.put_service("prod", "api", &spec);
+
+        let mut service = make_service("api", "prod");
+        let svc = service.spec.workload.service.as_mut().unwrap();
+        svc.service_type = ServiceType::LoadBalancer;
+
+        let compiler = test_compiler(&graph, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
+
+        let mm = output.mesh_member.expect("should have mesh member");
+        assert!(!mm.spec.ports.is_empty(), "expected published ports");
+        for p in &mm.spec.ports {
+            assert_eq!(
+                p.peer_auth,
+                PeerAuth::Permissive,
+                "external Service ports must be Permissive so ztunnel accepts \
+                 plaintext from outside the mesh — port {} got {:?}",
+                p.port,
+                p.peer_auth,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn clusterip_service_keeps_strict_mesh_member_ports() {
+        use lattice_crd::crd::PeerAuth;
+        let (graph, cedar) = test_setup();
+        let spec = make_service_spec_for_graph(vec![], vec![]);
+        graph.put_service("prod", "api", &spec);
+
+        let service = make_service("api", "prod"); // default ClusterIP
+
+        let compiler = test_compiler(&graph, &cedar);
+        let output = compiler.compile(&service).await.unwrap();
+
+        let mm = output.mesh_member.expect("should have mesh member");
+        assert!(!mm.spec.ports.is_empty(), "expected published ports");
+        for p in &mm.spec.ports {
+            assert_eq!(p.peer_auth, PeerAuth::Strict);
+        }
+    }
+
     // =========================================================================
     // Story: Backup Annotations Injected into Deployment
     // =========================================================================
