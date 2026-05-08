@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::crd::types::ServiceType;
+use crate::crd::workload::tls::TlsSpec;
 
 /// Service port specification
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -55,6 +56,15 @@ pub struct ServicePortsSpec {
     /// non-empty `hostnames`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub publish_dns: bool,
+
+    /// TLS configuration for this Service. When `issuerRef` is set, the
+    /// compiler emits a cert-manager Certificate covering `hostnames` and
+    /// writes the TLS material into Secret `{service}-tls`. The workload's
+    /// pod is responsible for mounting the Secret and terminating TLS
+    /// (e.g., via an nginx sidecar in front of the app container).
+    /// Requires `serviceType` external and non-empty `hostnames`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsSpec>,
 }
 
 impl ServicePortsSpec {
@@ -111,12 +121,42 @@ impl ServicePortsSpec {
                  ClusterIP services have no external endpoint for external-dns to publish",
             ));
         }
+        if let Some(tls) = &self.tls {
+            tls.validate("service.tls")
+                .map_err(crate::ValidationError::new)?;
+            if !self.service_type.is_external() {
+                return Err(crate::ValidationError::new(
+                    "service.tls requires serviceType=NodePort or LoadBalancer; \
+                     ClusterIP services terminate TLS via the Gateway-API ingress \
+                     path instead",
+                ));
+            }
+            if tls.effective_issuer_ref().is_some() && self.hostnames.is_empty() {
+                return Err(crate::ValidationError::new(
+                    "service.tls in auto mode (issuerRef explicit or platform default) \
+                     requires at least one entry in service.hostnames \
+                     (cert-manager rejects empty dnsNames)",
+                ));
+            }
+        }
         for hostname in &self.hostnames {
             lattice_core::validate_dns_subdomain(hostname, "hostname")
                 .map_err(crate::ValidationError::new)?;
         }
 
         Ok(())
+    }
+
+    /// Name of the Secret cert-manager will populate when `tls.issuerRef` is
+    /// set. Centralizing the format here means callers (workload compiler,
+    /// pod-template builders that need to mount it) can't drift.
+    pub fn tls_secret_name(service_name: &str) -> String {
+        format!("{service_name}-tls")
+    }
+
+    /// Name of the Certificate resource emitted when `tls.issuerRef` is set.
+    pub fn tls_certificate_name(service_name: &str) -> String {
+        format!("{service_name}-tls-cert")
     }
 }
 
@@ -299,5 +339,73 @@ mod tests {
             ..Default::default()
         };
         assert!(svc.validate().is_err());
+    }
+
+    #[test]
+    fn tls_on_cluster_ip_rejected() {
+        use crate::crd::workload::tls::{CertIssuerRef, TlsSpec};
+        let svc = ServicePortsSpec {
+            hostnames: vec!["app.example.com".to_string()],
+            tls: Some(TlsSpec {
+                issuer_ref: Some(CertIssuerRef {
+                    name: "ca".to_string(),
+                    kind: None,
+                }),
+                secret_name: None,
+            }),
+            ..Default::default()
+        };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("service.tls"), "got: {err}");
+    }
+
+    #[test]
+    fn tls_auto_without_hostnames_rejected() {
+        use crate::crd::workload::tls::{CertIssuerRef, TlsSpec};
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            tls: Some(TlsSpec {
+                issuer_ref: Some(CertIssuerRef {
+                    name: "ca".to_string(),
+                    kind: None,
+                }),
+                secret_name: None,
+            }),
+            ..Default::default()
+        };
+        let err = svc.validate().unwrap_err().to_string();
+        assert!(err.contains("hostnames"), "got: {err}");
+    }
+
+    #[test]
+    fn tls_with_loadbalancer_and_hostnames_accepted() {
+        use crate::crd::workload::tls::{CertIssuerRef, TlsSpec};
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            hostnames: vec!["app.example.com".to_string()],
+            tls: Some(TlsSpec {
+                issuer_ref: Some(CertIssuerRef {
+                    name: "ca".to_string(),
+                    kind: None,
+                }),
+                secret_name: None,
+            }),
+            ..Default::default()
+        };
+        assert!(svc.validate().is_ok());
+    }
+
+    #[test]
+    fn tls_manual_secret_does_not_require_hostnames() {
+        use crate::crd::workload::tls::TlsSpec;
+        let svc = ServicePortsSpec {
+            service_type: ServiceType::LoadBalancer,
+            tls: Some(TlsSpec {
+                secret_name: Some("byo-tls".to_string()),
+                issuer_ref: None,
+            }),
+            ..Default::default()
+        };
+        assert!(svc.validate().is_ok());
     }
 }

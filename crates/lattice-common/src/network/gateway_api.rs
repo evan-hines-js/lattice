@@ -1,8 +1,5 @@
-//! Gateway API types and cert-manager Certificate resources
-//!
-//! This module provides types for north-south ingress traffic:
-//! - **Gateway API**: Gateway, HTTPRoute, GRPCRoute, TCPRoute
-//! - **Certificates**: cert-manager Certificate resources for TLS
+//! Gateway API resource types: Gateway, HTTPRoute, GRPCRoute, TCPRoute.
+//! cert-manager Certificate types live in [`super::cert_manager`].
 //!
 //! All resource types implement `HasApiResource` for consistent API version handling.
 
@@ -498,68 +495,4 @@ pub struct TcpRouteSpec {
 pub struct TcpRouteRule {
     /// Backend references
     pub backend_refs: Vec<BackendRef>,
-}
-
-// =============================================================================
-// Certificate Types (cert-manager)
-// =============================================================================
-
-/// cert-manager Certificate resource
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Certificate {
-    /// API version (cert-manager.io/v1)
-    #[serde(default = "Certificate::default_api_version")]
-    pub api_version: String,
-    /// Resource kind (Certificate)
-    #[serde(default = "Certificate::default_kind")]
-    pub kind: String,
-    /// Resource metadata
-    pub metadata: ObjectMeta,
-    /// Certificate specification
-    pub spec: CertificateSpec,
-}
-
-impl HasApiResource for Certificate {
-    const API_VERSION: &'static str = "cert-manager.io/v1";
-    const KIND: &'static str = "Certificate";
-}
-
-impl_api_defaults!(Certificate);
-
-impl Certificate {
-    /// Create a new Certificate
-    pub fn new(metadata: ObjectMeta, spec: CertificateSpec) -> Self {
-        Self {
-            api_version: Self::default_api_version(),
-            kind: Self::default_kind(),
-            metadata,
-            spec,
-        }
-    }
-}
-
-/// Certificate spec
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CertificateSpec {
-    /// Name of the Secret to store the certificate
-    pub secret_name: String,
-    /// DNS names for the certificate
-    pub dns_names: Vec<String>,
-    /// Reference to the issuer
-    pub issuer_ref: IssuerRef,
-}
-
-/// Issuer reference for Certificate
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct IssuerRef {
-    /// Issuer name
-    pub name: String,
-    /// Issuer kind (Issuer or ClusterIssuer)
-    pub kind: String,
-    /// API group (cert-manager.io)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
 }

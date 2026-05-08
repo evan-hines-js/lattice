@@ -1590,7 +1590,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1611,7 +1611,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1704,7 +1704,13 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool();
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
+            let manifest = generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool,
+                "test-infra-template",
+                "test-bootstrap-template",
+            );
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1722,7 +1728,13 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool();
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
+            let manifest = generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool,
+                "test-infra-template",
+                "test-bootstrap-template",
+            );
             let spec = manifest.spec.expect("should have spec");
 
             let bootstrap_kind = spec
@@ -1751,7 +1763,13 @@ mod tests {
                 spec,
             };
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
+            let manifest = generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool,
+                "test-infra-template",
+                "test-bootstrap-template",
+            );
 
             let annotations = manifest
                 .metadata
@@ -1770,7 +1788,13 @@ mod tests {
             let infra = test_infra();
             let pool = test_pool(); // No min/max set
 
-            let manifest = generate_machine_deployment_for_pool(&config, &infra, &pool, "test-infra-template", "test-bootstrap-template");
+            let manifest = generate_machine_deployment_for_pool(
+                &config,
+                &infra,
+                &pool,
+                "test-infra-template",
+                "test-bootstrap-template",
+            );
 
             assert!(
                 manifest.metadata.annotations.is_none(),
@@ -1789,7 +1813,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1822,7 +1846,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1852,7 +1876,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1946,7 +1970,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -1979,7 +2003,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2070,7 +2094,7 @@ mod tests {
                 vip: None,
                 ssh_authorized_keys: vec![],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2101,7 +2125,7 @@ mod tests {
                     "ssh-rsa AAAAB3... other@host".to_string(),
                 ],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)
@@ -2145,7 +2169,7 @@ mod tests {
                 )),
                 ssh_authorized_keys: vec!["ssh-ed25519 AAAAC3... user@host".to_string()],
                 registry_mirrors: vec![],
-            infra_template_name: "test-cp-template".to_string(),
+                infra_template_name: "test-cp-template".to_string(),
             };
 
             let manifest = generate_control_plane(&config, &infra, &cp_config)

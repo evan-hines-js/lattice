@@ -230,7 +230,7 @@ mod tests {
     use lattice_crd::crd::CredentialSpec;
     use lattice_crd::crd::{
         AcmeIssuerSpec, AzureDnsConfig, CaIssuerSpec, CloudflareConfig, GoogleDnsConfig,
-        PiholeConfig, Route53Config, VaultIssuerSpec,
+        PiholeConfig, Route53Config, SecretRef, VaultIssuerSpec,
     };
 
     fn assert_metadata(val: &Value, expected_name: &str) {
@@ -257,11 +257,11 @@ mod tests {
     }
 
     #[test]
-    fn ca_issuer() {
+    fn ca_external_issuer() {
         let spec = CertIssuerSpec {
             type_: IssuerType::Ca,
             acme: None,
-            ca: Some(CaIssuerSpec {
+            ca: Some(CaIssuerSpec::External {
                 credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
             }),
             vault: None,
@@ -270,6 +270,27 @@ mod tests {
             build_cluster_issuer("internal", &spec, Some("internal-credentials"), None).unwrap();
         assert_metadata(&result, "lattice-internal");
         assert_eq!(result["spec"]["ca"]["secretName"], "internal-credentials");
+    }
+
+    #[test]
+    fn ca_secret_ref_issuer() {
+        let spec = CertIssuerSpec {
+            type_: IssuerType::Ca,
+            acme: None,
+            ca: Some(CaIssuerSpec::SecretRef {
+                secret_ref: SecretRef {
+                    name: "lattice-ca".to_string(),
+                    namespace: "lattice-system".to_string(),
+                },
+            }),
+            vault: None,
+        };
+        // Caller (lattice-cluster::ready) supplies the secret name from
+        // CertIssuer::k8s_secret_ref(), which for SecretRef returns the
+        // user-supplied Secret directly — no ESO indirection.
+        let result = build_cluster_issuer("ca", &spec, Some("lattice-ca"), None).unwrap();
+        assert_metadata(&result, "lattice-ca");
+        assert_eq!(result["spec"]["ca"]["secretName"], "lattice-ca");
     }
 
     #[test]

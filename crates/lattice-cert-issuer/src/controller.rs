@@ -16,11 +16,13 @@ use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tracing::{debug, info, warn};
 
+use k8s_openapi::api::core::v1::Secret;
 use lattice_common::status_check;
 use lattice_common::{ControllerContext, ReconcileError, REQUEUE_ERROR_SECS, REQUEUE_SUCCESS_SECS};
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
-    CertIssuer, CertIssuerPhase, CertIssuerStatus, DNSProvider, DNSProviderPhase, IssuerType,
+    CaIssuerSpec, CertIssuer, CertIssuerPhase, CertIssuerStatus, DNSProvider, DNSProviderPhase,
+    IssuerType,
 };
 use lattice_secret_provider::credentials::{
     reconcile_credentials as reconcile_eso_credentials, ProviderCredentialConfig,
@@ -128,20 +130,43 @@ async fn validate_issuer(client: &Client, issuer: &CertIssuer) -> Result<(), Rec
                 ReconcileError::Validation("ca config required when type is ca".into())
             })?;
 
-            reconcile_eso_credentials(
-                client,
-                &ProviderCredentialConfig {
-                    provider_name: &issuer.name_any(),
-                    credentials: &ca.credentials,
-                    credential_data: None,
-                    target_namespace: LATTICE_SYSTEM_NAMESPACE,
-                    field_manager: FIELD_MANAGER,
-                },
-            )
-            .await?;
-
-            debug!(cert_issuer = %issuer.name_any(), "CA credentials reconciled via ESO");
-            Ok(())
+            match ca {
+                CaIssuerSpec::SecretRef { secret_ref } => {
+                    // The Secret is managed outside this controller (the
+                    // operator's own lattice-ca, a user-supplied PKI secret,
+                    // …). Validate it actually exists; surface a Pending-
+                    // shaped error otherwise so a missing Secret reads as
+                    // "not Ready yet" rather than a permanent failure.
+                    let api: Api<Secret> = Api::namespaced(client.clone(), &secret_ref.namespace);
+                    api.get(&secret_ref.name).await.map_err(|e| {
+                        ReconcileError::Validation(format!(
+                            "ca.secretRef Secret '{}/{}' is not available: {e}",
+                            secret_ref.namespace, secret_ref.name
+                        ))
+                    })?;
+                    debug!(
+                        cert_issuer = %issuer.name_any(),
+                        secret = %format!("{}/{}", secret_ref.namespace, secret_ref.name),
+                        "CA Secret exists; no ESO sync required"
+                    );
+                    Ok(())
+                }
+                CaIssuerSpec::External { credentials } => {
+                    reconcile_eso_credentials(
+                        client,
+                        &ProviderCredentialConfig {
+                            provider_name: &issuer.name_any(),
+                            credentials,
+                            credential_data: None,
+                            target_namespace: LATTICE_SYSTEM_NAMESPACE,
+                            field_manager: FIELD_MANAGER,
+                        },
+                    )
+                    .await?;
+                    debug!(cert_issuer = %issuer.name_any(), "CA credentials reconciled via ESO");
+                    Ok(())
+                }
+            }
         }
         IssuerType::Vault => {
             let vault = issuer.spec.vault.as_ref().ok_or_else(|| {
@@ -206,7 +231,7 @@ mod tests {
             CertIssuerSpec {
                 type_: IssuerType::Ca,
                 acme: None,
-                ca: Some(CaIssuerSpec {
+                ca: Some(CaIssuerSpec::External {
                     credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,

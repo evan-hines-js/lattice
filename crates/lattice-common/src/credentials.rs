@@ -557,5 +557,4 @@ mod tests {
         assert_eq!(data.get("token"), Some(&"user@pam!token".to_string()));
         assert_eq!(data.get("secret"), Some(&"secret-value".to_string()));
     }
-
 }

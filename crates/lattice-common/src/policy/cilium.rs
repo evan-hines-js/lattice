@@ -299,10 +299,13 @@ pub struct DnsRules {
 }
 
 /// DNS match pattern
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DnsMatch {
     /// Match pattern (e.g., "*" or "*.example.com")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub match_pattern: Option<String>,
+    /// Match a single fully-qualified name exactly (e.g. "api.example.com")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_name: Option<String>,
 }

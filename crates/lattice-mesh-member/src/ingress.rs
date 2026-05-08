@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use lattice_common::kube_utils::ObjectMeta;
 use lattice_common::mesh;
+use lattice_common::network::cert_manager::{compile_certificate, Certificate};
 use lattice_common::network::gateway_api::*;
 use lattice_common::policy::cilium::{
     CiliumIngressRule, CiliumNetworkPolicy, CiliumNetworkPolicySpec, EndpointSelector,
@@ -21,8 +22,8 @@ use lattice_common::policy::tetragon::{
 };
 use lattice_crd::crd::workload::ingress::AdvertiseConfig;
 use lattice_crd::crd::{
-    derived_name, IngressSpec, IngressTls, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
-    PathMatchType, RouteKind,
+    derived_name, IngressSpec, LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget,
+    PathMatchType, RouteKind, TlsSpec,
 };
 
 use crate::policy::cilium::{
@@ -690,7 +691,7 @@ impl IngressCompiler {
         (listeners, tcp_route, None)
     }
 
-    fn tls_secret_name(service_name: &str, route_name: &str, tls: Option<&IngressTls>) -> String {
+    fn tls_secret_name(service_name: &str, route_name: &str, tls: Option<&TlsSpec>) -> String {
         tls.and_then(|t| t.secret_name.clone())
             .unwrap_or_else(|| format!("{}-{}-tls", service_name, route_name))
     }
@@ -772,24 +773,14 @@ impl IngressCompiler {
         route_name: &str,
         route_spec: &lattice_crd::crd::RouteSpec,
     ) -> Option<Certificate> {
-        let tls = route_spec.tls.as_ref()?;
-        let issuer_ref = tls.issuer_ref.as_ref()?;
-
-        Some(Certificate::new(
-            ObjectMeta::new(format!("{}-{}-cert", service_name, route_name), namespace),
-            CertificateSpec {
-                secret_name: format!("{}-{}-tls", service_name, route_name),
-                dns_names: route_spec.hosts.clone(),
-                issuer_ref: IssuerRef {
-                    name: issuer_ref.name.clone(),
-                    kind: issuer_ref
-                        .kind
-                        .clone()
-                        .unwrap_or_else(|| "ClusterIssuer".to_string()),
-                    group: Some("cert-manager.io".to_string()),
-                },
-            },
-        ))
+        let issuer = route_spec.tls.as_ref()?.effective_issuer_ref()?;
+        compile_certificate(
+            &format!("{service_name}-{route_name}-cert"),
+            namespace,
+            &format!("{service_name}-{route_name}-tls"),
+            &route_spec.hosts,
+            &issuer,
+        )
     }
 }
 
@@ -817,7 +808,7 @@ mod tests {
 
     fn make_ingress_spec(hosts: Vec<&str>, with_tls: bool) -> IngressSpec {
         let tls = if with_tls {
-            Some(IngressTls {
+            Some(TlsSpec {
                 secret_name: None,
                 issuer_ref: Some(CertIssuerRef {
                     name: "letsencrypt-prod".to_string(),
@@ -1097,7 +1088,7 @@ mod tests {
                     port: None,
                     listen_port: None,
                     rules: None,
-                    tls: Some(IngressTls {
+                    tls: Some(TlsSpec {
                         secret_name: Some("my-custom-cert".to_string()),
                         issuer_ref: None,
                     }),

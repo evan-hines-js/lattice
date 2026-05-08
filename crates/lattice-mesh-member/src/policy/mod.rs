@@ -1154,6 +1154,113 @@ pub(crate) mod tests {
                 .any(|f| f.match_name == Some("external.example.com".to_string()))),
             "should have Cilium FQDN egress for external.example.com"
         );
+
+        // DNS proxy must engage with a specific match_name for the declared
+        // FQDN, not a wildcard. The wildcard would defeat the per-workload
+        // restriction (Cilium would forward arbitrary lookups, enabling
+        // DNS-tunneled C2 / exfil from a popped pod).
+        let dns_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_ports
+                    .iter()
+                    .any(|p| p.ports.iter().any(|port| port.port == "53"))
+            })
+            .expect("DNS egress rule must exist");
+        let dns_matches = dns_egress.to_ports[0]
+            .rules
+            .as_ref()
+            .expect("DNS proxy must engage when FQDN egress is declared")
+            .dns
+            .clone();
+        assert_eq!(dns_matches.len(), 1);
+        assert_eq!(
+            dns_matches[0].match_name.as_deref(),
+            Some("external.example.com")
+        );
+        assert!(
+            dns_matches[0].match_pattern.is_none(),
+            "must not fall back to a wildcard pattern"
+        );
+    }
+
+    #[test]
+    fn cluster_local_outbound_edges_appear_in_dns_match_names() {
+        // In-cluster service deps must be enumerated explicitly in the DNS
+        // allowlist as <callee>.<callee_ns>.svc.cluster.local — no wildcard
+        // *.cluster.local. The full graph is known at compile time; relying
+        // on a pattern would silently allow lookups for unrelated services.
+        let graph = ServiceGraph::new("lattice.test");
+        let ns = "prod-ns";
+
+        let backend_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(ns, "backend", &backend_spec);
+
+        let gateway_spec = make_service_spec(vec!["backend"], vec![]);
+        graph.put_service(ns, "gateway", &gateway_spec);
+
+        let compiler = PolicyCompiler::new(&graph, vec![]);
+        let cnp = &compiler.compile("gateway", ns).cilium_policies[0];
+
+        let dns_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_ports
+                    .iter()
+                    .any(|p| p.ports.iter().any(|port| port.port == "53"))
+            })
+            .expect("DNS egress rule must exist");
+        let matches = dns_egress.to_ports[0]
+            .rules
+            .as_ref()
+            .expect("DNS proxy must engage when there are outbound deps")
+            .dns
+            .clone();
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_name.as_deref() == Some("backend.prod-ns.svc.cluster.local")),
+            "expected explicit cluster-local match_name for the outbound edge: {matches:?}"
+        );
+        assert!(
+            matches.iter().all(|m| m.match_pattern.is_none()),
+            "match_pattern wildcards must not appear in per-workload DNS rules"
+        );
+    }
+
+    #[test]
+    fn no_outbound_deps_leaves_dns_unproxied() {
+        // A workload with no FQDN egress and no outbound edges has nothing
+        // resolvable; we leave the kube-dns L4 allow unproxied for that pod.
+        // The cluster default-deny floor still permits the kubernetes API
+        // service name, which is the only universally-needed lookup.
+        let graph = ServiceGraph::new("lattice.test");
+        let ns = "test-ns";
+
+        let api_spec = make_service_spec(vec![], vec!["gateway"]);
+        graph.put_service(ns, "api", &api_spec);
+
+        let compiler = PolicyCompiler::new(&graph, vec![]);
+        let cnp = &compiler.compile("api", ns).cilium_policies[0];
+
+        let dns_egress = cnp
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_ports
+                    .iter()
+                    .any(|p| p.ports.iter().any(|port| port.port == "53"))
+            })
+            .expect("DNS egress rule must exist");
+        assert!(
+            dns_egress.to_ports[0].rules.is_none(),
+            "no resolvable deps means no per-workload DNS proxy rules"
+        );
     }
 
     #[test]

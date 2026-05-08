@@ -387,9 +387,12 @@ async fn test_forward_to_k8s_api_403_forbidden() {
 
 #[test]
 fn test_build_streaming_response_200() {
-    let response =
-        build_streaming_response(streaming_response(200, "application/json", br#"{"items":[]}"#))
-            .unwrap();
+    let response = build_streaming_response(streaming_response(
+        200,
+        "application/json",
+        br#"{"items":[]}"#,
+    ))
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("Content-Type").unwrap(),
@@ -411,7 +414,8 @@ fn test_build_streaming_response_404() {
 #[test]
 fn test_build_streaming_response_invalid_status_code() {
     // Status codes must be 100-999; 99 is invalid
-    let response = build_streaming_response(streaming_response(99, "application/json", b"")).unwrap();
+    let response =
+        build_streaming_response(streaming_response(99, "application/json", b"")).unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 

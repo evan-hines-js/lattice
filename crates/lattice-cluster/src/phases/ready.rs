@@ -19,7 +19,7 @@ use lattice_common::{capi_namespace, Error, LATTICE_MANAGED_BY_LABEL, LATTICE_MA
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
     CertIssuer, CertIssuerPhase, DNSProvider, DNSProviderPhase, LatticeCluster,
-    LatticeClusterStatus, WorkerPoolStatus,
+    LatticeClusterStatus, WorkerPoolStatus, PLATFORM_CA_ISSUER_KEY, PLATFORM_CA_ISSUER_NAME,
 };
 
 use crate::controller::{
@@ -497,7 +497,21 @@ async fn reconcile_issuers(
 
     let mut applied_names: HashSet<String> = HashSet::new();
 
-    for (key, cert_issuer_name) in &cluster.spec.issuers {
+    // The platform CertIssuer is always reconciled, regardless of what the
+    // user puts in `spec.issuers`. Its published cert-manager ClusterIssuer
+    // is `lattice-ca` — the trust anchor every `service.tls: {}` defaults
+    // to. The chosen registry key (`PLATFORM_CA_ISSUER_KEY`) is reserved by
+    // `LatticeClusterSpec::validate`, so user issuers can't collide.
+    let mut entries: Vec<(&str, &str)> = vec![(PLATFORM_CA_ISSUER_KEY, PLATFORM_CA_ISSUER_NAME)];
+    entries.extend(
+        cluster
+            .spec
+            .issuers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str())),
+    );
+
+    for &(key, cert_issuer_name) in &entries {
         let issuer_crd = match cache.get_namespaced::<CertIssuer>(cert_issuer_name, &ns) {
             Some(crd) => crd,
             None => {
@@ -610,12 +624,11 @@ async fn reconcile_issuers(
         }
     }
 
-    // Clean up stale ClusterIssuers: managed by us but not in current spec
-    let expected_names: HashSet<String> = cluster
-        .spec
-        .issuers
-        .keys()
-        .map(|k| format!("lattice-{}", k))
+    // Clean up stale ClusterIssuers: managed by us but not in current spec.
+    // The platform CertIssuer is reserved and always expected.
+    let expected_names: HashSet<String> = entries
+        .iter()
+        .map(|(k, _)| format!("lattice-{}", k))
         .collect();
 
     let all_cluster_issuers = cache.list_dynamic_filtered(&ar, |obj| {

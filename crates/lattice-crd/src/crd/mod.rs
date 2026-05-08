@@ -145,8 +145,8 @@ pub use workload::container::{
 pub use workload::cost::{CostBreakdown, CostEstimate};
 pub use workload::deploy::{CanarySpec, DeploySpec, DeployStrategy};
 pub use workload::ingress::{
-    CertIssuerRef, GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, IngressTls,
-    PathMatch, PathMatchType, RouteKind, RouteMatch, RouteRule, RouteSpec,
+    GrpcMethodMatch, HeaderMatch, HeaderMatchType, IngressSpec, PathMatch, PathMatchType,
+    RouteKind, RouteMatch, RouteRule, RouteSpec,
 };
 pub use workload::ports::{PortSpec, ServicePortsSpec};
 pub use workload::resources::{
@@ -156,6 +156,7 @@ pub use workload::resources::{
 };
 pub use workload::scaling::{AutoscalingMetric, AutoscalingSpec};
 pub use workload::spec::{RuntimeSpec, WorkloadSpec};
+pub use workload::tls::{CertIssuerRef, TlsSpec, PLATFORM_CA_ISSUER_KEY, PLATFORM_CA_ISSUER_NAME};
 pub use workload::topology::{TopologyMode, WorkloadNetworkTopology};
 
 // =============================================================================

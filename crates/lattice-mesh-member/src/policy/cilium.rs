@@ -161,6 +161,40 @@ fn webhook_port_ingress(ports: &[u16]) -> Option<CiliumIngressRule> {
     })
 }
 
+/// Build DNS proxy rules from the service graph: one `match_name` per declared
+/// dependency, whether external FQDN or in-cluster service. Returns `None`
+/// when the service has no resolvable deps so the kube-dns L4 allow stays
+/// unproxied for that workload (no DNS lookups are possible — the cluster
+/// default-deny floor still permits the kubernetes API service name).
+fn dns_match_names(service: &ServiceNode, outbound_edges: &[ActiveEdge]) -> Option<DnsRules> {
+    let mut dns: Vec<DnsMatch> = Vec::new();
+
+    for rule in &service.egress_rules {
+        if let EgressTarget::Fqdn(fqdn) = &rule.target {
+            dns.push(DnsMatch {
+                match_pattern: None,
+                match_name: Some(fqdn.clone()),
+            });
+        }
+    }
+
+    for edge in outbound_edges {
+        dns.push(DnsMatch {
+            match_pattern: None,
+            match_name: Some(format!(
+                "{}.{}.svc.cluster.local",
+                edge.callee_name, edge.callee_namespace
+            )),
+        });
+    }
+
+    if dns.is_empty() {
+        None
+    } else {
+        Some(DnsRules { dns })
+    }
+}
+
 /// Convert spec egress rules (entity, CIDR, FQDN) to Cilium egress rules.
 fn spec_egress_rules(service: &ServiceNode) -> Vec<CiliumEgressRule> {
     service
@@ -231,23 +265,13 @@ impl<'a> PolicyCompiler<'a> {
         // Build egress rules
         let mut egress_rules = Vec::new();
 
-        let has_fqdn_egress = service
-            .egress_rules
-            .iter()
-            .any(|r| matches!(r.target, EgressTarget::Fqdn(_)));
-
-        // Always allow DNS to kube-dns. When FQDN egress is configured,
-        // enable the DNS proxy so Cilium can resolve FQDN→IP mappings.
-        let fqdn_rules = if has_fqdn_egress {
-            Some(DnsRules {
-                dns: vec![DnsMatch {
-                    match_pattern: Some("*".to_string()),
-                }],
-            })
-        } else {
-            None
-        };
-        egress_rules.push(dns_egress_rule(fqdn_rules));
+        // Engage the DNS proxy with explicit match_names derived from the
+        // service graph: one entry per declared FQDN egress, plus one per
+        // in-cluster outbound edge (svc.cluster.local). Lets Cilium learn
+        // FQDN→IP mappings for L3 enforcement and denies arbitrary lookups
+        // (DNS-tunneled C2). The cluster default-deny holds the floor with
+        // the kubernetes API service name only.
+        egress_rules.push(dns_egress_rule(dns_match_names(service, outbound_edges)));
 
         // HBONE egress: always allow for ambient services. HBONE is mTLS on
         // port 15008 — gating it on graph state causes flapping when remote
@@ -353,9 +377,14 @@ impl<'a> PolicyCompiler<'a> {
             });
         }
 
-        // Egress: DNS + peer traffic + non-mesh egress rules
+        // Egress: DNS + peer traffic + non-mesh egress rules.
+        // Same approach as ambient: derive DNS match_names from the service
+        // graph rather than leaving the proxy disabled.
+        let outbound_edges = self
+            .graph
+            .get_active_outbound_edges(namespace, &service.name);
         let mut egress_rules = Vec::new();
-        egress_rules.push(dns_egress_rule(None));
+        egress_rules.push(dns_egress_rule(dns_match_names(service, &outbound_edges)));
 
         // Peer egress: match our own selector (same pods we allow inbound from)
         if service.allow_peer_traffic {

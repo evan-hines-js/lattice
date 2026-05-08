@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use super::observability::{MetricsSnapshot, ObservabilitySpec};
 use super::workload::cost::CostEstimate;
-use super::workload::ingress::IngressTls;
 use super::workload::scaling::AutoscalingMetric;
 use super::workload::spec::{RuntimeSpec, WorkloadSpec};
+use super::workload::tls::TlsSpec;
 use super::workload::topology::WorkloadNetworkTopology;
 
 // =============================================================================
@@ -521,7 +521,7 @@ pub struct ModelIngressSpec {
 
     /// TLS configuration — cert-manager auto or manual secret
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<IngressTls>,
+    pub tls: Option<TlsSpec>,
 
     /// GatewayClass name (default: "istio")
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1039,13 +1039,13 @@ mod tests {
     // ModelIngressSpec Tests
     // ========================================================================
 
-    use super::super::workload::ingress::{CertIssuerRef, IngressTls};
+    use super::super::workload::tls::{CertIssuerRef, TlsSpec};
 
     #[test]
     fn ingress_validate_valid() {
         let ingress = ModelIngressSpec {
             hosts: vec!["model.lattice.gpu".to_string()],
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: None,
                 issuer_ref: Some(CertIssuerRef {
                     name: "letsencrypt".to_string(),
@@ -1073,7 +1073,7 @@ mod tests {
     fn ingress_validate_both_tls_modes() {
         let ingress = ModelIngressSpec {
             hosts: vec!["model.lattice.gpu".to_string()],
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: Some("my-secret".to_string()),
                 issuer_ref: Some(CertIssuerRef {
                     name: "letsencrypt".to_string(),

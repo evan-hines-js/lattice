@@ -18,11 +18,24 @@ use kube::ResourceExt;
 use lattice_common::kube_utils::{
     HasApiResource, LabelSelector, ObjectMeta, OwnerReference, TopologySpreadConstraint,
 };
+use lattice_common::network::cert_manager::{compile_certificate, Certificate};
 use lattice_workload::k8s::{
     Affinity, Container, LocalObjectReference, PodSecurityContext, SchedulingGate, Volume,
+    VolumeMount,
 };
 use lattice_workload::{CompilationError, CompiledPodTemplate};
 use serde::{Deserialize, Serialize};
+
+/// Path inside every container where the cert-manager-issued (or user-
+/// supplied) TLS Secret is mounted when a LatticeService declares
+/// `service.tls`. The `tls.crt` and `tls.key` keys land at
+/// `<TLS_MOUNT_PATH>/tls.crt` and `…/tls.key` — this is the public contract
+/// user-supplied TLS-terminating sidecars (nginx, envoy, …) rely on.
+pub const TLS_MOUNT_PATH: &str = "/etc/lattice/tls";
+
+/// Pod-level Volume name for the auto-mounted TLS Secret. Internal — no
+/// caller should depend on it.
+const TLS_VOLUME_NAME: &str = "lattice-tls";
 
 // =============================================================================
 // Deployment
@@ -336,6 +349,8 @@ pub struct GeneratedWorkloads {
     pub scaled_object: Option<ScaledObject>,
     /// Volcano PodGroup for topology-aware scheduling
     pub pod_group: Option<lattice_volcano_policy::PodGroup>,
+    /// cert-manager Certificates for TLS-terminating Services
+    pub certificates: Vec<Certificate>,
     /// Configuration resources (ConfigMaps, Secrets, PVCs, ExternalSecrets)
     pub config: lattice_workload::CompiledConfig,
 }
@@ -349,6 +364,7 @@ impl GeneratedWorkloads {
             && self.pdb.is_none()
             && self.scaled_object.is_none()
             && self.pod_group.is_none()
+            && self.certificates.is_empty()
             && self.config.env_config_maps.is_empty()
             && self.config.env_secrets.is_empty()
             && self.config.files_config_maps.is_empty()
@@ -427,7 +443,7 @@ impl WorkloadCompiler {
         output.deployment = Some(deployment);
 
         // Generate Service if ports are defined
-        if workload.service.is_some() {
+        if let Some(svc_spec) = workload.service.as_ref() {
             let has_advertise = spec.advertise.is_some();
             output.service = Some(Self::compile_service(
                 name,
@@ -437,6 +453,9 @@ impl WorkloadCompiler {
                 provider_type,
                 &owner_refs,
             ));
+            output
+                .certificates
+                .extend(Self::compile_service_certificate(name, namespace, svc_spec));
         }
 
         // Generate PDB for HA services (replicas >= 2)
@@ -482,10 +501,25 @@ impl WorkloadCompiler {
         name: &str,
         namespace: &str,
         spec: &LatticeServiceSpec,
-        pod_template: CompiledPodTemplate,
+        mut pod_template: CompiledPodTemplate,
         owner_refs: &[OwnerReference],
     ) -> Deployment {
         let strategy = Self::compile_strategy(spec);
+
+        // Auto-mount the TLS Secret into every container when `service.tls`
+        // is set. The mount path is the `TLS_MOUNT_PATH` contract —
+        // user-supplied TLS-terminating sidecars (nginx, envoy, …) point
+        // their config at `tls.crt` / `tls.key` underneath it.
+        if let Some(tls) = spec
+            .workload
+            .service
+            .as_ref()
+            .and_then(|svc| svc.tls.as_ref())
+        {
+            let secret_name =
+                tls.resolved_secret_name(&crate::crd::ServicePortsSpec::tls_secret_name(name));
+            Self::mount_tls_secret_in_pod(&secret_name, &mut pod_template);
+        }
 
         Deployment {
             api_version: "apps/v1".to_string(),
@@ -640,6 +674,51 @@ impl WorkloadCompiler {
                 ports,
                 type_,
             },
+        }
+    }
+
+    /// Emit a cert-manager Certificate when the Service declares any TLS
+    /// in auto mode — explicit `issuerRef` or empty `tls: {}` (which falls
+    /// back to the platform default `lattice-ca`). Returns `None` for
+    /// manual mode (`secretName` only) and cert-less Services.
+    /// `ServicePortsSpec::validate` has already enforced that auto mode
+    /// requires external `serviceType` and non-empty `hostnames`.
+    fn compile_service_certificate(
+        name: &str,
+        namespace: &str,
+        svc_spec: &crate::crd::ServicePortsSpec,
+    ) -> Option<Certificate> {
+        let issuer = svc_spec.tls.as_ref()?.effective_issuer_ref()?;
+        compile_certificate(
+            &crate::crd::ServicePortsSpec::tls_certificate_name(name),
+            namespace,
+            &crate::crd::ServicePortsSpec::tls_secret_name(name),
+            &svc_spec.hostnames,
+            &issuer,
+        )
+    }
+
+    /// Inject a Secret-backed Volume + read-only VolumeMount on every
+    /// container (init + main) so the TLS cert is available at
+    /// `TLS_MOUNT_PATH`. The underlying Secret is either issued by
+    /// cert-manager (auto mode, name `{service}-tls`) or supplied by the
+    /// user (manual mode, `tls.secretName`).
+    fn mount_tls_secret_in_pod(secret_name: &str, pod: &mut CompiledPodTemplate) {
+        pod.volumes
+            .push(Volume::from_secret(TLS_VOLUME_NAME, secret_name));
+
+        let mount = VolumeMount {
+            name: TLS_VOLUME_NAME.to_string(),
+            mount_path: TLS_MOUNT_PATH.to_string(),
+            sub_path: None,
+            read_only: Some(true),
+        };
+        for container in pod
+            .containers
+            .iter_mut()
+            .chain(pod.init_containers.iter_mut())
+        {
+            container.volume_mounts.push(mount.clone());
         }
     }
 
@@ -1533,5 +1612,217 @@ mod tests {
             .metadata
             .annotations
             .contains_key("external-dns.alpha.kubernetes.io/hostname"));
+    }
+
+    #[tokio::test]
+    async fn loadbalancer_with_tls_issuer_emits_certificate() {
+        use crate::crd::{CertIssuerRef, ServicePortsSpec, TlsSpec};
+
+        let mut service = make_service("jellyfin", "media");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["jellyfin.home.arpa".to_string()];
+        svc_spec.tls = Some(TlsSpec {
+            issuer_ref: Some(CertIssuerRef {
+                name: "lattice-internal".to_string(),
+                kind: None,
+            }),
+            secret_name: None,
+        });
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        assert_eq!(output.certificates.len(), 1);
+        let cert = &output.certificates[0];
+        assert_eq!(
+            cert.metadata.name,
+            ServicePortsSpec::tls_certificate_name("jellyfin")
+        );
+        assert_eq!(cert.metadata.namespace, "media");
+        assert_eq!(
+            cert.spec.secret_name,
+            ServicePortsSpec::tls_secret_name("jellyfin")
+        );
+        assert_eq!(cert.spec.dns_names, vec!["jellyfin.home.arpa".to_string()]);
+        assert_eq!(cert.spec.issuer_ref.name, "lattice-internal");
+        assert_eq!(cert.spec.issuer_ref.kind, "ClusterIssuer");
+        assert_eq!(
+            cert.spec.issuer_ref.group.as_deref(),
+            Some("cert-manager.io")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_tls_block_uses_platform_default_issuer() {
+        use crate::crd::{ServicePortsSpec, TlsSpec};
+        use lattice_crd::crd::PLATFORM_CA_ISSUER_NAME;
+
+        let mut service = make_service("jellyfin", "media");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["jellyfin.home.arpa".to_string()];
+        // tls: {} — neither issuerRef nor secretName set. Should fall back
+        // to the built-in `lattice-ca` CertIssuer shipped with every cluster.
+        svc_spec.tls = Some(TlsSpec::default());
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        assert_eq!(output.certificates.len(), 1);
+        let cert = &output.certificates[0];
+        assert_eq!(
+            cert.metadata.name,
+            ServicePortsSpec::tls_certificate_name("jellyfin")
+        );
+        assert_eq!(cert.spec.issuer_ref.name, PLATFORM_CA_ISSUER_NAME);
+        assert_eq!(cert.spec.issuer_ref.kind, "ClusterIssuer");
+    }
+
+    #[tokio::test]
+    async fn loadbalancer_with_manual_tls_emits_no_certificate() {
+        use crate::crd::TlsSpec;
+
+        let mut service = make_service("jellyfin", "media");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["jellyfin.home.arpa".to_string()];
+        svc_spec.tls = Some(TlsSpec {
+            secret_name: Some("byo-tls".to_string()),
+            issuer_ref: None,
+        });
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        assert!(
+            output.certificates.is_empty(),
+            "manual mode (BYO Secret) must not emit a Certificate"
+        );
+    }
+
+    #[tokio::test]
+    async fn loadbalancer_without_tls_emits_no_certificate() {
+        let mut service = make_service("my-app", "default");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["app.example.com".to_string()];
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        assert!(output.certificates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tls_auto_mounts_secret_volume_into_every_container() {
+        use crate::crd::{CertIssuerRef, ServicePortsSpec, TlsSpec};
+
+        let mut service = make_service("jellyfin", "media");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["jellyfin.home.arpa".to_string()];
+        svc_spec.tls = Some(TlsSpec {
+            issuer_ref: Some(CertIssuerRef {
+                name: "lattice-internal".to_string(),
+                kind: None,
+            }),
+            secret_name: None,
+        });
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        let deployment = output.deployment.expect("should have Deployment");
+        let expected_secret = ServicePortsSpec::tls_secret_name("jellyfin");
+
+        let tls_volume = deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .find(|v| v.name == "lattice-tls")
+            .expect("auto-mount must add a `lattice-tls` Volume");
+        assert_eq!(
+            tls_volume.secret.as_ref().map(|s| s.secret_name.as_str()),
+            Some(expected_secret.as_str())
+        );
+
+        for c in &deployment.spec.template.spec.containers {
+            let mount = c
+                .volume_mounts
+                .iter()
+                .find(|m| m.name == "lattice-tls")
+                .unwrap_or_else(|| panic!("container {} must mount lattice-tls", c.name));
+            assert_eq!(mount.mount_path, super::TLS_MOUNT_PATH);
+            assert_eq!(mount.read_only, Some(true));
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_tls_mounts_user_supplied_secret() {
+        use crate::crd::TlsSpec;
+
+        let mut service = make_service("jellyfin", "media");
+        let svc_spec = service.spec.workload.service.as_mut().unwrap();
+        svc_spec.service_type = ServiceType::LoadBalancer;
+        svc_spec.hostnames = vec!["jellyfin.home.arpa".to_string()];
+        svc_spec.tls = Some(TlsSpec {
+            secret_name: Some("byo-jellyfin-tls".to_string()),
+            issuer_ref: None,
+        });
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        let deployment = output.deployment.expect("should have Deployment");
+        let tls_volume = deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .find(|v| v.name == "lattice-tls")
+            .expect("auto-mount must add a `lattice-tls` Volume even in manual mode");
+        assert_eq!(
+            tls_volume.secret.as_ref().map(|s| s.secret_name.as_str()),
+            Some("byo-jellyfin-tls"),
+            "manual mode must mount the user-supplied secretName, not the auto-default"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_tls_means_no_auto_mount() {
+        let service = make_service("my-app", "default");
+
+        let output =
+            test_compile_with_provider(&service, MonitoringConfig::default(), ProviderType::Docker)
+                .await
+                .expect("compile must succeed");
+
+        let deployment = output.deployment.expect("should have Deployment");
+        assert!(!deployment
+            .spec
+            .template
+            .spec
+            .volumes
+            .iter()
+            .any(|v| v.name == "lattice-tls"));
+        for c in &deployment.spec.template.spec.containers {
+            assert!(!c.volume_mounts.iter().any(|m| m.name == "lattice-tls"));
+        }
     }
 }

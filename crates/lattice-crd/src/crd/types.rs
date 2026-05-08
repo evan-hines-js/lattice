@@ -2213,7 +2213,6 @@ mod tests {
             assert_eq!(config.provider_type(), ProviderType::Aws);
             assert!(config.validate().is_ok());
         }
-
     }
 
     mod dns_label_validation {

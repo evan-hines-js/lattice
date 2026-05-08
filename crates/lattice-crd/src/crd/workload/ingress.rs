@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::crd::workload::tls::TlsSpec;
 use crate::crd::MeshMemberPort;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ pub struct RouteSpec {
 
     /// TLS configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls: Option<IngressTls>,
+    pub tls: Option<TlsSpec>,
 }
 
 /// Configuration for advertising a route across clusters.
@@ -139,56 +140,6 @@ impl AdvertiseConfig {
         }
         Ok(())
     }
-}
-
-/// TLS configuration for ingress — mode is inferred from which fields are set.
-///
-/// | Fields present         | Behavior                                       |
-/// |------------------------|------------------------------------------------|
-/// | `issuerRef`            | Auto — cert-manager provisions certificate     |
-/// | `secretName`           | Manual — user-provided TLS secret              |
-/// | `tls: {}` (empty)      | Auto — inherit issuerRef from policy           |
-/// | No `tls` field         | No TLS (unless policy provides it)             |
-/// | Both fields            | Validation error                               |
-#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct IngressTls {
-    /// Secret name containing TLS certificate (manual mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub secret_name: Option<String>,
-
-    /// Cert-manager issuer reference (auto mode)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub issuer_ref: Option<CertIssuerRef>,
-}
-
-impl IngressTls {
-    /// Returns true if this TLS config specifies auto mode (has issuer_ref)
-    pub fn is_auto(&self) -> bool {
-        self.issuer_ref.is_some()
-    }
-
-    /// Returns true if this TLS config specifies manual mode (has secret_name)
-    pub fn is_manual(&self) -> bool {
-        self.secret_name.is_some()
-    }
-
-    /// Returns true if both fields are empty (inherit from policy)
-    pub fn is_empty_inherit(&self) -> bool {
-        self.secret_name.is_none() && self.issuer_ref.is_none()
-    }
-}
-
-/// Reference to a cert-manager issuer
-#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CertIssuerRef {
-    /// Name of the issuer
-    pub name: String,
-
-    /// Kind of issuer (default: ClusterIssuer)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
 }
 
 /// A routing rule containing match conditions
@@ -353,17 +304,11 @@ impl RouteSpec {
 
         // TLS validation
         if let Some(ref tls) = self.tls {
-            if tls.issuer_ref.is_some() && tls.secret_name.is_some() {
-                return Err(format!(
-                    "route '{}': cannot specify both issuerRef and secretName in tls",
-                    route_name
-                ));
-            }
+            tls.validate(&format!("route '{route_name}'"))?;
             // TCPRoute + auto TLS (issuerRef) not supported
-            if self.kind == RouteKind::TCPRoute && tls.is_auto() {
+            if self.kind == RouteKind::TCPRoute && tls.effective_issuer_ref().is_some() {
                 return Err(format!(
-                    "route '{}': TCPRoute only supports manual TLS (secretName), not auto (issuerRef)",
-                    route_name
+                    "route '{route_name}': TCPRoute only supports manual TLS (secretName), not auto (issuerRef)"
                 ));
             }
         }
@@ -445,6 +390,7 @@ impl RouteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crd::workload::tls::CertIssuerRef;
     use crate::crd::PeerAuth;
 
     fn single_port() -> Vec<MeshMemberPort> {
@@ -600,7 +546,7 @@ mod tests {
     #[test]
     fn tls_both_fields_fails() {
         let mut route = http_route(vec!["a.example.com"]);
-        route.tls = Some(IngressTls {
+        route.tls = Some(TlsSpec {
             secret_name: Some("my-secret".to_string()),
             issuer_ref: Some(CertIssuerRef {
                 name: "letsencrypt".to_string(),
@@ -626,7 +572,7 @@ mod tests {
                     port: None,
                     listen_port: Some(9090),
                     rules: None,
-                    tls: Some(IngressTls {
+                    tls: Some(TlsSpec {
                         secret_name: None,
                         issuer_ref: Some(CertIssuerRef {
                             name: "letsencrypt".to_string(),
@@ -725,29 +671,6 @@ mod tests {
         let mut route = http_route(vec!["a.example.com"]);
         route.port = Some("nonexistent".to_string());
         assert!(route.resolve_port(&single_port()).is_err());
-    }
-
-    #[test]
-    fn tls_mode_inference() {
-        let auto = IngressTls {
-            secret_name: None,
-            issuer_ref: Some(CertIssuerRef {
-                name: "letsencrypt".to_string(),
-                kind: None,
-            }),
-        };
-        assert!(auto.is_auto());
-        assert!(!auto.is_manual());
-
-        let manual = IngressTls {
-            secret_name: Some("my-cert".to_string()),
-            issuer_ref: None,
-        };
-        assert!(!manual.is_auto());
-        assert!(manual.is_manual());
-
-        let empty = IngressTls::default();
-        assert!(empty.is_empty_inherit());
     }
 
     #[test]

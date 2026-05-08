@@ -16,7 +16,7 @@ use crate::LATTICE_SYSTEM_NAMESPACE;
 ///
 /// Each CertIssuer generates a cert-manager ClusterIssuer named
 /// `lattice-{metadata.name}`. Services reference these issuers via
-/// `IngressTls.issuerRef`.
+/// `TlsSpec.issuerRef`.
 ///
 /// Example YAML:
 /// ```yaml
@@ -59,7 +59,9 @@ pub struct CertIssuerSpec {
     /// Vault PKI configuration (required when type = vault)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultIssuerSpec>,
-    // selfSigned needs no extra config
+    // type = selfSigned needs no extra config; per-leaf self-signed certs.
+    // Shared-trust use cases route through type = ca with a CaSource pointing
+    // at an in-cluster Secret (typically the operator-managed `lattice-ca`).
 }
 
 /// Supported cert-manager issuer types
@@ -105,12 +107,56 @@ pub struct AcmeIssuerSpec {
     pub dns_provider_ref: Option<String>,
 }
 
-/// CA issuer configuration
+/// CA issuer configuration. The CA cert + key live in a Kubernetes Secret;
+/// the source is either an in-cluster Secret reference (for the platform's
+/// own `lattice-ca`, or any other operator-managed CA) or ESO-synced
+/// material from an external secret store (Vault, AWS Secrets Manager, …).
+///
+/// Untagged: the variant is identified by which key is present in the YAML
+/// (`secretRef` vs `credentials`), so users don't need to write a redundant
+/// discriminator field.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct CaIssuerSpec {
-    /// ESO-managed credential source for the CA certificate and private key.
-    pub credentials: super::types::CredentialSpec,
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", untagged)]
+pub enum CaIssuerSpec {
+    /// Reference to an existing in-cluster Secret. Used by the built-in
+    /// `lattice-ca` CertIssuer, which points at the operator-managed
+    /// `lattice-ca` Secret in the `lattice-system` namespace, and by any
+    /// user-defined CertIssuer that wants to expose a CA Secret already
+    /// living in the cluster.
+    SecretRef {
+        /// In-cluster Secret holding the CA. Must contain `tls.crt` and
+        /// `tls.key` per cert-manager's CA issuer contract.
+        secret_ref: super::types::SecretRef,
+    },
+    /// ESO-managed credentials syncing CA cert + key from an external
+    /// secret store. The synced K8s Secret is named per
+    /// `credential_secret_name(<issuer_name>)`.
+    External {
+        /// External Secrets Operator credential source.
+        credentials: super::types::CredentialSpec,
+    },
+}
+
+impl CaIssuerSpec {
+    /// Validate the variant's contents.
+    pub fn validate(&self) -> Result<(), crate::ValidationError> {
+        match self {
+            CaIssuerSpec::SecretRef { secret_ref } => {
+                if secret_ref.name.is_empty() {
+                    return Err(crate::ValidationError::new(
+                        "ca.secretRef.name cannot be empty",
+                    ));
+                }
+                if secret_ref.namespace.is_empty() {
+                    return Err(crate::ValidationError::new(
+                        "ca.secretRef.namespace cannot be empty",
+                    ));
+                }
+                Ok(())
+            }
+            CaIssuerSpec::External { credentials } => credentials.validate(),
+        }
+    }
 }
 
 /// Vault PKI issuer configuration
@@ -171,14 +217,24 @@ impl std::fmt::Display for CertIssuerPhase {
 }
 
 impl CertIssuer {
-    /// Resolve the K8s Secret for this issuer's credentials.
+    /// Resolve the K8s Secret that backs this issuer.
     ///
-    /// Returns a synthetic ref pointing to the ESO-synced secret
-    /// `{name}-credentials` in `lattice-system`. Returns `None` for
-    /// types that don't need credentials (SelfSigned, ACME HTTP-01).
+    /// - **CA / SecretRef**: the user-provided in-cluster Secret reference,
+    ///   used directly with no ESO sync.
+    /// - **CA / External, Vault**: the ESO-synced credential Secret
+    ///   `{name}-credentials` in `lattice-system`.
+    /// - **SelfSigned, ACME**: `None` — these issuers carry no upstream
+    ///   credential material.
     pub fn k8s_secret_ref(&self) -> Option<SecretRef> {
         match self.spec.type_ {
-            IssuerType::Ca | IssuerType::Vault => Some(SecretRef::for_credentials(
+            IssuerType::Ca => match self.spec.ca.as_ref()? {
+                CaIssuerSpec::SecretRef { secret_ref } => Some(secret_ref.clone()),
+                CaIssuerSpec::External { .. } => Some(SecretRef::for_credentials(
+                    &self.name_any(),
+                    LATTICE_SYSTEM_NAMESPACE,
+                )),
+            },
+            IssuerType::Vault => Some(SecretRef::for_credentials(
                 &self.name_any(),
                 LATTICE_SYSTEM_NAMESPACE,
             )),
@@ -213,7 +269,7 @@ impl CertIssuerSpec {
                 let ca = self.ca.as_ref().ok_or_else(|| {
                     crate::ValidationError::new("ca config required when type is ca")
                 })?;
-                ca.credentials.validate()?;
+                ca.validate()?;
             }
             IssuerType::Vault => {
                 let vault = self.vault.as_ref().ok_or_else(|| {
@@ -363,19 +419,102 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn ca_valid() {
+    fn ca_external_valid() {
         let issuer = make_issuer(
             "internal",
             CertIssuerSpec {
                 type_: IssuerType::Ca,
                 acme: None,
-                ca: Some(CaIssuerSpec {
+                ca: Some(CaIssuerSpec::External {
                     credentials: CredentialSpec::test("pki/internal-ca", "lattice-local"),
                 }),
                 vault: None,
             },
         );
         assert!(issuer.spec.validate().is_ok());
+    }
+
+    #[test]
+    fn ca_secret_ref_valid() {
+        let issuer = make_issuer(
+            "lattice-ca",
+            CertIssuerSpec {
+                type_: IssuerType::Ca,
+                acme: None,
+                ca: Some(CaIssuerSpec::SecretRef {
+                    secret_ref: SecretRef {
+                        name: "lattice-ca".to_string(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+                vault: None,
+            },
+        );
+        assert!(issuer.spec.validate().is_ok());
+        // k8s_secret_ref points directly at the in-cluster Secret (no ESO).
+        let r = issuer.k8s_secret_ref().expect("secret ref");
+        assert_eq!(r.name, "lattice-ca");
+        assert_eq!(r.namespace, "lattice-system");
+    }
+
+    #[test]
+    fn ca_secret_ref_empty_name_rejected() {
+        let issuer = make_issuer(
+            "broken",
+            CertIssuerSpec {
+                type_: IssuerType::Ca,
+                acme: None,
+                ca: Some(CaIssuerSpec::SecretRef {
+                    secret_ref: SecretRef {
+                        name: String::new(),
+                        namespace: "lattice-system".to_string(),
+                    },
+                }),
+                vault: None,
+            },
+        );
+        let err = issuer.spec.validate().unwrap_err().to_string();
+        assert!(err.contains("ca.secretRef.name"), "got: {err}");
+    }
+
+    #[test]
+    fn ca_source_serde_round_trips() {
+        // SecretRef serializes flatly as ca: { secretRef: {...} }, so the
+        // YAML/JSON shape stays human-friendly with no discriminator field.
+        let original = CertIssuerSpec {
+            type_: IssuerType::Ca,
+            acme: None,
+            ca: Some(CaIssuerSpec::SecretRef {
+                secret_ref: SecretRef {
+                    name: "lattice-ca".to_string(),
+                    namespace: "lattice-system".to_string(),
+                },
+            }),
+            vault: None,
+        };
+        let serialized = serde_json::to_string(&original).expect("serialize");
+        assert!(
+            serialized.contains("\"secretRef\":"),
+            "expected camelCase secretRef in serialized form: {serialized}"
+        );
+        let reparsed: CertIssuerSpec = serde_json::from_str(&serialized).expect("parse");
+        assert_eq!(original, reparsed);
+
+        let original = CertIssuerSpec {
+            type_: IssuerType::Ca,
+            acme: None,
+            ca: Some(CaIssuerSpec::External {
+                credentials: CredentialSpec::test("pki/external-ca", "vault-prod"),
+            }),
+            vault: None,
+        };
+        let serialized = serde_json::to_string(&original).expect("serialize");
+        assert!(
+            serialized.contains("\"credentials\":"),
+            "expected credentials key in serialized form: {serialized}"
+        );
+        let reparsed: CertIssuerSpec = serde_json::from_str(&serialized).expect("parse");
+        assert_eq!(original, reparsed);
     }
 
     #[test]

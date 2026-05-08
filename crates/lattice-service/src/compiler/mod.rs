@@ -404,8 +404,8 @@ impl<'a> ServiceCompiler<'a> {
 mod tests {
     use super::*;
     use crate::crd::{
-        CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, PortSpec,
-        ResourceSpec, RouteKind, RouteSpec, SecurityContext, ServicePortsSpec, WorkloadSpec,
+        CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, PortSpec, ResourceSpec,
+        RouteKind, RouteSpec, SecurityContext, ServicePortsSpec, TlsSpec, WorkloadSpec,
     };
     use std::collections::BTreeMap;
 
@@ -464,7 +464,7 @@ mod tests {
                     port: None,
                     listen_port: None,
                     rules: None,
-                    tls: Some(IngressTls {
+                    tls: Some(TlsSpec {
                         secret_name: None,
                         issuer_ref: Some(CertIssuerRef {
                             name: "letsencrypt-prod".to_string(),

@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use lattice_crd::crd::{
-    CertIssuerRef, IngressSpec, IngressTls, PathMatch, PathMatchType, RouteKind, RouteMatch,
-    RouteRule, RouteSpec,
+    CertIssuerRef, IngressSpec, PathMatch, PathMatchType, RouteKind, RouteMatch, RouteRule,
+    RouteSpec, TlsSpec,
 };
 
 use super::gateway_helpers::{generate_gateway_test_script, GatewayTestTarget};
@@ -154,7 +154,7 @@ pub fn create_backend_tls() -> lattice_crd::crd::LatticeService {
             port: None,
             listen_port: None,
             rules: None, // catch-all
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: None,
                 issuer_ref: Some(CertIssuerRef {
                     name: "e2e-selfsigned".to_string(),

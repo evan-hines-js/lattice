@@ -1,35 +1,24 @@
 # =============================================================================
-# FIPS 140-3 Compliant Build
+# Lattice Operator image
 # =============================================================================
-# All cryptographic operations use FIPS 140-3 validated modules:
-# - Lattice (Rust): aws-lc-rs FIPS module
-# Runtime: Red Hat UBI 9 Minimal (FIPS-validated OS)
-# Builder: AlmaLinux 9 (RHEL 9-compatible glibc for binary compatibility)
+# Builder: Debian slim (rust + go for helm).
+# Runtime: gcr.io/distroless/cc-debian12:nonroot.
+#
+# FIPS crypto comes from the operator binary itself (aws-lc-rs FIPS feature).
+# The runtime base is no longer FIPS-validated; the binary-level guarantee
+# remains.
 # =============================================================================
 
-ARG FIPS=true
+ARG HELM_VERSION=4.1.1
 
 # -----------------------------------------------------------------------------
-# Stage 1: Build Go CLIs with Go 1.25 native FIPS support
+# Stage 1: build helm from source
 # -----------------------------------------------------------------------------
 FROM golang:1.25-bookworm AS go-builder
 
-ARG TARGETARCH
-ARG FIPS
-
-# Versions from versions.toml - use scripts/docker-build.sh to build
-# or pass --build-arg to override
 ARG HELM_VERSION
-
-WORKDIR /build
-
-# Go 1.24 native FIPS - no CGO required!
-# GOFIPS140=latest selects the FIPS crypto module at build time
-ENV GOFIPS140=${FIPS:+latest}
 ENV CGO_ENABLED=0
 
-# Build helm from source with FIPS
-# Must use 'make build' to set proper ldflags (k8s version defaults)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     git clone --depth 1 --branch v${HELM_VERSION} https://github.com/helm/helm.git /build/helm && \
@@ -38,39 +27,26 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     cp bin/helm /usr/local/bin/helm
 
 # -----------------------------------------------------------------------------
-# Stage 2: Build Rust application on RHEL 9-compatible base
+# Stage 2: build lattice-operator
 # -----------------------------------------------------------------------------
-# AlmaLinux 9 provides glibc 2.34 (same as UBI 9 runtime), ensuring binary
-# compatibility. Using rust:latest (Debian) would produce binaries linked
-# against a newer glibc that won't run on the UBI 9 runtime.
-FROM almalinux:9 AS rust-builder
+FROM rust:1-slim-bookworm AS rust-builder
 
-ARG FIPS
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    protobuf-compiler \
+    libprotobuf-dev \
+    clang \
+    libclang-dev \
+    cmake \
+    golang \
+    perl \
+    make \
+    gcc \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain via rustup
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Install build dependencies for aws-lc-rs FIPS
-# - clang-devel: libclang for bindgen (aws-lc-rs)
-# - cmake, golang, perl: aws-lc-rs FIPS module build
-# - protobuf-compiler + protobuf-devel: prost/tonic code generation
-#   (protobuf-devel provides google/protobuf/timestamp.proto etc.)
-RUN dnf install -y 'dnf-command(config-manager)' && \
-    dnf config-manager --set-enabled crb && \
-    dnf install -y epel-release && \
-    dnf install -y \
-        protobuf-compiler \
-        protobuf-devel \
-        clang-devel \
-        cmake \
-        golang \
-        gcc \
-        make \
-        perl \
-    && dnf clean all
-
-# Copy helm from go-builder (needed by build.rs to pre-render charts)
+# helm is needed by build.rs to pre-render charts
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
 
 WORKDIR /app
@@ -84,9 +60,6 @@ RUN mkdir -p test-charts test-providers
 COPY test-chart[s] ./test-charts/
 COPY test-provider[s] ./test-providers/
 
-# Build with BuildKit cache mounts for incremental compilation
-# - registry/git: caches downloaded crates
-# - target: caches compiled artifacts (the expensive part)
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/app/target \
@@ -94,37 +67,14 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     cp /app/target/release/lattice-operator /usr/local/bin/lattice-operator
 
 # -----------------------------------------------------------------------------
-# Stage 3: Runtime image (FIPS-validated Red Hat UBI 9 Minimal)
+# Stage 3: runtime
 # -----------------------------------------------------------------------------
-FROM registry.access.redhat.com/ubi9/ubi-minimal
+FROM gcr.io/distroless/cc-debian12:nonroot
 
-# Install CA certificates for TLS and shadow-utils for useradd
-RUN microdnf install -y \
-    ca-certificates \
-    shadow-utils \
-    && microdnf clean all
-
-# Copy Lattice operator binary (manifests are embedded at build time)
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
-
-# Copy Helm binary (built from source with FIPS in go-builder stage)
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
-
-# Copy CAPI providers downloaded by build.rs during compilation
 COPY --from=rust-builder /app/test-providers /providers
 
-# Copy runtime scripts for templating (bootstrap-cluster.sh, etc.)
-COPY scripts/runtime /scripts
-
-# Create non-root user
-RUN useradd -r -u 1000 -m lattice && \
-    chown -R lattice:lattice /providers /scripts
-
-USER lattice
-
-# Set scripts location for templating
-ENV LATTICE_SCRIPTS_DIR=/scripts
-# Set providers directory for native CAPI installation
 ENV PROVIDERS_DIR=/providers
 
 ENTRYPOINT ["/usr/local/bin/lattice-operator"]

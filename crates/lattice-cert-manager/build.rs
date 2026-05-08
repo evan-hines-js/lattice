@@ -13,6 +13,10 @@ fn main() {
 
     // CRDs rendered inline + control-plane tolerations across every cert-manager
     // workload so they can schedule on kubeadm-tainted CP nodes before workers exist.
+    // `clusterResourceNamespace=lattice-system` points cert-manager at the
+    // operator-managed Secrets namespace so ClusterIssuers (e.g. the built-in
+    // `lattice-ca`) can resolve `ca.secretName` against the actual Secret
+    // location instead of the default `cert-manager` namespace.
     let yaml = lattice_helm_build::render_chart(
         &chart_path,
         "cert-manager",
@@ -20,6 +24,8 @@ fn main() {
         &[
             "--set",
             "crds.enabled=true",
+            "--set",
+            "clusterResourceNamespace=lattice-system",
             "--set",
             "tolerations[0].key=node-role.kubernetes.io/control-plane",
             "--set",

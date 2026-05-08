@@ -180,7 +180,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # Crypto
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 aws-lc-rs = { version = "1.16" }
-sigstore = "0.13"
+sigstore = { git = "https://github.com/sigstore/sigstore-rs", rev = "1485d8b140fccd8c934963aeb03d1c89014deb57" }
 subtle = "2.6"
 zeroize = "1.8"
 

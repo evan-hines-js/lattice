@@ -716,22 +716,19 @@ impl Installer {
         // Retry on transient apiserver errors: `wait_for_api_server` only
         // proves a single namespace list succeeded; a fresh kind apiserver
         // can still drop the very next connection while it's stabilising.
-        let api_server_endpoint = retry_with_backoff(
-            &RetryConfig::install(),
-            "from_kubeadm_config",
-            || async {
+        let api_server_endpoint =
+            retry_with_backoff(&RetryConfig::install(), "from_kubeadm_config", || async {
                 lattice_common::ApiServerEndpoint::from_kubeadm_config(mgmt_client).await
-            },
-        )
-        .await
-        .map_err(|e| Error::command_failed(e.to_string()))?
-        .ok_or_else(|| {
-            Error::command_failed(
-                "kube-system/kubeadm-config has no controlPlaneEndpoint — \
+            })
+            .await
+            .map_err(|e| Error::command_failed(e.to_string()))?
+            .ok_or_else(|| {
+                Error::command_failed(
+                    "kube-system/kubeadm-config has no controlPlaneEndpoint — \
                  the management cluster must be kubeadm-bootstrapped (kind)"
-                    .to_string(),
-            )
-        })?;
+                        .to_string(),
+                )
+            })?;
         let config = BootstrapBundleConfig {
             facts: &facts,
             image: &self.image,
@@ -913,20 +910,18 @@ impl Installer {
             Api::namespaced(mgmt_client.clone(), LATTICE_SYSTEM_NAMESPACE);
         // Retry transient apiserver errors against the freshly-pivoted mgmt
         // cluster; preserve 404 (= "no InfraProvider yet, fall back to defaults").
-        let cp = retry_with_backoff(
-            &RetryConfig::install(),
-            "get InfraProvider",
-            || async {
-                match cps.get(provider_ref).await {
-                    Ok(cp) => Ok(Some(cp)),
-                    Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
-                    Err(e) => Err(e),
-                }
-            },
-        )
+        let cp = retry_with_backoff(&RetryConfig::install(), "get InfraProvider", || async {
+            match cps.get(provider_ref).await {
+                Ok(cp) => Ok(Some(cp)),
+                Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
         .await
         .map_err(|e| {
-            Error::command_failed(format!("failed to read InfraProvider '{provider_ref}': {e}"))
+            Error::command_failed(format!(
+                "failed to read InfraProvider '{provider_ref}': {e}"
+            ))
         })?;
 
         ensure_capi_providers_for(
@@ -1282,11 +1277,15 @@ impl Installer {
             },
             ..Default::default()
         };
-        retry_with_backoff(&RetryConfig::install(), "apply lattice-admin SA", || async {
-            sa_api
-                .patch("lattice-admin", &apply_params, &Patch::Apply(&sa))
-                .await
-        })
+        retry_with_backoff(
+            &RetryConfig::install(),
+            "apply lattice-admin SA",
+            || async {
+                sa_api
+                    .patch("lattice-admin", &apply_params, &Patch::Apply(&sa))
+                    .await
+            },
+        )
         .await
         .map_err(|e| Error::command_failed(format!("failed to apply lattice-admin SA: {}", e)))?;
         info!("Applied lattice-admin ServiceAccount");
@@ -1362,10 +1361,7 @@ impl Installer {
         )
         .await
         .map_err(|e| {
-            Error::command_failed(format!(
-                "failed to apply lattice-admin-token Secret: {}",
-                e
-            ))
+            Error::command_failed(format!("failed to apply lattice-admin-token Secret: {}", e))
         })?;
         info!("Applied lattice-admin-token Secret");
 

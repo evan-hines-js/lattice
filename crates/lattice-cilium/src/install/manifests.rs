@@ -242,9 +242,18 @@ pub fn generate_default_deny() -> CiliumClusterwideNetworkPolicy {
                                 protocol: "TCP".to_string(),
                             },
                         ],
+                        // Floor allowance: only the kubernetes API service.
+                        // Every pod with a service account may need to reach
+                        // the API; other resolutions must come from the
+                        // workload's own per-workload CNP, which lists exact
+                        // names derived from the service graph. No wildcard
+                        // — denies DNS-tunneled C2 / exfil by default.
                         rules: Some(DnsRules {
                             dns: vec![DnsMatch {
-                                match_pattern: Some("*".to_string()),
+                                match_pattern: None,
+                                match_name: Some(
+                                    "kubernetes.default.svc.cluster.local".to_string(),
+                                ),
                             }],
                         }),
                     }],
@@ -513,6 +522,41 @@ mod tests {
         assert_eq!(expr.operator, "NotIn");
         assert!(expr.values.contains(&"kube-system".to_string()));
         assert!(p.spec.ingress.is_empty());
+    }
+
+    #[test]
+    fn default_deny_dns_floor_is_kubernetes_api_only() {
+        // The wildcard pattern was a DNS-tunneling hole: a popped pod with
+        // no per-workload CNP could resolve attacker-controlled FQDNs. The
+        // floor is now a single explicit name (kubernetes API service) —
+        // everything else must come from the per-workload CNP whose DNS
+        // allowlist is derived from the service graph.
+        let p = generate_default_deny();
+        let dns_rule = p
+            .spec
+            .egress
+            .iter()
+            .find(|e| {
+                e.to_ports
+                    .iter()
+                    .any(|pr| pr.ports.iter().any(|port| port.port == "53"))
+            })
+            .expect("default-deny must have a DNS egress rule");
+        let matches = dns_rule.to_ports[0]
+            .rules
+            .as_ref()
+            .expect("DNS rule must have proxy rules attached")
+            .dns
+            .clone();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].match_name.as_deref(),
+            Some("kubernetes.default.svc.cluster.local")
+        );
+        assert!(
+            matches[0].match_pattern.is_none(),
+            "fallback floor must not contain a wildcard pattern"
+        );
     }
 
     #[test]

@@ -21,11 +21,11 @@
 use async_trait::async_trait;
 
 use super::{
-    build_cert_sans, build_post_bootstrap_commands, build_template_manifest,
-    create_cluster_labels, generate_bootstrap_config_template_for_pool, generate_cluster,
-    generate_control_plane, generate_machine_deployment_for_pool, get_cluster_name,
-    pool_resource_suffix, validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig,
-    ControlPlaneConfig, InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
+    build_cert_sans, build_post_bootstrap_commands, build_template_manifest, create_cluster_labels,
+    generate_bootstrap_config_template_for_pool, generate_cluster, generate_control_plane,
+    generate_machine_deployment_for_pool, get_cluster_name, pool_resource_suffix,
+    validate_k8s_version, BootstrapInfo, CAPIManifest, ClusterConfig, ControlPlaneConfig,
+    InfrastructureRef, Provider, VipConfig, WorkerPoolConfig,
 };
 use crate::constants::{BASIS_API_VERSION, BASIS_VIP_INTERFACE, INFRASTRUCTURE_API_GROUP};
 use lattice_common::{Error, Result, BASIS_CREDENTIALS_SECRET, LOCAL_SECRETS_NAMESPACE};

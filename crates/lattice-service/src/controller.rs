@@ -244,6 +244,18 @@ impl ServiceKubeClient for ServiceKubeClientImpl {
             |es| &es.metadata.name,
         )?;
 
+        // cert-manager Certificates for TLS-terminating Services. Applied
+        // before the Deployment so cert-manager can race-create the Secret
+        // alongside the pod starting (and the wait_for path below would
+        // surface any genuine failure as the pod never going Ready).
+        let cert_ar = self.registry.resolve(CrdKind::Certificate).await?;
+        layer1.push_crd(
+            "Certificate",
+            cert_ar.as_ref(),
+            &compiled.workloads.certificates,
+            |c| &c.metadata.name,
+        )?;
+
         // LatticeMeshMember CR — the MeshMember controller generates all mesh policies
         let mm_ar = self.registry.resolve(CrdKind::MeshMember).await?;
         layer1.push_optional_crd(

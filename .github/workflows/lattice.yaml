@@ -1,243 +1,48 @@
-name: Build Lattice Operator
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+name: trivy
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - 'versions.toml'
-      - '.github/workflows/lattice.yaml'
-      - 'scripts/**'
+    branches: [ "main" ]
   pull_request:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Dockerfile'
-      - 'versions.toml'
-      - 'scripts/**'
+    # The branches below must be a subset of the branches above
+    branches: [ "main" ]
+  schedule:
+    - cron: '30 11 * * 1'
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: evan-hines-js/lattice
-  CARGO_INCREMENTAL: 0
+permissions:
+  contents: read
 
 jobs:
-  code-quality:
-    name: Code Quality Checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install gawk
-        run: sudo apt-get update && sudo apt-get install -y gawk
-
-      - name: Run error handling checks
-        run: ./scripts/dev/check-error-handling.sh
-
-      - name: Run security pattern checks
-        run: ./scripts/dev/check-security-patterns.sh
-
-      - name: Run async pattern checks
-        run: ./scripts/dev/check-async-patterns.sh
-
-  # Single Rust build — clippy, tests, and coverage share one compilation
-  check:
-    name: Lint, Test & Coverage
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y \
-            protobuf-compiler \
-            cmake \
-            libclang-dev \
-            golang
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-
-      - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-
-      - name: Run tests with coverage
-        run: |
-          cargo tarpaulin --workspace --lib --out xml --out html \
-            --exclude-files "*/tests/*" \
-            --exclude-files "*/benches/*" \
-            --exclude-files "build.rs" \
-            --fail-under 40
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-report
-          path: |
-            cobertura.xml
-            tarpaulin-report.html
-
-  trivy-fs:
-    name: Trivy Filesystem Scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Run Trivy vulnerability scanner (filesystem)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-fs-results.sarif'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        continue-on-error: true
-        with:
-          sarif_file: 'trivy-fs-results.sarif'
-
-  trivy-image:
-    name: Trivy Image Scan
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name != 'pull_request' && needs.build.outputs.image-ref != ''
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-    steps:
-      - name: Run Trivy vulnerability scanner (image)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ needs.build.outputs.image-ref }}'
-          format: 'sarif'
-          output: 'trivy-image-results.sarif'
-          severity: 'CRITICAL,HIGH'
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        continue-on-error: true
-        with:
-          sarif_file: 'trivy-image-results.sarif'
-
   build:
-    name: Build & Push
-    runs-on: ubuntu-latest
-    needs: check
     permissions:
-      contents: read
-      packages: write
-    outputs:
-      image-ref: ${{ steps.image-ref.outputs.ref }}
-
+      contents: read # for actions/checkout to fetch code
+      security-events: write # for github/codeql-action/upload-sarif to upload SARIF results
+      actions: read # only required for a private repository by github/codeql-action/upload-sarif to get the Action run status
+    name: Build
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Parse helm version
-        id: versions
+      - name: Build an image from Dockerfile
         run: |
-          HELM_VERSION=$(awk '/^\[tools\.helm\]/{found=1} found && /^version/{gsub(/[" ]/, "", $3); print $3; exit}' versions.toml)
-          echo "helm=$HELM_VERSION" >> $GITHUB_OUTPUT
+          docker build -t docker.io/my-organization/my-app:${{ github.sha }} .
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@7b7aa264d83dc58691451798b4d117d53d21edfe
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: 'docker.io/my-organization/my-app:${{ github.sha }}'
+          format: 'template'
+          template: '@/contrib/sarif.tpl'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=ref,event=tag
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Build and push (FIPS)
-        id: build-fips
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            FIPS=true
-            HELM_VERSION=${{ steps.versions.outputs.helm }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Output image reference for scanning
-        id: image-ref
-        if: github.event_name != 'pull_request'
-        run: |
-          echo "ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-fips.outputs.digest }}" >> $GITHUB_OUTPUT
-
-      - name: Build and push (non-FIPS, for testing)
-        if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-dev
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            FIPS=
-            HELM_VERSION=${{ steps.versions.outputs.helm }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          sarif_file: 'trivy-results.sarif'

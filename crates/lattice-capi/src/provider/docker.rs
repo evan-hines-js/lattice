@@ -277,11 +277,8 @@ impl Provider for DockerProvider {
             machine_template_kind: "DockerMachineTemplate",
         };
 
-        let (cp_template_name, cp_template_manifest) = Self::generate_docker_machine_template(
-            cluster,
-            &namespace,
-            &control_plane_name(name),
-        )?;
+        let (cp_template_name, cp_template_manifest) =
+            Self::generate_docker_machine_template(cluster, &namespace, &control_plane_name(name))?;
         let cp_config = ControlPlaneConfig {
             replicas: bootstrap.cp_replicas,
             cert_sans,

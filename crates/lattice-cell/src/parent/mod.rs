@@ -34,7 +34,7 @@ use crate::server::AgentServer;
 use lattice_common::DistributableResources;
 use lattice_common::{
     lattice_svc_dns, CA_CERT_KEY, CA_KEY_KEY, CA_SECRET, CA_TRUST_KEY, CELL_INTERNAL_SERVICE_NAME,
-    CELL_SERVICE_NAME,
+    CELL_SERVICE_NAME, TLS_CERT_KEY, TLS_KEY_KEY,
 };
 use lattice_core::LATTICE_SYSTEM_NAMESPACE;
 use lattice_crd::crd::{
@@ -403,6 +403,36 @@ fn load_ca_from_secret(secret: Secret) -> Result<CertificateAuthorityBundle, Cel
     Ok(bundle)
 }
 
+/// Materialize the data map for the `lattice-ca` Secret.
+///
+/// Stores the active CA cert+key under both Lattice's native key names
+/// (`ca.crt` / `ca.key`, consumed by lattice-cell, lattice-istio, …) and
+/// the cert-manager-required names (`tls.crt` / `tls.key`). Same PEM bytes,
+/// two pairs of key names — keeps the operator's own consumers and
+/// cert-manager's CA ClusterIssuer happy off a single Secret. The optional
+/// trust bundle (multi-CA rotation) lands in `ca-trust.crt`.
+fn ca_secret_data(
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+    trust_bundle_pem: Option<&str>,
+) -> BTreeMap<String, ByteString> {
+    let cert = ByteString(ca_cert_pem.as_bytes().to_vec());
+    let key = ByteString(ca_key_pem.as_bytes().to_vec());
+    let mut data = BTreeMap::from([
+        (CA_CERT_KEY.to_string(), cert.clone()),
+        (CA_KEY_KEY.to_string(), key.clone()),
+        (TLS_CERT_KEY.to_string(), cert),
+        (TLS_KEY_KEY.to_string(), key),
+    ]);
+    if let Some(bundle) = trust_bundle_pem {
+        data.insert(
+            CA_TRUST_KEY.to_string(),
+            ByteString(bundle.as_bytes().to_vec()),
+        );
+    }
+    data
+}
+
 /// Create a new CA and persist it to the `lattice-ca` Secret.
 ///
 /// Only called on the bootstrap cluster during initial install. All other
@@ -432,16 +462,7 @@ pub async fn create_ca(client: &Client) -> Result<CertificateAuthorityBundle, Ce
             ..Default::default()
         },
         type_: Some("Opaque".to_string()),
-        data: Some(BTreeMap::from([
-            (
-                CA_CERT_KEY.to_string(),
-                ByteString(ca.ca_cert_pem().as_bytes().to_vec()),
-            ),
-            (
-                CA_KEY_KEY.to_string(),
-                ByteString(ca.ca_key_pem().as_bytes().to_vec()),
-            ),
-        ])),
+        data: Some(ca_secret_data(ca.ca_cert_pem(), ca.ca_key_pem(), None)),
         ..Default::default()
     };
 
@@ -516,25 +537,14 @@ async fn persist_ca_bundle(
 
     let active = bundle.active();
 
-    // Build data map
-    let mut data = BTreeMap::new();
-    data.insert(
-        CA_CERT_KEY.to_string(),
-        ByteString(active.ca_cert_pem().as_bytes().to_vec()),
+    // Trust bundle is only emitted when more than one CA is in rotation
+    // (the active CA plus retiring predecessors).
+    let trust_bundle = (bundle.len() > 1).then(|| bundle.trust_bundle_pem());
+    let data = ca_secret_data(
+        active.ca_cert_pem(),
+        active.ca_key_pem(),
+        trust_bundle.as_deref(),
     );
-    data.insert(
-        CA_KEY_KEY.to_string(),
-        ByteString(active.ca_key_pem().as_bytes().to_vec()),
-    );
-
-    // If there are additional CAs in the bundle, store them in trust bundle
-    if bundle.len() > 1 {
-        // The trust bundle contains all CA certs for verification
-        data.insert(
-            CA_TRUST_KEY.to_string(),
-            ByteString(bundle.trust_bundle_pem().as_bytes().to_vec()),
-        );
-    }
 
     let secret = Secret {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {

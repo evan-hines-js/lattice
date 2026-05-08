@@ -26,8 +26,9 @@ use lattice_core::{
     DEFAULT_BOOTSTRAP_PORT, DEFAULT_GRPC_PORT, DEFAULT_PROXY_PORT, LATTICE_SYSTEM_NAMESPACE,
 };
 use lattice_crd::crd::{
-    CedarPolicy, CedarPolicySpec, EgressRule, EgressTarget, LatticeMeshMember,
-    LatticeMeshMemberSpec, MeshMemberPort, MeshMemberTarget, PeerAuth, ServiceRef,
+    CaIssuerSpec, CedarPolicy, CedarPolicySpec, CertIssuer, CertIssuerSpec, EgressRule,
+    EgressTarget, IssuerType, LatticeMeshMember, LatticeMeshMemberSpec, MeshMemberPort,
+    MeshMemberTarget, PeerAuth, SecretRef, ServiceRef, PLATFORM_CA_ISSUER_NAME,
 };
 
 /// Assemble every manifest this crate is responsible for.
@@ -50,7 +51,39 @@ pub fn bootstrap_manifests(skip_service_mesh: bool) -> Result<Vec<String>, serde
     manifests.push(serde_json::to_string_pretty(
         &generate_cluster_access_cedar_policy(),
     )?);
+    manifests.push(serde_json::to_string_pretty(
+        &generate_platform_ca_cert_issuer(),
+    )?);
     Ok(manifests)
+}
+
+/// CertIssuer wrapping the operator-managed `lattice-ca` Secret as the
+/// cluster-wide platform trust root.
+///
+/// Every Lattice cluster ships with this CertIssuer so workloads can
+/// reference it via `service.tls.issuerRef: { name: lattice-ca }` (or rely
+/// on `tls: {}` which defaults to it). Backed by `CaIssuerSpec::SecretRef`,
+/// pointing directly at the in-cluster Secret managed by the istio install
+/// flow — no ESO indirection, no per-cluster configuration. Users who want
+/// a different chain create an additional CertIssuer; this one always
+/// exists.
+pub fn generate_platform_ca_cert_issuer() -> CertIssuer {
+    let mut issuer = CertIssuer::new(
+        PLATFORM_CA_ISSUER_NAME,
+        CertIssuerSpec {
+            type_: IssuerType::Ca,
+            acme: None,
+            ca: Some(CaIssuerSpec::SecretRef {
+                secret_ref: SecretRef {
+                    name: lattice_common::CA_SECRET.to_string(),
+                    namespace: LATTICE_SYSTEM_NAMESPACE.to_string(),
+                },
+            }),
+            vault: None,
+        },
+    );
+    issuer.metadata.namespace = Some(LATTICE_SYSTEM_NAMESPACE.to_string());
+    issuer
 }
 
 /// Read remote network names from LatticeClusterRoutes CRDs.
@@ -230,8 +263,8 @@ mod tests {
     #[test]
     fn bootstrap_manifests_mesh_includes_expected_items() {
         let m = bootstrap_manifests(false).expect("mesh path");
-        // Gateway API CRDs (many) + ambient namespace + operator LMM + Cedar policy.
-        assert!(m.len() > 3);
+        // Gateway API CRDs (many) + ambient namespace + operator LMM + Cedar policy + lattice-ca CertIssuer.
+        assert!(m.len() > 4);
         assert!(m.iter().any(|d| d.contains("CustomResourceDefinition")));
         assert!(m
             .iter()
@@ -244,6 +277,28 @@ mod tests {
                 .any(|d| d.contains("CedarPolicy")
                     && d.contains("\"name\": \"proxy-cluster-access\""))
         );
+        assert!(m
+            .iter()
+            .any(|d| d.contains("CertIssuer") && d.contains("\"name\": \"lattice-ca\"")));
+    }
+
+    #[test]
+    fn platform_ca_cert_issuer_references_lattice_ca_secret() {
+        let issuer = generate_platform_ca_cert_issuer();
+        assert_eq!(issuer.metadata.name.as_deref(), Some("lattice-ca"));
+        assert_eq!(
+            issuer.metadata.namespace.as_deref(),
+            Some(LATTICE_SYSTEM_NAMESPACE)
+        );
+        assert!(issuer.spec.validate().is_ok());
+
+        match issuer.spec.ca.as_ref().expect("ca block") {
+            CaIssuerSpec::SecretRef { secret_ref } => {
+                assert_eq!(secret_ref.name, lattice_common::CA_SECRET);
+                assert_eq!(secret_ref.namespace, LATTICE_SYSTEM_NAMESPACE);
+            }
+            _ => panic!("platform CA issuer must use SecretRef, not External"),
+        }
     }
 
     #[test]

@@ -19,9 +19,9 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
 use lattice_cedar::PolicyEngine;
 use lattice_crd::crd::{
-    CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, IngressTls, LatticeService,
+    CertIssuerRef, ContainerSpec, DependencyDirection, IngressSpec, LatticeService,
     LatticeServiceSpec, MonitoringConfig, PortSpec, ProviderType, ResourceParams, ResourceSpec,
-    ResourceType, RouteKind, RouteSpec, SecretParams, ServicePortsSpec, WorkloadSpec,
+    ResourceType, RouteKind, RouteSpec, SecretParams, ServicePortsSpec, TlsSpec, WorkloadSpec,
 };
 use lattice_graph::ServiceGraph;
 use lattice_service::compiler::ServiceCompiler;
@@ -145,7 +145,7 @@ fn ingress_spec() -> LatticeServiceSpec {
                 port: None,
                 listen_port: None,
                 rules: None,
-                tls: Some(IngressTls {
+                tls: Some(TlsSpec {
                     secret_name: None,
                     issuer_ref: Some(CertIssuerRef {
                         name: "letsencrypt-prod".to_string(),
@@ -187,7 +187,7 @@ fn full_spec(num_deps: usize, num_callers: usize, num_secrets: usize) -> Lattice
                 port: None,
                 listen_port: None,
                 rules: None,
-                tls: Some(IngressTls {
+                tls: Some(TlsSpec {
                     secret_name: None,
                     issuer_ref: Some(CertIssuerRef {
                         name: "letsencrypt-prod".to_string(),

@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 
 use lattice_common::kube_utils::OwnerReference;
 use lattice_common::mesh;
+use lattice_common::network::cert_manager::{compile_certificate, Certificate};
 use lattice_common::network::gateway_api::{
-    AllowedRoutes, Certificate, CertificateRef, Gateway, GatewayListener, GatewaySpec,
-    GatewayTlsConfig, IssuerRef,
+    AllowedRoutes, CertificateRef, Gateway, GatewayListener, GatewaySpec, GatewayTlsConfig,
 };
 use lattice_common::{LABEL_MANAGED_BY, LABEL_MANAGED_BY_LATTICE, LABEL_NAME};
 use lattice_crd::crd::{LatticeModel, ModelIngressSpec, ModelRoutingSpec};
@@ -296,12 +296,12 @@ fn compile_ingress_gateway(
         .map(|(i, host)| {
             let listener_name = format!("{}-https-{}", model_name, i);
             let tls_config = ingress.tls.as_ref().map(|tls| {
-                let cert_ref_name = if tls.is_auto() {
-                    secret_name.clone()
-                } else if let Some(ref sn) = tls.secret_name {
-                    sn.clone()
-                } else {
-                    secret_name.clone()
+                // Manual mode: caller-supplied secret. Auto mode (explicit
+                // issuerRef or empty `tls: {}` falling back to the platform
+                // default): the cert-manager-managed `{model}-tls` Secret.
+                let cert_ref_name = match &tls.secret_name {
+                    Some(sn) => sn.clone(),
+                    None => secret_name.clone(),
                 };
                 GatewayTlsConfig {
                     mode: "Terminate".to_string(),
@@ -341,26 +341,15 @@ fn compile_ingress_gateway(
     let certificate = ingress
         .tls
         .as_ref()
-        .and_then(|tls| tls.issuer_ref.as_ref())
-        .map(|issuer_ref| Certificate {
-            api_version: "cert-manager.io/v1".to_string(),
-            kind: "Certificate".to_string(),
-            metadata: lattice_common::kube_utils::ObjectMeta::new(
-                format!("{}-cert", model_name),
+        .and_then(|tls| tls.effective_issuer_ref())
+        .and_then(|issuer| {
+            compile_certificate(
+                &format!("{model_name}-cert"),
                 namespace,
-            ),
-            spec: lattice_common::network::gateway_api::CertificateSpec {
-                secret_name: secret_name.clone(),
-                dns_names: ingress.hosts.clone(),
-                issuer_ref: IssuerRef {
-                    name: issuer_ref.name.clone(),
-                    kind: issuer_ref
-                        .kind
-                        .clone()
-                        .unwrap_or_else(|| "ClusterIssuer".to_string()),
-                    group: Some("cert-manager.io".to_string()),
-                },
-            },
+                &secret_name,
+                &ingress.hosts,
+                &issuer,
+            )
         });
 
     (gateway, certificate)
@@ -380,7 +369,7 @@ pub(crate) fn owner_reference(name: &str, uid: &str) -> OwnerReference {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_crd::crd::workload::ingress::{CertIssuerRef, IngressTls};
+    use lattice_crd::crd::workload::tls::{CertIssuerRef, TlsSpec};
     use lattice_crd::crd::{
         HeaderMatchValue, InferenceEngine, KvConnector, KvConnectorType, LatticeModelSpec,
         ModelIngressSpec, ModelMatch, ModelParentRef, ModelRoleSpec, ModelRouteRule,
@@ -872,7 +861,7 @@ mod tests {
     fn basic_ingress() -> ModelIngressSpec {
         ModelIngressSpec {
             hosts: vec!["llama-70b.us-east.lattice.gpu".to_string()],
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: None,
                 issuer_ref: Some(CertIssuerRef {
                     name: "letsencrypt-prod".to_string(),
@@ -942,7 +931,7 @@ mod tests {
         let routing = basic_routing();
         let ingress = ModelIngressSpec {
             hosts: vec!["llama.lattice.gpu".to_string()],
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: Some("my-tls-secret".to_string()),
                 issuer_ref: None,
             }),
@@ -1039,7 +1028,7 @@ mod tests {
                 "b.lattice.gpu".to_string(),
                 "c.lattice.gpu".to_string(),
             ],
-            tls: Some(IngressTls {
+            tls: Some(TlsSpec {
                 secret_name: None,
                 issuer_ref: Some(CertIssuerRef {
                     name: "letsencrypt".to_string(),

@@ -1,10 +1,8 @@
-//! Network type definitions for Gateway API and certificates
+//! Network type definitions for Gateway API and certificates.
 //!
-//! Types for generating:
-//! - Gateway API resources (Gateway, HTTPRoute, GRPCRoute, TCPRoute)
-//! - cert-manager Certificate resources
-//!
-//! All types implement the `HasApiResource` trait for consistent
-//! API version and kind handling.
+//! - [`gateway_api`] — Gateway API resources (Gateway, HTTPRoute, GRPCRoute, TCPRoute)
+//! - [`cert_manager`] — cert-manager.io Certificate / IssuerRef + the
+//!   `CertificateRequest` builder used by every TLS-emitting compiler
 
+pub mod cert_manager;
 pub mod gateway_api;

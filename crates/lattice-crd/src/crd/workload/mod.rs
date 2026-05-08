@@ -13,4 +13,5 @@ pub mod ports;
 pub mod resources;
 pub mod scaling;
 pub mod spec;
+pub mod tls;
 pub mod topology;

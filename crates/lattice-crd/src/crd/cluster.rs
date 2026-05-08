@@ -165,10 +165,18 @@ impl LatticeClusterSpec {
             pc.validate()?;
         }
 
-        // Validate issuer references
+        // Validate issuer references. The platform CertIssuer key is
+        // reserved — the operator publishes `lattice-ca` unconditionally
+        // via this key, so user entries can't shadow it.
         for (key, cert_issuer_ref) in &self.issuers {
             lattice_core::validate_dns_label(key, "issuer key")
                 .map_err(crate::ValidationError::new)?;
+            if key == crate::crd::PLATFORM_CA_ISSUER_KEY {
+                return Err(crate::ValidationError::new(format!(
+                    "issuers['{key}'] is reserved for the platform CertIssuer; \
+                     pick a different key for your custom issuer"
+                )));
+            }
             if cert_issuer_ref.is_empty() {
                 return Err(crate::ValidationError::new(format!(
                     "issuers['{key}']: CertIssuer reference cannot be empty"
@@ -1046,5 +1054,34 @@ latticeImage: "ghcr.io/evan-hines-js/lattice:v1.0.0"
         // Server-managed fields should be stripped
         assert!(exported.metadata.uid.is_none());
         assert!(exported.metadata.resource_version.is_none());
+    }
+
+    #[test]
+    fn issuers_reserved_platform_key_is_rejected() {
+        let mut spec = LatticeClusterSpec {
+            provider_ref: "test-provider".to_string(),
+            provider: sample_provider_spec(),
+            nodes: sample_node_spec(),
+            parent_config: None,
+            services: true,
+            gpu: false,
+            monitoring: MonitoringConfig::default(),
+            backups: BackupsConfig::default(),
+            storage: false,
+            network_topology: None,
+            registry_mirrors: None,
+            issuers: std::collections::BTreeMap::new(),
+            lattice_image: "ghcr.io/evan-hines-js/lattice:latest".to_string(),
+            cascade_upgrade: false,
+        };
+        spec.issuers.insert(
+            crate::crd::PLATFORM_CA_ISSUER_KEY.to_string(),
+            "my-other-ca".to_string(),
+        );
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("reserved for the platform CertIssuer"),
+            "got: {err}"
+        );
     }
 }
