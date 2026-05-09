@@ -10,13 +10,15 @@
 # =============================================================================
 
 ARG HELM_VERSION=4.1.1
+ARG COSIGN_VERSION=2.4.3
 
 # -----------------------------------------------------------------------------
-# Stage 1: build helm from source
+# Stage 1: build helm from source, fetch cosign
 # -----------------------------------------------------------------------------
 FROM golang:1.25-bookworm AS go-builder
 
 ARG HELM_VERSION
+ARG COSIGN_VERSION
 ENV CGO_ENABLED=0
 
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -25,6 +27,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     cd /build/helm && \
     make build && \
     cp bin/helm /usr/local/bin/helm
+
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/cosign \
+        "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-${ARCH}" && \
+    chmod +x /usr/local/bin/cosign && \
+    /usr/local/bin/cosign version
 
 # -----------------------------------------------------------------------------
 # Stage 2: build lattice-operator
@@ -43,6 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     gcc \
     git \
+    curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -73,6 +82,7 @@ FROM gcr.io/distroless/cc-debian12:nonroot
 
 COPY --from=rust-builder /usr/local/bin/lattice-operator /usr/local/bin/lattice-operator
 COPY --from=go-builder /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=go-builder /usr/local/bin/cosign /usr/local/bin/cosign
 COPY --from=rust-builder /app/test-providers /providers
 
 ENV PROVIDERS_DIR=/providers

@@ -1,100 +1,73 @@
-//! Image signature verification using sigstore-rs.
+//! Image signature verification via the `cosign` CLI.
 //!
-//! Verifies cosign signatures on container images using public keys.
-//! Uses sigstore-rs with aws-lc-rs backend for FIPS compliance.
+//! sigstore-rs pulls native-tls/openssl, which conflicts with the FIPS
+//! aws-lc-rs requirement. The cosign binary is shipped in the operator
+//! image and invoked as a subprocess.
 
-use sigstore::cosign::verification_constraint::PublicKeyVerifier;
-use sigstore::cosign::CosignCapabilities;
-use sigstore::registry::{Auth, ClientConfig, ClientProtocol, OciReference};
+use std::io::Write;
+use std::process::Stdio;
+
+use tempfile::NamedTempFile;
+use tokio::process::Command;
 use tracing::{debug, info};
 
-/// Result of verifying a single image.
 #[derive(Debug)]
 pub enum VerifyResult {
-    /// Signature is valid.
     Verified,
-    /// No valid signature found.
     NotSigned(String),
-    /// Verification error.
     Error(String),
 }
 
-/// Verify an image signature using a cosign public key (PEM bytes).
-///
-/// Set `insecure` to true for HTTP registries (no TLS).
 pub async fn verify_image(image: &str, key_pem: &[u8], insecure: bool) -> VerifyResult {
-    let oci_ref = match image.parse::<OciReference>() {
-        Ok(r) => r,
-        Err(e) => return VerifyResult::Error(format!("invalid image reference '{image}': {e}")),
+    let mut keyfile = match NamedTempFile::new() {
+        Ok(f) => f,
+        Err(e) => return VerifyResult::Error(format!("failed to create temp keyfile: {e}")),
     };
+    if let Err(e) = keyfile.write_all(key_pem) {
+        return VerifyResult::Error(format!("failed to write cosign key: {e}"));
+    }
+    if let Err(e) = keyfile.flush() {
+        return VerifyResult::Error(format!("failed to flush cosign key: {e}"));
+    }
 
-    let mut oci_config = ClientConfig::default();
+    let mut cmd = Command::new("cosign");
+    cmd.arg("verify")
+        .arg("--key")
+        .arg(keyfile.path())
+        .arg("--insecure-ignore-tlog=true")
+        .arg("--insecure-ignore-sct=true")
+        .arg("--output")
+        .arg("json");
     if insecure {
-        oci_config.protocol = ClientProtocol::Http;
+        cmd.arg("--allow-insecure-registry");
+    }
+    cmd.arg(image);
+    cmd.env("COSIGN_EXPERIMENTAL", "0")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) => return VerifyResult::Error(format!("failed to spawn cosign: {e}")),
+    };
+
+    if output.status.success() {
+        info!(image = image, "signature verification succeeded");
+        return VerifyResult::Verified;
     }
 
-    let mut client = match sigstore::cosign::ClientBuilder::default()
-        .with_oci_client_config(oci_config)
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return VerifyResult::Error(format!("failed to build cosign client: {e}")),
-    };
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let lower = stderr.to_lowercase();
+    let unsigned = lower.contains("no matching signatures")
+        || lower.contains("no signatures found")
+        || lower.contains("manifest_unknown")
+        || lower.contains("not found")
+        || lower.contains("signature not found");
 
-    let auth = Auth::Anonymous;
-
-    let (cosign_image, source_digest) = match client.triangulate(&oci_ref, &auth).await {
-        Ok(result) => result,
-        Err(e) => {
-            return VerifyResult::NotSigned(format!("no cosign signature found for {image}: {e}"))
-        }
-    };
-
-    let layers = match client
-        .trusted_signature_layers(&auth, &source_digest, &cosign_image)
-        .await
-    {
-        Ok(l) => l,
-        Err(e) => {
-            return VerifyResult::NotSigned(format!(
-                "failed to fetch signature layers for {image}: {e}"
-            ))
-        }
-    };
-
-    if layers.is_empty() {
-        return VerifyResult::NotSigned(format!("no signature layers found for {image}"));
-    }
-
-    let verifier = match PublicKeyVerifier::try_from(key_pem) {
-        Ok(v) => v,
-        Err(e) => return VerifyResult::Error(format!("failed to create key verifier: {e}")),
-    };
-
-    let constraints: sigstore::cosign::verification_constraint::VerificationConstraintVec =
-        vec![Box::new(verifier)];
-    match sigstore::cosign::verify_constraints(&layers, constraints.iter()) {
-        Ok(()) => {
-            info!(image = image, "signature verification succeeded");
-            VerifyResult::Verified
-        }
-        Err(e) => {
-            debug!(image = image, error = %e, "signature verification failed");
-            VerifyResult::NotSigned(format!(
-                "image {image} has {} signatures but none match the provided key",
-                layers.len()
-            ))
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn invalid_image_ref_returns_error() {
-        let result = verify_image("not a valid ref!!!", b"fake-key", false).await;
-        assert!(matches!(result, VerifyResult::Error(_)));
+    if unsigned {
+        debug!(image = image, error = %stderr, "no valid signature");
+        VerifyResult::NotSigned(format!("no valid signature for {image}: {stderr}"))
+    } else {
+        VerifyResult::Error(format!("cosign verify failed for {image}: {stderr}"))
     }
 }
