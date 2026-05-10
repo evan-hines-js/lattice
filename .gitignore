@@ -6,6 +6,10 @@ tarpaulin-report.html
 .env
 .regcred.json
 /test-charts
-/test-providers
+# Ignore everything under /test-providers except basis — basis is a
+# private/internal CAPI provider with no upstream release URL, so its
+# rendered components are vendored here for CI.
+/test-providers/*
+!/test-providers/infrastructure-basis
 /endurance-logs
 .*.credentials

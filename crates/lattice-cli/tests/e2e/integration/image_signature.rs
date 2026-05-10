@@ -128,14 +128,13 @@ async fn setup_cosign_infrastructure(kubeconfig: &str) -> Result<TestContext, St
 
     // Sign the image.
     //
-    // sigstore-rs 0.13 (the operator's verifier) only knows how to find
-    // signatures via the legacy `sha256-<digest>.sig` tag. Cosign 3.x defaults
-    // to `--new-bundle-format=true`, which instead writes an OCI 1.1 referrer
-    // artifact at the bare `sha256-<digest>` tag and never produces a `.sig`
-    // tag — sigstore-rs cannot read that. `--registry-referrers-mode=legacy`
-    // is *not* the right knob (it only affects how cosign fetches references
-    // during verify, not how `sign` pushes). The combination below is what
-    // actually forces cosign to push the legacy `.sig` artifact:
+    // The operator verifies via the `cosign verify` subprocess, which accepts
+    // both legacy `.sig` tag artifacts and the new OCI 1.1 referrer bundle
+    // format. We pin the legacy `.sig` path here so the fixture is stable
+    // against future cosign default changes and to keep the local-registry
+    // layout obvious when debugging. `--tlog-upload=false` is mandatory:
+    // we run no Rekor instance and the verify side passes
+    // `--insecure-ignore-tlog=true`.
     //   --new-bundle-format=false   write the simple-signing layer, not a bundle
     //   --use-signing-config=false  required when new-bundle-format is false
     //   --tlog-upload=false         no Rekor (we have no transparency log)
